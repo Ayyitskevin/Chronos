@@ -19,8 +19,9 @@ page; nothing here runs the migration.
 **What the command never does:** it never generates, reads or prints the persistence key;
 never starts the service; never initializes the fresh database; never opens the old store for
 writing (its writer exclusion is a kernel read lease on a read-only descriptor); never deletes
-anything; never calls the broker; has no `--force`. Every refusal is a typed `code` in its JSON
-and exit `2`; `--apply` writes nothing before every check has passed.
+anything — the four sentinel directories it leaves at the live names included: your `rmdir`
+vacates them (step 7); never calls the broker; has no `--force`. Every refusal is a typed
+`code` in its JSON and exit `2`; `--apply` writes nothing before every check has passed.
 
 ## Before you start
 
@@ -87,25 +88,48 @@ and exit `2`; `--apply` writes nothing before every check has passed.
    (including the empty bookkeeping the command's own read-only connection left), `<stamp>`
    being the envelope's own `chronos-<stamp>` — the moved-aside files are bound by name to their
    archive. `exclusion` is the proof that the admitted set stayed quiet through the move: every
-   lease whole after the last rename and the admitted `-wal` still within its 32-byte header.
-   `left_in_place` lists any sidecar that appeared after admission and was therefore never
-   renamed; expect `[]`. If it is not `[]`, **stop here**: do not go on to step 7 until you
-   understand the named file and have moved it out of the way by hand — a sidecar that appeared
-   while every process was supposedly stopped means something was not.
+   lease whole after the last rename and the admitted `-wal` still within its 32-byte header,
+   and `live_names_sealed` — see the next paragraph.
+   **The four live names are now sentinel directories.** Each rename was one `renameat2`
+   EXCHANGE of the admitted file with a 0500 empty directory the command made and holds, so
+   `data/chronos.db`, `-wal`, `-shm` and `-journal` were never vacant for an instant and are
+   now directories (`sentinels` lists each with its device:inode; the names a WAL store has no
+   file for, `-journal` above all, got theirs by a plain `mkdir`). Until **your own `rmdir`** in
+   step 7 nothing can put a store the gate never saw at those names: the backend, `db-preflight`
+   and every Chronos writer refuse a directory (`Refusing non-regular SQLite path`) and create
+   nothing, a `sqlite3` shell gets `unable to open database file`, a `mv` over a directory gets
+   `Is a directory`. The command's process may exit; the sentinels stay. What `ls -la data/`
+   must show now: the four sentinel directories (`dr-x------`), the three `.archived-<stamp>`
+   files, and the siblings that were there before (`keys/`, the audit pair, locks, logs).
+   Anything else — a file at a live name, a missing sentinel — **stop here** and find out what
+   wrote under a stopped service before anything starts; only the store owner's uid can remove
+   a sentinel.
    - `"verdict": "ARCHIVE_NOT_VERIFIED"` (exit 2): the drill did not verify; **nothing moved**,
      the live store is untouched, and the JSON names the envelope and the restore copy that now
      exist. Read `drill.failures` against the drill runbook's table; do not retry blindly.
    - `code: TARGET_EXISTS` (exit 2): a moved-aside name already exists; nothing moved; move that
      entry out of the way by hand and re-run (the next run makes a new envelope and stamp).
-   - `"verdict": "MOVE_INCOMPLETE"` (exit 2): a rename failed after an earlier one succeeded, or
-     the admitted set was not quiet after the last rename (`WRITER_OPEN`, `WAL_FRAMES_PRESENT`);
-     `moved_aside` and `not_moved` list exactly which. Rename the moved ones back by name
-     (Rollback, below) before anything starts, then investigate.
-   - `code: SOURCE_SWAPPED` with `foreign_renamed` (exit 2): at the instant of a rename the name
-     held a foreign entry, not the file the gate admitted; the command renamed that entry back
-     (`restored_to`) and did not move the admitted file, whose name is in `not_moved` and whose
-     device:inode the message gives. Nothing of yours was deleted. Something swapped files under
-     a stopped service: find out what before anything starts.
+   - `code: LIVE_NAME_OCCUPIED` (exit 2): a live name the gate did not admit — a `-wal`/`-shm`
+     that appeared after admission, a `-journal` (also refused at the gate, before any envelope)
+     — holds an entry, so its sentinel could not take it: **nothing moved**, no sentinel was
+     made. A sidecar that appeared while every process was supposedly stopped means something
+     was not: find out what, move the entry out of the way by hand (it is not this run's), and
+     re-run. After the renames the same code means a live name no longer held this run's
+     sentinel at the final proof (vacated and refilled — only your uid can): `moved_aside` is
+     exact, nothing was deleted; investigate, then Rollback or step 7 by hand, knowingly.
+   - `"verdict": "MOVE_INCOMPLETE"` (exit 2): an exchange failed after an earlier one succeeded,
+     or the admitted set was not quiet after the last rename (`WRITER_OPEN`,
+     `WAL_FRAMES_PRESENT`); `moved_aside` and `not_moved` list exactly which. Rollback (below)
+     before anything starts, then investigate.
+   - `code: SOURCE_SWAPPED` with `foreign_renamed` (exit 2): at the instant of an exchange the
+     live name held a foreign entry, not the file the gate admitted; the command exchanged it
+     back (`restored_to`) and did not move the admitted file, whose name is in `not_moved` and
+     whose device:inode the message gives. (`LIVE_NAME_OCCUPIED` with `foreign_renamed`: a
+     foreign directory had been renamed over the sentinel at the archive name in that instant;
+     reversed the same way.) Nothing of yours was deleted; the sentinels the run made are listed
+     in `sentinels` with where each is now (one exchanged back sits at its `.archived-<stamp>`
+     name — `rmdir` it before you re-run). Something swapped entries under a stopped service:
+     find out what before anything starts.
    - `code: WRITER_OPEN` after the gate (exit 2): a process opened the store (or a sidecar) for
      writing while the command ran; nothing moved. Step 1 again — then re-run.
 
@@ -155,11 +179,19 @@ and exit `2`; `--apply` writes nothing before every check has passed.
    key never exists on a fleet host; the host identity can also open this artifact, as it can
    every backup — that is what made the on-host decrypt-and-compare possible.
 
-7. **Start the backend.** With `data/chronos.db` absent, the backend's startup creates a fresh
-   database at the running schema (18) — `python -m chronos.cli db-preflight` first, then
-   `systemctl --user start chronos-backend` — and refuses to start without a well-formed
-   `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active chronos-backend` →
-   `active`; `curl -fsS http://127.0.0.1:<port>/health`.
+7. **Vacate the live names yourself, then start the backend.** `ls -la data/` once more (step
+   3's listing: four sentinel directories, three `.archived-<stamp>` files, the old siblings).
+   Then, in ONE line — until it runs, every writer refuses with `Refusing non-regular SQLite
+   path` and makes no file; once `chronos.db`'s sentinel is gone a refused writer would already
+   create an empty file there, which is why the four go together:
+   ```bash
+   rmdir data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal
+   ```
+   Your hand, never the command's: it removes nothing. With the four names absent, the backend's
+   startup creates a fresh database at the running schema (18) — `python -m chronos.cli
+   db-preflight` first, then `systemctl --user start chronos-backend` — and refuses to start
+   without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
+   chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
 8. **Bind.** The first bound run writes the `database_scope` row with the KEYED fingerprint;
    confirm the scope line of `python -m chronos.cli b1-preflight` (or the operator CLI you use
@@ -181,11 +213,16 @@ and exit `2`; `--apply` writes nothing before every check has passed.
 ## Rollback
 
 - **Before any new row exists in the keyed store** (nothing started, or started and stopped
-  without binding): stop the service; rename the moved-aside files back by name —
+  without binding): stop the service; remove the sentinel directories first — `rmdir
+  data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal` (and any
+  sentinel the report's `sentinels` lists at an `.archived-<stamp>` name after a refusal); if
+  the backend already ran, the fresh keyed `chronos.db` sits at the live name instead and you
+  are in the next bullet; then rename the moved-aside files back by name —
   `mv -n data/chronos.db.archived-<stamp> data/chronos.db` and the same for the `-wal`/`-shm`
   siblings that were moved — check out the pre-cutover code (`git checkout <pre-cutover sha>`,
   the sha you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by
-  design); start. `mv -n` refuses if the live name exists; never force it.
+  design); start. `mv -n` refuses if the live name exists (a sentinel still there says so with
+  `Is a directory`); never force it.
 - **After new rows exist in the keyed store:** going back drops them. Decide that explicitly;
   the archive and the moved-aside files restore the pre-cutover state at any time, with the
   pre-cutover code.
@@ -219,5 +256,6 @@ and exit `2`; `--apply` writes nothing before every check has passed.
 | `POSITION_OBSERVED` / `PROVENANCE_MISSING` | the latest run recorded a broker position (the message breaks it down by origin class) | flatten at the broker, reconcile, re-run |
 | `DRILL_REFUSED` | the drill refused before verifying (an envelope name collision, a rename error) | the drill runbook's `refused:` row; nothing moved |
 | `TARGET_EXISTS` / `SOURCE_SWAPPED` / `MOVE_FAILED` | the move-aside could not start, or the source changed under the command | step 3's bullets |
+| `LIVE_NAME_OCCUPIED` | a live name of the store's namespace (`-wal`/`-shm` not admitted by the gate, `-journal`) holds an entry, so no sentinel can take it; or, after the renames, a live name no longer holds this run's sentinel | step 3's bullet: nothing moved in the first case; find what wrote it, move it by hand, re-run |
 | `WRITER_OPEN` | a process holds the store (or, at the move, a sidecar) open for writing, or opened it for writing while the command ran — the kernel read lease was refused or broken | step 1; a stopped backend that still holds the store counts; then re-run |
 | `WRITER_EXCLUSION_UNAVAILABLE` | the kernel would not grant the read lease (not the file's owner, or a filesystem without leases) | run as the user that owns `data/chronos.db`, on a local filesystem |

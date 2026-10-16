@@ -178,7 +178,10 @@ DB_NAME = "chronos.db"
 #: crash temp is recognised; a leading dot alone means nothing.
 TEMP_ENVELOPE_RE = re.compile(r"^\.chronos-\d{8}T\d{6}Z\.[0-9a-f]{16}\.tmp$")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+#: renameat2(2) flags: publish only where nothing is (NOREPLACE), or swap two names in one
+#: syscall (EXCHANGE — the cutover's move, so a live name is never vacant)
 _RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
 
 
 class DrillRefused(RuntimeError):

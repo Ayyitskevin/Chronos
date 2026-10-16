@@ -104,14 +104,6 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R3_P1_1 = (
-    "r3 P1-1: at 4890e25 the live names are vacant after the final rename — no sentinel "
-    "directory, no live-name proof, a planted store yields ARCHIVED"
-)
-_R3_P1_1_OCCUPIED = (
-    "r3 P1-1: at 4890e25 a non-admitted frame-free sidecar is left_in_place and a -journal is "
-    "ignored: the move proceeds"
-)
 _R3_P1_2 = (
     "r3 P1-2: at 4890e25 BoundSource._admit_archive is a callable mint and the drill has no "
     "archive entry that runs the gate itself"
@@ -120,8 +112,6 @@ _R3_P1_3 = (
     "r3 P1-3: at 4890e25 the post-create failure path unlinks by name after an identity check — "
     "a swap in between deletes the foreign entry"
 )
-RED_P1_1 = pytest.mark.xfail(strict=True, reason=_R3_P1_1)
-RED_P1_1_OCCUPIED = pytest.mark.xfail(strict=True, reason=_R3_P1_1_OCCUPIED)
 RED_P1_2 = pytest.mark.xfail(strict=True, reason=_R3_P1_2)
 RED_P1_3 = pytest.mark.xfail(strict=True, reason=_R3_P1_3)
 
@@ -734,7 +724,6 @@ class _NoSocket:
         raise AssertionError("the cutover archive opened a socket")
 
 
-@RED_P1_1
 def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelope_stamp(
     tmp_path: Path,
     age_keys: KeyMaterial,
@@ -1141,7 +1130,7 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
     assert "the escrow copy is the only supported recovery" in rollback
     assert "separately reviewed" in rollback
     # P1-3: step 6 drives the tool, never a shell expansion of the variable
-    step6 = text[text.index("6. **Escrow") : text.index("7. **Start")]
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
     assert "python -m chronos.operations.persistence_key_escrow" in step6
     assert '"$CHRONOS_PERSISTENCE_KEY"' not in step6 and "printf" not in step6
     assert "decrypt" in step6 and "compare" in step6
@@ -1227,7 +1216,6 @@ def test_7h_the_runbook_states_the_r2_boundaries() -> None:
     assert "`WRITER_OPEN`" in table and "`WRITER_EXCLUSION_UNAVAILABLE`" in table
 
 
-@RED_P1_1
 def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     """r3: the sentinel directories, the owner's rmdir as step 7's first line, the rollback order
     (rmdir, then mv -n), the new refusal row; the escrow step says the tool deletes nothing."""
@@ -1236,8 +1224,6 @@ def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
     assert "sentinel" in step3 and "rmdir" in step3 and "left_in_place" not in step3
     assert "LIVE_NAME_OCCUPIED" in step3
-    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
-    assert "deletes nothing" in step6 and "shred" in step6 and "removed: true" not in step6
     step7 = text[text.index("7. **") : text.index("8. **Bind")]
     assert (
         "rmdir data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal"
@@ -1248,6 +1234,13 @@ def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     assert rollback.index("rmdir") < rollback.index("mv -n")
     table = text[text.index("## What the gate's refusal codes mean") :]
     assert "`LIVE_NAME_OCCUPIED`" in table
+
+
+@RED_P1_3
+def test_7k_the_runbook_says_the_escrow_tool_deletes_nothing_after_a_failure() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
+    assert "deletes nothing" in step6 and "shred" in step6 and "removed: true" not in step6
 
 
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
@@ -1834,8 +1827,8 @@ def test_9i_a_write_open_during_the_archive_is_refused_by_the_lease_and_stops_th
 @pytest.mark.parametrize(
     "shape",
     [
-        pytest.param("file-at-live-name", marks=RED_P1_1),
-        pytest.param("dir-over-sentinel", marks=RED_P1_1),
+        "file-at-live-name",
+        "dir-over-sentinel",
     ],
 )
 def test_9j_a_main_file_swap_at_the_final_syscall_is_exchanged_back_and_reported_exactly(
@@ -1938,7 +1931,6 @@ def test_9j_a_main_file_swap_at_the_final_syscall_is_exchanged_back_and_reported
         )  # the store, back at its name
 
 
-@RED_P1_1
 def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_reported_exactly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1997,7 +1989,6 @@ def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_rep
     assert _entries(store.db.parent) == sorted(["chronos.db", *SIDECARS, "wal-away"])
 
 
-@RED_P1_1
 def test_9l_an_archived_report_proves_the_admitted_set_quiet_and_the_live_names_sealed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2123,7 +2114,6 @@ def _hook_post_move_quiet_check(monkeypatch: pytest.MonkeyPatch, action: Any) ->
     return calls
 
 
-@RED_P1_1
 def test_10a_daybreak_s_counterexample_a_store_planted_at_the_vacated_live_name_cannot_exist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2164,7 +2154,6 @@ def test_10a_daybreak_s_counterexample_a_store_planted_at_the_vacated_live_name_
     )
 
 
-@RED_P1_1
 def test_10b_an_owner_uid_actor_that_vacates_a_live_name_before_the_report_is_never_archived(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2202,7 +2191,6 @@ def test_10b_an_owner_uid_actor_that_vacates_a_live_name_before_the_report_is_ne
     assert {s["name"]: s["at"] for s in report["sentinels"]}[str(store.db)] is None
 
 
-@RED_P1_1
 def test_10c_every_live_name_stays_a_sentinel_until_the_owner_s_rmdir_then_a_fresh_store_is_made(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2241,11 +2229,15 @@ def test_10c_every_live_name_stays_a_sentinel_until_the_owner_s_rmdir_then_a_fre
         sqlite3.connect(store.db).execute("SELECT 1")
     with pytest.raises(RuntimeError, match="non-regular"):
         Database(f"sqlite:///{store.db}")
+    assert cutover.LIVE_NAME_SUFFIXES == database_module._SQLITE_SIDECAR_SUFFIXES
     for name in LIVE_NAMES[:-1]:
         os.rmdir(store.db.with_name(name))
     with pytest.raises(RuntimeError, match="non-regular"):  # the -journal sentinel alone refuses
         Database(f"sqlite:///{store.db}")
-    assert not store.db.exists()
+    # … but R-21 creates a missing store BEFORE it checks the namespace, so once chronos.db's
+    # own sentinel is gone a refused writer still leaves an EMPTY file there: the four rmdirs
+    # are one line in the runbook, and the chronos.db sentinel is the one that guards creation
+    assert store.db.is_file() and store.db.stat().st_size == 0
     os.rmdir(store.db.with_name(LIVE_NAMES[-1]))
     database = Database(f"sqlite:///{store.db}")  # the owner's step 7
     try:
@@ -2262,9 +2254,9 @@ def test_10c_every_live_name_stays_a_sentinel_until_the_owner_s_rmdir_then_a_fre
 @pytest.mark.parametrize(
     "shape",
     [
-        pytest.param("journal", marks=RED_P1_1_OCCUPIED),
-        pytest.param("wal-not-admitted", marks=RED_P1_1_OCCUPIED),
-        pytest.param("shm-not-admitted", marks=RED_P1_1_OCCUPIED),
+        "journal",
+        "wal-not-admitted",
+        "shm-not-admitted",
     ],
 )
 def test_10d_a_non_admitted_entry_at_a_live_name_refuses_the_move_with_nothing_moved(
@@ -2302,5 +2294,16 @@ def test_10d_a_non_admitted_entry_at_a_live_name_refuses_the_move_with_nothing_m
     assert report["moved_aside"] == [] and report["sentinels"] == []
     assert store.db.is_file() and _sha256(store.db) == before
     assert planted.read_bytes() == b""  # never touched
-    assert _entries(store.db.parent) == sorted([*expected_before, name])
+    # the planted name stays; on a WAL store the reader bookkeeping may sit beside it
+    after = _entries(store.db.parent)
+    bookkeeping = set(READER_BOOKKEEPING) - {name}
+    assert sorted(set(after) - bookkeeping) == sorted([*expected_before, name])
+    assert set(after) - set(expected_before) - {name} <= bookkeeping
     assert Path(report["envelope"]).is_dir()
+    if shape == "journal":
+        # present BEFORE the run, a -journal refuses at the gate: no envelope, nothing created
+        early = _store(tmp_path / "early", binding="closed")
+        early.db.with_name("chronos.db-journal").write_bytes(b"")
+        code, report = _run(early, tmp_path / "early", "--apply", capsys=capsys)
+        assert code == 2 and report["code"] == "LIVE_NAME_OCCUPIED" and report["gate"] is None
+        assert not (tmp_path / "early" / "backups").exists()

@@ -40,8 +40,10 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    down by origin class from the run's own ``position_provenance`` rows). At the end of the
    gate the sidecars present (``-wal``/``-shm``, each a regular file, the ``-wal`` without
    frames) are ADMITTED: opened no-follow and held, their identities pinned; this is the whole
-   set the move may rename — a sidecar that appears later is never renamed (with frames it
-   refuses the move; without, it is reported ``left_in_place``).
+   set the move may rename — a sidecar that appears later is never renamed: it occupies a live
+   name the move needs for a sentinel and refuses it (``LIVE_NAME_OCCUPIED``; with frames,
+   ``WAL_FRAMES_PRESENT``). A ``-journal`` beside the store refuses at the gate for the same
+   reason.
 2. **The R-2 restore drill**, reused whole (:func:`chronos.operations.restore_drill.run_drill`)
    over the same capability: sqlite's online backup API through the bound connection, ``age``
    to the two recipients named by the existing custody variables, one atomically published
@@ -54,33 +56,49 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
 3. **Verdict ``ARCHIVE_VERIFIED`` required** — the drill's distinct verdict for a bound
    retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
    live store is untouched and the report names the envelope and the restore copy that exist.
-4. **ONLY THEN the store moves aside, by rename, never delete:** in the store's directory,
-   reached by the drill's no-follow walk: the bound connection is closed and every admitted
-   sidecar is leased likewise (a process holding one open read-write — a read-only SQLite
-   connection does — is ``WRITER_OPEN``); the store's lease must be whole; the manifest's
-   ``source_identity`` must be the held inode (the archive IS of this store); the admitted
-   ``-wal`` must still be frame-free by ``fstat`` on the held descriptor (the same inode can
-   grow in place: identity is not content — ``WAL_FRAMES_PRESENT``); the store by name must be
-   the held inode, every admitted sidecar by name its held inode, every target name absent — all
-   before any rename — then ONE ``renameat2(RENAME_NOREPLACE)`` per admitted file, each
-   re-proved after it: the archived name must be the held inode, and when it is NOT (the name
-   was exchanged in the instant before the syscall) the foreign entry is renamed BACK by name
-   (``RENAME_NOREPLACE``, never over anything) and reported in ``foreign_renamed`` — the admitted
-   object was not moved, so its name is in ``not_moved``. ``chronos.db`` →
-   ``chronos.db.archived-<stamp>``, the admitted ``-wal``/``-shm`` likewise, ``<stamp>`` being
-   the envelope's own (``chronos-<stamp>``), so the moved-aside files are bound by name to their
-   archive. After the last rename every lease must still be whole and the admitted ``-wal`` still
-   frame-free — the proof, in the report's ``exclusion``, that the admitted set was quiet through
-   the irreversible boundary. A failure after the first rename is ``MOVE_INCOMPLETE`` with
-   ``moved_aside`` and ``not_moved`` exact; the runbook's rollback renames back by name.
+4. **ONLY THEN the store moves aside — by EXCHANGE with a sentinel, never delete, and the
+   live namespace is never vacant (r3):** in the store's directory, reached by the drill's
+   no-follow walk: the bound connection is closed and every admitted sidecar is leased likewise
+   (a process holding one open read-write — a read-only SQLite connection does — is
+   ``WRITER_OPEN``); the store's lease must be whole; the manifest's ``source_identity`` must be
+   the held inode (the archive IS of this store); the admitted ``-wal`` must still be frame-free
+   by ``fstat`` on the held descriptor (the same inode can grow in place: identity is not
+   content — ``WAL_FRAMES_PRESENT``); the store by name must be the held inode, every admitted
+   sidecar by name its held inode; every live name of the store's namespace the gate did NOT
+   admit (a ``-wal``/``-shm`` that appeared since, a ``-journal``) must be absent
+   (``LIVE_NAME_OCCUPIED``); every archive name absent — all before any rename. Then the
+   SENTINELS: 0500 directories this run makes and holds, ``mkdir``'d at every non-admitted live
+   name and at every archive name (the mkdir is the atomic absence check: EEXIST is
+   ``LIVE_NAME_OCCUPIED`` / ``TARGET_EXISTS``), all before any exchange, so a refusal moves
+   nothing. Then ONE ``renameat2(RENAME_EXCHANGE)`` per admitted file, store first: in one
+   syscall ``chronos.db.archived-<stamp>`` becomes the admitted inode and ``chronos.db`` becomes
+   its sentinel — at no instant is a live name vacant, so nothing (a Chronos writer, which
+   refuses a non-regular path and makes no file; a sqlite3 shell, which cannot open a
+   directory; a rename, which cannot replace a directory with a file) can put a store the gate
+   never saw at the live name — not during the command and not after it exits, until the
+   owner's own ``rmdir`` (runbook step 7). Each exchange is re-proved on BOTH names: the archive
+   name must be the held inode and the live name this run's sentinel; otherwise (a foreign entry
+   at the live name, or a foreign directory renamed over the sentinel, in the instant before the
+   syscall) it is exchanged BACK — exact — and reported in ``foreign_renamed``; the admitted
+   object was not moved, so its name is in ``not_moved``. ``<stamp>`` is the envelope's own
+   (``chronos-<stamp>``), so the moved-aside files are bound by name to their archive. After the
+   last exchange every lease must still be whole and the admitted ``-wal`` still frame-free, and
+   then every live name must still BE its sentinel and every archive name its admitted inode —
+   the proof, in the report's ``exclusion``, that the admitted set was quiet through the
+   irreversible boundary and the namespace sealed after it. A failure after the first exchange
+   is ``MOVE_INCOMPLETE`` with ``moved_aside`` and ``not_moved`` exact; the runbook's rollback
+   removes the sentinels (the owner's rmdir) and renames back by name. The sentinels a run made
+   are always listed (``sentinels``, with where each is now): the command removes none.
 5. **A JSON report**: envelope, manifest path and sha256, cleartext and ciphertext sha256,
-   the moved-aside names, and the next MANUAL steps (the runbook's) — never a fingerprint,
-   a position id or a row payload; counts and the run's own id, trigger and times only.
+   the moved-aside names, the sentinels, and the next MANUAL steps (the runbook's) — never a
+   fingerprint, a position id or a row payload; counts and the run's own id, trigger and times
+   only.
 
 What this command never does: it never generates, reads or prints the persistence key (the
 module does not touch the environment or ``Settings`` — the drill reads its own age-key
 variables); never starts the service; never initializes the fresh database; never opens the
-old store for writing; never deletes anything. Runbook: ``docs/ops/N3-CUTOVER.md``.
+old store for writing; never deletes anything — the sentinel directories it leaves at the four
+live names included: the owner's ``rmdir`` vacates them. Runbook: ``docs/ops/N3-CUTOVER.md``.
 """
 
 from __future__ import annotations
@@ -104,7 +122,8 @@ from sqlalchemy.pool import StaticPool
 
 from chronos.domain.enums import ReconciliationStatus
 from chronos.operations.restore_drill import (
-    _RENAME_NOREPLACE,
+    _DIR_FLAGS,
+    _RENAME_EXCHANGE,
     ARCHIVE_VERIFIED,
     MANIFEST_NAME,
     AgeKeys,
@@ -113,6 +132,7 @@ from chronos.operations.restore_drill import (
     DrillRefused,
     SourceBusy,
     SourceSwapped,
+    _entry_is_real_directory,
     _fresh_directory,
     _lease_intact,
     _lease_read,
@@ -145,6 +165,12 @@ MAX_RECONCILIATION_AGE = timedelta(hours=1)
 WAL_HEADER_BYTES = 32
 ARCHIVED_INFIX = ".archived-"
 SIDECAR_SUFFIXES = ("-wal", "-shm")
+#: the store's whole live namespace beside the main file — the names the repository's R-21
+#: admission checks (``database._SQLITE_SIDECAR_SUFFIXES``, pinned equal by the tests); after
+#: ``--apply`` each holds a sentinel directory until the owner's ``rmdir`` (r3, Daybreak P1-1)
+LIVE_NAME_SUFFIXES = ("-wal", "-shm", "-journal")
+#: a sentinel is a directory the owner can list and remove but nobody can create inside of
+SENTINEL_MODE = 0o500
 ENVELOPE_PREFIX = "chronos-"
 CLEAN = ReconciliationStatus.RECONCILED.value
 ORIGIN_CLASSES = ("MANAGED", "WHEEL", "MANUAL", "FOREIGN")
@@ -157,6 +183,9 @@ class CutoverRefused(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+        #: the sentinel directories the move made before refusing, and where each is now (r3):
+        #: the command deletes nothing, a sentinel included
+        self.sentinels: tuple[dict[str, str | None], ...] = ()
 
 
 class MoveIncomplete(CutoverRefused):
@@ -226,7 +255,7 @@ def _sidecar_facts(db_path: Path) -> dict[str, object]:
     writer did not checkpoint and close). Admission — holding them — comes after the gate."""
 
     facts: dict[str, object] = {"present": False, "size": 0}
-    for suffix in SIDECAR_SUFFIXES:
+    for suffix in LIVE_NAME_SUFFIXES:
         sibling = db_path.with_name(db_path.name + suffix)
         try:
             st = os.lstat(sibling)
@@ -237,6 +266,14 @@ def _sidecar_facts(db_path: Path) -> dict[str, object]:
                 "SOURCE_NOT_REGULAR",
                 f"{sibling} is not a regular file (a symlink or a directory beside the store); "
                 "the command never follows a link",
+            )
+        if suffix == "-journal":
+            raise CutoverRefused(
+                "LIVE_NAME_OCCUPIED",
+                f"{sibling} exists beside the store: a rollback journal is not part of a WAL-mode "
+                "store (a hot one means an interrupted writer), and the move needs that name for "
+                "its sentinel. Stop every Chronos process, inspect it by hand, move it out of the "
+                "way yourself and re-run; the command never removes anything",
             )
         if suffix == "-wal":
             facts = {"present": True, "size": int(st.st_size)}
@@ -602,25 +639,140 @@ def _not_quiet(
     return None
 
 
-def _rename_back(
-    dfd: int, parent_abs: Path, archived: str, name: str, found: tuple[int, int] | None
-) -> dict[str, str | None]:
-    """The entry our rename moved to ``archived`` was not the admitted object: rename it back to
-    ``name`` (``RENAME_NOREPLACE`` — never over anything) and say where it is now."""
+@dataclass(frozen=True, slots=True)
+class Sentinel:
+    """A 0500 directory this run made and holds open (r3, Daybreak P1-1): from the exchange on it
+    occupies a live name of the store's namespace, so that name is never vacant — nothing can
+    create, rename or open a file there until the owner's own ``rmdir``."""
 
-    restored_to: str | None = None
+    name: str  #: the live name it is for
+    made_at: str  #: where it was made: the archive name (admitted file) or the live name itself
+    fd: int
+    identity: tuple[int, int]
+
+
+def _sentinel_at(dfd: int, parent_abs: Path, *, name: str, made_at: str, code: str) -> Sentinel:
+    """``mkdir`` the sentinel at ``made_at`` under the held directory — the mkdir IS the atomic
+    "nothing is there" check (EEXIST is the caller's typed refusal ``code``) — open it no-follow,
+    make it 0500, and prove it is ours (a directory, this uid, empty); hold it."""
+
     try:
-        _renameat2(dfd, archived, dfd, name, _RENAME_NOREPLACE)
+        os.mkdir(made_at, SENTINEL_MODE, dir_fd=dfd)
+    except FileExistsError:
+        raise CutoverRefused(
+            code,
+            f"{parent_abs / made_at} exists; the command never renames over an entry and never "
+            "removes one. Nothing moved: the live store is in place and the envelope is published "
+            "— move that entry out of the way by hand (it is not this run's) and re-run",
+        ) from None
+    fd = os.open(made_at, _DIR_FLAGS, dir_fd=dfd)
+    try:
+        os.fchmod(fd, SENTINEL_MODE)
+        st = os.fstat(fd)
+        if not (stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and not os.listdir(fd)):
+            raise CutoverRefused(
+                "LIVE_NAME_OCCUPIED",
+                f"{parent_abs / made_at} is not the sentinel directory this run just made (it was "
+                "replaced in the instant after mkdir); nothing moved — inspect by hand",
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return Sentinel(name, made_at, fd, (st.st_dev, st.st_ino))
+
+
+def _identity_any(dfd: int, name: str) -> tuple[int, int] | None:
+    """``(device, inode)`` of whatever entry is at ``name``, by lstat; ``None`` when absent."""
+
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _describe_entry(dfd: int, name: str) -> str:
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    kind = (
+        "a regular file"
+        if stat.S_ISREG(st.st_mode)
+        else "a directory"
+        if stat.S_ISDIR(st.st_mode)
+        else "a symlink"
+        if stat.S_ISLNK(st.st_mode)
+        else "another kind of entry"
+    )
+    return f"{kind} (device:inode {st.st_dev}:{st.st_ino})"
+
+
+def _sentinels_report(
+    dfd: int, parent_abs: Path, sentinels: list[Sentinel], order: list[str]
+) -> tuple[dict[str, str | None], ...]:
+    """Where each sentinel this run made is NOW, by identity: at its live name, still at the
+    archive name it was made at, or at neither (``at: null`` — replaced or removed). In the
+    namespace's order (store, -wal, -shm, -journal)."""
+
+    report: list[dict[str, str | None]] = []
+    for sentinel in sorted(sentinels, key=lambda s: order.index(s.name)):
+        at: str | None = None
+        for candidate in (sentinel.name, sentinel.made_at):
+            if _entry_is_real_directory(dfd, candidate, sentinel.identity):
+                at = str(parent_abs / candidate)
+                break
+        report.append(
+            {
+                "name": str(parent_abs / sentinel.name),
+                "at": at,
+                "identity": f"{sentinel.identity[0]}:{sentinel.identity[1]}",
+            }
+        )
+    return tuple(report)
+
+
+def _exchange_back(dfd: int, name: str, archived: str) -> bool:
+    """Reverse an exchange whose post-proof failed: ONE more ``renameat2(RENAME_EXCHANGE)`` of
+    the same two names — exact, never a rename over anything. False when it could not be done
+    (one of the names vanished meanwhile)."""
+
+    try:
+        _renameat2(dfd, archived, dfd, name, _RENAME_EXCHANGE)
     except OSError:
-        pass
-    else:
-        if _identity_by_name(dfd, name) == found:
-            restored_to = str(parent_abs / name)
-    return {
-        "renamed_to": str(parent_abs / archived),
-        "restored_to": restored_to,
-        "identity": "absent" if found is None else f"{found[0]}:{found[1]}",
-    }
+        return False
+    return True
+
+
+def _live_names_problem(
+    dfd: int,
+    parent_abs: Path,
+    sentinels: list[Sentinel],
+    expected: dict[str, tuple[int, int]],
+    targets: dict[str, str],
+) -> tuple[str, str] | None:
+    """The report-time proof (after the last exchange): every live name of the namespace IS this
+    run's sentinel by identity, every archive name IS its admitted inode. ``(code, message)``
+    otherwise; ``None`` when the namespace is sealed."""
+
+    for sentinel in sentinels:
+        if not _entry_is_real_directory(dfd, sentinel.name, sentinel.identity):
+            return (
+                "LIVE_NAME_OCCUPIED",
+                f"{parent_abs / sentinel.name} is no longer this run's sentinel directory "
+                f"(device:inode {sentinel.identity[0]}:{sentinel.identity[1]}) but "
+                f"{_describe_entry(dfd, sentinel.name)}: the live name was vacated and refilled "
+                "after the exchange — only the store owner's uid can remove a sentinel",
+            )
+    for name, identity in expected.items():
+        if _identity_by_name(dfd, targets[name]) != identity:
+            return (
+                "SOURCE_SWAPPED",
+                f"{parent_abs / targets[name]} is no longer the admitted object (device:inode "
+                f"{identity[0]}:{identity[1]}) but {_describe_entry(dfd, targets[name])}: the "
+                "archive name changed after the exchange",
+            )
+    return None
 
 
 def _move_aside(
@@ -628,21 +780,32 @@ def _move_aside(
     sidecars: tuple[AdmittedSidecar, ...],
     manifest_identity: tuple[int, int] | None,
     stamp: str,
-) -> tuple[tuple[dict[str, str], ...], tuple[str, ...], dict[str, object]]:
-    """Rename the store and its ADMITTED sidecars to ``<name>.archived-<stamp>`` in their own
-    directory, with the admitted set proven quiet through the boundary (r2, Daybreak P1-1).
+) -> tuple[tuple[dict[str, str], ...], dict[str, object], tuple[dict[str, str | None], ...]]:
+    """Exchange the store and its ADMITTED sidecars with sentinel directories at
+    ``<name>.archived-<stamp>`` in their own directory, with the admitted set proven quiet
+    through the boundary (r2) and the live namespace never vacant (r3, Daybreak P1-1).
 
     Before ANY rename: every admitted sidecar is leased (the bound connection held them
     read-write until it closed; a process still holding one is ``WRITER_OPEN``); the store's
     lease must be whole; the manifest's ``source_identity`` must be the held inode; the admitted
     ``-wal`` must be frame-free by ``fstat`` on its held descriptor; the store by name must be the
-    held inode, every admitted sidecar by name its held inode; a non-admitted ``-wal`` with frames
-    refuses; every target is proved absent. Then ONE ``renameat2(RENAME_NOREPLACE)`` per file,
-    each re-proved after it by the archived name's identity — a foreign entry the rename moved
-    (the name exchanged in the instant before the syscall) is renamed BACK by name and reported,
-    and the admitted name counts as not moved. After the last rename the leases and the WAL are
-    re-proved; the proof is returned as the report's ``exclusion``. Nothing is ever deleted or
-    renamed over; a non-admitted sidecar is never renamed and is returned as ``left_in_place``.
+    held inode, every admitted sidecar by name its held inode; every live name of the namespace
+    that is NOT admitted (``-wal``/``-shm`` that appeared after admission, a ``-journal``) must
+    be absent (``LIVE_NAME_OCCUPIED``; with frames in a ``-wal``, ``WAL_FRAMES_PRESENT``); every
+    archive name is proved absent. Then the sentinels — 0500 directories this run makes and
+    holds — are placed: at every non-admitted live name (``mkdir``, atomic: EEXIST is
+    ``LIVE_NAME_OCCUPIED``) and at every archive name (EEXIST is ``TARGET_EXISTS``), all before any
+    exchange, so a refusal here moves nothing. Then ONE ``renameat2(RENAME_EXCHANGE)`` per
+    admitted name, store first: in one syscall the archive name becomes the admitted inode and the
+    live name becomes its sentinel — there is no instant at which a live name is vacant. Each
+    exchange is re-proved by identity on BOTH names; a mismatch (a foreign entry put at the live
+    name, or a foreign directory renamed over the sentinel, in the instant before the syscall) is
+    reversed by exchanging back — exact — and reported in ``foreign_renamed``; the admitted name
+    counts as not moved. After the last exchange the leases and the WAL are re-proved
+    (``exclusion``), then the namespace: every live name IS its sentinel, every archive name IS
+    its admitted inode. Nothing is ever deleted or renamed over — a sentinel included: the ones
+    this run made are returned with where each is now, and only the owner's ``rmdir`` (the
+    runbook's step 7) vacates the names.
     """
 
     if manifest_identity != source.identity:
@@ -658,6 +821,8 @@ def _move_aside(
             "store; nothing moved — inspect by hand",
         )
     dfd, parent_abs = _walk_directory(source.path.parent, "database directory", create=False)
+    namespace = [source.path.name, *(source.path.name + suffix for suffix in LIVE_NAME_SUFFIXES)]
+    sentinels: list[Sentinel] = []
     try:
         for sidecar in sidecars:
             try:
@@ -690,23 +855,26 @@ def _move_aside(
                     f"{parent_abs / name} is no longer the object the gate admitted (identity "
                     "changed between the gate and the move); nothing moved — inspect by hand",
                 )
-        left_in_place: list[str] = []
-        for suffix in SIDECAR_SUFFIXES:
-            name = source.path.name + suffix
-            if name in expected:
-                continue
+        vacant = [name for name in namespace if name not in expected]
+        for name in vacant:
             try:
                 st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
             except FileNotFoundError:
                 continue
-            if suffix == "-wal" and stat.S_ISREG(st.st_mode) and st.st_size > WAL_HEADER_BYTES:
+            if name.endswith("-wal") and stat.S_ISREG(st.st_mode) and st.st_size > WAL_HEADER_BYTES:
                 raise CutoverRefused(
                     "WAL_FRAMES_PRESENT",
                     f"{parent_abs / name} appeared after the gate admitted the sidecars and holds "
                     f"{st.st_size} bytes of write-ahead log: a writer is active or a foreign file "
                     "was planted; nothing moved — stop every Chronos process and inspect by hand",
                 )
-            left_in_place.append(str(parent_abs / name))
+            raise CutoverRefused(
+                "LIVE_NAME_OCCUPIED",
+                f"{parent_abs / name} exists but is not in the admitted set (it appeared after the "
+                "gate admitted the sidecars, or it is a rollback journal), so its live name cannot "
+                "take a sentinel; nothing moved — stop every Chronos process, find out what wrote "
+                "it, move it out of the way by hand (it is not this run's) and re-run",
+            )
         names = list(expected)
         targets = {name: _archived_name(name, stamp) for name in names}
         for target in targets.values():
@@ -718,38 +886,58 @@ def _move_aside(
                     "published — move that entry out of the way by hand (it is not this run's) "
                     "and re-run",
                 )
+        # the sentinels, all before any exchange: a refusal here moves nothing
+        for name in vacant:
+            sentinels.append(
+                _sentinel_at(dfd, parent_abs, name=name, made_at=name, code="LIVE_NAME_OCCUPIED")
+            )
+        by_name: dict[str, Sentinel] = {}
+        for name in names:
+            by_name[name] = _sentinel_at(
+                dfd, parent_abs, name=name, made_at=targets[name], code="TARGET_EXISTS"
+            )
+            sentinels.append(by_name[name])
         moved: list[dict[str, str]] = []
         for name in names:
+            sentinel = by_name[name]
             try:
-                _renameat2(dfd, name, dfd, targets[name], _RENAME_NOREPLACE)
+                _renameat2(dfd, name, dfd, targets[name], _RENAME_EXCHANGE)
             except OSError as error:
-                code = "TARGET_EXISTS" if isinstance(error, FileExistsError) else "MOVE_FAILED"
                 detail = (
-                    f"rename of {parent_abs / name} to {parent_abs / targets[name]} failed: "
+                    f"exchange of {parent_abs / name} with {parent_abs / targets[name]} failed: "
                     f"[errno {error.errno}] {error.strerror}"
                 )
                 if not moved:
-                    raise CutoverRefused(code, f"{detail}; nothing moved") from None
+                    raise CutoverRefused("MOVE_FAILED", f"{detail}; nothing moved") from None
                 not_moved = tuple(str(parent_abs / other) for other in names[len(moved) :])
                 raise MoveIncomplete(
-                    code,
-                    f"{detail}; {len(moved)} file(s) already moved — rename them back by name "
-                    f"({RUNBOOK}, Rollback) before anything starts",
+                    "MOVE_FAILED",
+                    f"{detail}; {len(moved)} file(s) already moved — rmdir the sentinels, then "
+                    f"rename them back by name ({RUNBOOK}, Rollback) before anything starts",
                     moved=tuple(moved),
                     not_moved=not_moved,
                 ) from None
             found = _identity_by_name(dfd, targets[name])
             if found != expected[name]:
-                foreign = _rename_back(dfd, parent_abs, targets[name], name, found)
+                # a foreign entry sat at the live name in the instant of the syscall: it is now
+                # at the archive name and the sentinel at the live name — exchange them back
+                restored = _exchange_back(dfd, name, targets[name]) and (
+                    _identity_by_name(dfd, name) == found
+                )
+                foreign: dict[str, str | None] = {
+                    "renamed_to": str(parent_abs / targets[name]),
+                    "restored_to": str(parent_abs / name) if restored else None,
+                    "identity": "absent" if found is None else f"{found[0]}:{found[1]}",
+                }
                 where = (
-                    f"renamed back to {foreign['restored_to']}"
-                    if foreign["restored_to"] is not None
-                    else f"left at {foreign['renamed_to']} (it could not be renamed back)"
+                    f"exchanged back to {foreign['restored_to']}"
+                    if restored
+                    else f"left at {foreign['renamed_to']} (it could not be exchanged back)"
                 )
                 not_moved = tuple(str(parent_abs / other) for other in names[len(moved) :])
                 raise MoveIncomplete(
                     "SOURCE_SWAPPED",
-                    f"the entry at {parent_abs / name} in the instant of its rename was not the "
+                    f"the entry at {parent_abs / name} in the instant of its exchange was not the "
                     f"object the gate admitted (device:inode {expected[name][0]}:"
                     f"{expected[name][1]}) but a foreign one ({foreign['identity']}), now "
                     f"{where}; the admitted object was not moved and is not at its name — this "
@@ -760,29 +948,83 @@ def _move_aside(
                     not_moved=not_moved,
                     foreign=(foreign,),
                 ) from None
+            if not _entry_is_real_directory(dfd, name, sentinel.identity):
+                # the admitted object did move, but what the exchange put at its live name is not
+                # this run's sentinel: a foreign directory was renamed over the sentinel in the
+                # instant before the syscall (the owner's uid can) — exchange them back
+                intruder = _identity_any(dfd, name)
+                restored = _exchange_back(dfd, name, targets[name]) and (
+                    _identity_any(dfd, targets[name]) == intruder
+                )
+                foreign = {
+                    "renamed_to": str(parent_abs / name),
+                    "restored_to": str(parent_abs / targets[name]) if restored else None,
+                    "identity": "absent" if intruder is None else f"{intruder[0]}:{intruder[1]}",
+                }
+                not_moved = tuple(str(parent_abs / other) for other in names[len(moved) :])
+                outcome = (
+                    f"the admitted object is back at its name and the foreign entry back at "
+                    f"{parent_abs / targets[name]}"
+                    if restored
+                    else f"the admitted object is at {parent_abs / targets[name]} and the "
+                    "foreign entry at its live name (they could not be exchanged back)"
+                )
+                raise MoveIncomplete(
+                    "LIVE_NAME_OCCUPIED",
+                    f"the entry exchanged into {parent_abs / name} was not this run's sentinel "
+                    f"(device:inode {sentinel.identity[0]}:{sentinel.identity[1]}) but a foreign "
+                    f"one ({foreign['identity']}) renamed over the sentinel in the instant before "
+                    f"the syscall; the exchange was reversed: {outcome} (the admitted object is "
+                    f"device:inode {expected[name][0]}:{expected[name][1]}); {len(moved)} file(s) "
+                    f"moved before it — inspect by hand before anything starts ({RUNBOOK}, "
+                    "Rollback)",
+                    moved=tuple(moved),
+                    not_moved=not_moved,
+                    foreign=(foreign,),
+                ) from None
             moved.append({"from": str(parent_abs / name), "to": str(parent_abs / targets[name])})
         os.fsync(dfd)
         problem = _not_quiet(source, sidecars, parent_abs)
         if problem is not None:
             raise MoveIncomplete(
                 problem[0],
-                f"{problem[1]} — every rename succeeded, but the admitted set was not quiet "
-                f"through the boundary: rename the moved files back by name ({RUNBOOK}, "
-                "Rollback), stop every Chronos process, and investigate before anything starts",
+                f"{problem[1]} — every exchange succeeded, but the admitted set was not quiet "
+                f"through the boundary: rmdir the sentinels, rename the moved files back by name "
+                f"({RUNBOOK}, Rollback), stop every Chronos process, and investigate before "
+                "anything starts",
+                moved=tuple(moved),
+                not_moved=(),
+            )
+        problem = _live_names_problem(dfd, parent_abs, sentinels, expected, targets)
+        if problem is not None:
+            raise MoveIncomplete(
+                problem[0],
+                f"{problem[1]} — every exchange succeeded and the admitted set is at the archive "
+                f"names ({'moved_aside'}), but the namespace is not sealed; nothing was deleted: "
+                f"investigate before anything starts ({RUNBOOK}, step 3)",
                 moved=tuple(moved),
                 not_moved=(),
             )
         wal = _wal_of(sidecars)
         exclusion: dict[str, object] = {
             "mechanism": "kernel read lease (fcntl F_SETLEASE) on the held store and every "
-            "admitted sidecar",
+            "admitted sidecar; sentinel directories exchanged into every live name",
             "leased": [source.path.name, *(sidecar.name for sidecar in sidecars)],
             "intact_after_move": True,
             "wal_bytes_after_move": None if wal is None else os.fstat(wal.fd).st_size,
+            "live_names": [str(parent_abs / name) for name in namespace],
+            "live_names_sealed": True,
+            "sentinel_mode": f"{SENTINEL_MODE:04o}",
         }
+        report = _sentinels_report(dfd, parent_abs, sentinels, namespace)
+    except CutoverRefused as error:
+        error.sentinels = _sentinels_report(dfd, parent_abs, sentinels, namespace)
+        raise
     finally:
+        for sentinel in sentinels:
+            os.close(sentinel.fd)
         os.close(dfd)
-    return tuple(moved), tuple(left_in_place), exclusion
+    return tuple(moved), exclusion, report
 
 
 # ----------------------------------------------------------------- the command
@@ -806,11 +1048,15 @@ class ArchiveReport:
     drill: dict[str, object] | None = None
     moved_aside: tuple[dict[str, str], ...] = ()
     not_moved: tuple[str, ...] = ()
-    left_in_place: tuple[str, ...] = ()
-    #: an entry that sat at an admitted name at the instant of its rename and was NOT the
-    #: admitted object: renamed back by name (``restored_to``) or left where the rename put it
+    #: an entry that sat at an admitted name at the instant of its exchange and was NOT the
+    #: admitted object — or a foreign directory that had replaced the sentinel: exchanged back
+    #: (``restored_to``) or left where the exchange put it
     foreign_renamed: tuple[dict[str, str | None], ...] = ()
-    #: ARCHIVED only: the writer-exclusion proof through the move
+    #: the sentinel directories this run made, each with where it is now by identity (``at`` is
+    #: the live name after ARCHIVED; the archive name after a reversal; ``null`` when replaced or
+    #: removed) — the command never removes one; the owner's ``rmdir`` does (r3)
+    sentinels: tuple[dict[str, str | None], ...] = ()
+    #: ARCHIVED only: the writer-exclusion proof through the move and the live-name proof after it
     exclusion: dict[str, object] | None = None
     next_manual_steps: tuple[str, ...] = ()
 
@@ -832,15 +1078,21 @@ class ArchiveReport:
             "drill": self.drill,
             "moved_aside": [dict(entry) for entry in self.moved_aside],
             "not_moved": list(self.not_moved),
-            "left_in_place": list(self.left_in_place),
             "foreign_renamed": [dict(entry) for entry in self.foreign_renamed],
+            "sentinels": [dict(entry) for entry in self.sentinels],
             "exclusion": None if self.exclusion is None else dict(self.exclusion),
             "next_manual_steps": list(self.next_manual_steps),
             "runbook": RUNBOOK,
         }
 
 
-def _next_manual_steps(restore_dir: str, schema_head_value: str) -> tuple[str, ...]:
+def _live_names_of(db_abs: Path) -> tuple[str, ...]:
+    return (str(db_abs), *(str(db_abs.with_name(db_abs.name + s)) for s in LIVE_NAME_SUFFIXES))
+
+
+def _next_manual_steps(
+    restore_dir: str, schema_head_value: str, live_names: tuple[str, ...]
+) -> tuple[str, ...]:
     return (
         f"Remove the restore copy under {restore_dir} (rm -r): it is a CLEARTEXT copy of the "
         "archived store and the drill has already verified it.",
@@ -851,6 +1103,10 @@ def _next_manual_steps(restore_dir: str, schema_head_value: str) -> tuple[str, .
         "CHRONOS_PERSISTENCE_KEY. Nobody and nothing else generates, sees or handles it.",
         "Age-encrypt ONE escrow copy of that key off-host to your recovery key "
         f"({RUNBOOK} step 6).",
+        "Vacate the live names YOURSELF, only when you are ready to start: rmdir "
+        f"{' '.join(live_names)} — the four sentinel directories this run left; until your rmdir "
+        "the backend, db-preflight and any sqlite3 shell refuse them (a directory is not a "
+        f"database), so nothing but your hand can create a fresh store there ({RUNBOOK} step 7).",
         "Start the backend: a fresh database initializes at the running schema. Bind it. "
         "Re-author the mandate BEFORE the first start of autonomy (dated window = 0).",
         f"Retention: the envelope is a pre-cutover backup ({schema_head_value}); the pruner "
@@ -937,8 +1193,10 @@ def _archive_admitted(
                 str(db_abs.with_name(_archived_name(db_abs.name + suffix, stamp)))
                 for suffix in ("", *SIDECAR_SUFFIXES)
             ],
+            "sentinels": list(_live_names_of(db_abs)),
             "note": "the stamp is the envelope's; --apply takes it from the backup's taken_at, "
-            "and moves a sidecar only when it is present",
+            "moves a sidecar only when it is present, and leaves a sentinel directory at every "
+            "live name until your rmdir",
         }
         return ArchiveReport(
             verdict="DRY_RUN",
@@ -947,7 +1205,9 @@ def _archive_admitted(
             planned=planned,
             schema_head=gate.schema_head,
             restore_dir=str(restore_into),
-            next_manual_steps=_next_manual_steps(str(restore_into), gate.schema_head),
+            next_manual_steps=_next_manual_steps(
+                str(restore_into), gate.schema_head, _live_names_of(db_abs)
+            ),
         )
     try:
         # the drill's own rule, applied BEFORE the envelope exists: a reused --restore-into
@@ -1006,7 +1266,7 @@ def _archive_admitted(
     stamp = envelope.name.removeprefix(ENVELOPE_PREFIX)
     source.close_connection()  # the move needs the held descriptor only, never the connection
     try:
-        moved, left_in_place, exclusion = _move_aside(
+        moved, exclusion, sentinels = _move_aside(
             source, sidecars, report.manifest.source_identity, stamp
         )
     except MoveIncomplete as error:
@@ -1018,6 +1278,7 @@ def _archive_admitted(
             moved_aside=error.moved,
             not_moved=error.not_moved,
             foreign_renamed=error.foreign,
+            sentinels=error.sentinels,
             **facts,
         )
     except CutoverRefused as error:
@@ -1026,15 +1287,19 @@ def _archive_admitted(
             dry_run=False,
             code=error.code,
             failures=(f"{error.code}: {error}",),
+            sentinels=error.sentinels,
             **facts,
         )
+    db_abs = db_path if db_path.is_absolute() else Path.cwd() / db_path
     return ArchiveReport(
         verdict="ARCHIVED",
         dry_run=False,
         moved_aside=moved,
-        left_in_place=left_in_place,
+        sentinels=sentinels,
         exclusion=exclusion,
-        next_manual_steps=_next_manual_steps(restore_dir, report.manifest.schema_head),
+        next_manual_steps=_next_manual_steps(
+            restore_dir, report.manifest.schema_head, _live_names_of(db_abs)
+        ),
         **facts,
     )
 
