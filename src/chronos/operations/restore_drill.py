@@ -61,17 +61,23 @@ What the drill does and does not do:
   (``Database.initialize()`` on an already-versioned store verifies the version
   and zero drift and applies no upgrade). One DISTINCT verdict beside it, never a
   substitute: the N3-2 cutover archive (``chronos.operations.cutover_archive``) backs
-  up a store of a RETIRED schema that the running repository refuses by design and
-  passes an :class:`ArchiveBinding` — the head it read from the source, that head's
-  numeric version, and the gated source inode. The drill then checks, itself, that the
-  version is BELOW the running ``SCHEMA_VERSION`` (a current-or-newer store is never
-  an archive), that the head has that version's form, that the envelope's manifest
-  records that inode (the backup was of the gated object), and that
-  ``restored head == manifest head == bound head``; sha256, row counts and the audit
-  chain verify as always; no repository acceptance runs. All good: the verdict is
+  up a store of a RETIRED schema that the running repository refuses by design. Its
+  flatten gate, at its END and only then, ADMITS the still-open :class:`BoundSource`
+  as that archive's source (``BoundSource._admit_archive`` — the gate's seam: the head
+  it read, that head's numeric version, which must be BELOW the running
+  ``SCHEMA_VERSION``, and the gated inode); ``run_drill``/``restore``/``verify_restored``
+  take the capability itself (``source=``), never a value a caller could construct, and
+  verify by the admission when the capability carries one: the envelope's manifest
+  must record the admitted inode (the backup was of the gated object) and
+  ``restored head == manifest head == admitted head``; sha256, row counts and the audit
+  chain verify as always; no repository acceptance runs and no T-3 name check either
+  (the copy's bytes are the held descriptor's; head and counts come through
+  ``_readonly_fd``'s resolved-pathname open). All good: the verdict is
   ``ARCHIVE_VERIFIED`` with ``acceptance: archive:<head>`` — ``VERIFIED`` is only ever
-  the repository's acceptance, and no caller-supplied value can turn one into the
-  other. The CLI never sets a binding.
+  the repository's acceptance. A capability the gate refused carries no admission, so
+  every public drill path over that store ends in the repository's own refusal. A
+  later ``restore`` of the envelope under the running code reports every verifier and
+  exactly that refusal; the CLI never admits anything.
 - The database is encrypted at rest with ``age`` (route A: the age CLI — Muse
   ruling 2026-09-16, delegated by Kevin) to exactly TWO recipients — the host's
   operational public key and Kevin's recovery public key — inside the temp
@@ -274,9 +280,9 @@ class RestoreReport:
     failures: tuple[str, ...]
     rto_s: float
     #: ``repository`` — the running repository accepted the copy (``Database.initialize()``,
-    #: version + zero drift); ``archive:<head>`` — an :class:`ArchiveBinding` was in effect
-    #: (N3-2 cutover archive of a RETIRED schema) and the copy was verified by exact head,
-    #: retired version and gated source identity instead (see ``restore``).
+    #: version + zero drift); ``archive:<head>`` — the source capability carried the flatten
+    #: gate's archive admission (N3-2 cutover archive of a RETIRED schema) and the copy was
+    #: verified by exact head and gated source identity instead (see ``restore``).
     acceptance: str = "repository"
 
     @property
@@ -291,31 +297,21 @@ class RestoreReport:
 
 
 @dataclass(frozen=True, slots=True)
-class ArchiveBinding:
-    """What the N3-2 cutover binds a RETIRED-schema archive to (Daybreak P1-2): the head the
-    gate read from the source, its numeric version, and the gated source inode. The DRILL
-    checks every part against the envelope and the restored copy (see ``_verify_in``): a
-    binding is a claim to verify, never a switch that selects a weaker acceptance."""
+class _ArchiveAdmission:
+    """What the N3-2 flatten gate admits ON the bound capability (r2, Daybreak P1-2): the head it
+    read from the source, that head's numeric retired version, and the gated inode. Created by
+    :meth:`BoundSource._admit_archive` alone — the gate's seam, deliberately not public: there is
+    no value a library caller can construct and pass to select archive acceptance. The DRILL
+    checks the envelope and the restored copy against it (``_verify_in``)."""
 
     schema_head: str
     schema_version: int
     source_identity: tuple[int, int]
 
     def problems(self, manifest: BackupManifest, restored_head: str) -> list[str]:
-        """Every way this binding fails to describe the retired archive it names."""
+        """Every way the envelope and the restored copy fail to be the admitted archive."""
 
         failures: list[str] = []
-        if self.schema_version >= SCHEMA_VERSION:
-            failures.append(
-                f"archive: schema_version {self.schema_version} is not a retired schema (the "
-                f"running SCHEMA_VERSION is {SCHEMA_VERSION}); a current or newer store is never "
-                "an archive"
-            )
-        if self.schema_head != f"schema_version:{self.schema_version}":
-            failures.append(
-                f"archive: head {self.schema_head} is not the form schema_version:"
-                f"{self.schema_version}; an archive is bound to one numeric retired version"
-            )
         if manifest.source_identity is None or (
             tuple(manifest.source_identity) != tuple(self.source_identity)
         ):
@@ -937,6 +933,10 @@ class BoundSource:
     before and after. A read-only reader leaves SQLite's bookkeeping beside a WAL-mode
     store — an empty ``-wal`` and a ``-shm``; a directory entry, never a database write.
 
+    :attr:`archive_admission` (r2) is the flatten gate's admission of this capability as the
+    source of a retired-schema archive — placed by the gate alone, through a seam that is not
+    public; the drill verifies by it when present (``ARCHIVE_VERIFIED``).
+
     :meth:`exclude_writers` (r2) takes the kernel read lease on ``fd`` (see :func:`_lease_read`):
     from that instant no process can hold or obtain a write-capable open on the store, and
     :attr:`writers_excluded` says whether that has held. The drill's own backups never call it
@@ -944,6 +944,7 @@ class BoundSource:
     """
 
     __slots__ = (
+        "_archive",
         "_connection_open",
         "_fd_open",
         "_leased",
@@ -963,6 +964,39 @@ class BoundSource:
         self._connection_open = True
         self._fd_open = True
         self._leased = False
+        self._archive: _ArchiveAdmission | None = None
+
+    def _admit_archive(self, schema_head: str, schema_version: int) -> None:
+        """The flatten gate's seam (N3-2 r2, Daybreak P1-2) — called by
+        ``cutover_archive.flatten_gate`` at its END, after every check passed, and by nothing
+        else: admit this capability as the source of a RETIRED-schema archive. Refused unless
+        the capability is still open and not yet admitted, ``schema_version`` is BELOW the
+        running ``SCHEMA_VERSION`` (a current-or-newer store is never an archive) and
+        ``schema_head`` has that version's form. The drill then verifies by this admission
+        (``ARCHIVE_VERIFIED``) instead of the repository's acceptance."""
+
+        if not (self._connection_open and self._fd_open):
+            raise DrillRefused("archive: the source capability is closed; nothing is admitted")
+        if self._archive is not None:
+            raise DrillRefused("archive: the source capability is already admitted")
+        if schema_version >= SCHEMA_VERSION:
+            raise DrillRefused(
+                f"archive: schema_version {schema_version} is not a retired schema (the "
+                f"running SCHEMA_VERSION is {SCHEMA_VERSION}); a current or newer store is never "
+                "an archive"
+            )
+        if schema_head != f"schema_version:{schema_version}":
+            raise DrillRefused(
+                f"archive: head {schema_head} is not the form schema_version:{schema_version}; "
+                "an archive is bound to one numeric retired version"
+            )
+        self._archive = _ArchiveAdmission(schema_head, schema_version, self.identity)
+
+    @property
+    def archive_admission(self) -> _ArchiveAdmission | None:
+        """The flatten gate's admission, when the gate placed one; ``None`` otherwise."""
+
+        return self._archive
 
     def exclude_writers(self) -> None:
         """Take the kernel read lease on the held store: refused (:class:`SourceBusy`) while any
@@ -1432,18 +1466,25 @@ def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
 # ----------------------------------------------------------------- restore + verify
 
 
+def _admission_of(source: BoundSource | None) -> _ArchiveAdmission | None:
+    return None if source is None else source.archive_admission
+
+
 def _verify_in(
     manifest: BackupManifest,
     target_fd: int,
     target_abs: Path,
     has_audit: bool,
     *,
-    archive: ArchiveBinding | None = None,
+    admission: _ArchiveAdmission | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers, every read through the target directory descriptor; the
     repository's own acceptance (a pathname open) is bound by identity checks before and
-    after it. With an ``archive`` binding the acceptance is the binding's own checks
-    (retired version, head form, gated source identity, exact head) instead."""
+    after it (T-3). With an archive ``admission`` (the flatten gate's, carried by the source
+    capability) the acceptance is the admission's own checks instead — gated source identity
+    in the manifest, exact head — and that branch opens nothing by pathname and runs no T-3
+    name check: the copy's bytes are the held descriptor's (sha256), while its head and row
+    counts came through ``_readonly_fd``, a resolved-pathname open (see that function)."""
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
@@ -1471,13 +1512,13 @@ def _verify_in(
         accepted = True
         lexical = target_abs / db_name
         facts["acceptance"] = "repository"
-        if archive is not None:
+        if admission is not None:
             # N3-2: an archive of a RETIRED schema. The running repository refuses that
             # version by design (database.py, "Unsupported Chronos schema version"), so the
-            # acceptance is the binding's checks; nothing is opened by pathname and nothing is
+            # acceptance is the gate's admission; nothing is opened by pathname and nothing is
             # initialized on the copy.
-            facts["acceptance"] = f"archive:{archive.schema_head}"
-            problems = archive.problems(manifest, head)
+            facts["acceptance"] = f"archive:{admission.schema_head}"
+            problems = admission.problems(manifest, head)
             if problems:
                 accepted = False
                 failures.extend(problems)
@@ -1562,10 +1603,11 @@ def verify_restored(
     restored: Path,
     restored_audit_log: Path | None,
     *,
-    archive: ArchiveBinding | None = None,
+    source: BoundSource | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers against a restored copy named by path (the directory is reached
-    by the no-follow walk and every read goes through it)."""
+    by the no-follow walk and every read goes through it). ``source`` (N3-2): the bound
+    capability; when the flatten gate admitted it, the acceptance is that admission's."""
 
     restored = Path(restored)
     target_fd, target_abs = _walk_directory(restored.parent, "restore target", create=False)
@@ -1575,7 +1617,7 @@ def verify_restored(
             target_fd,
             target_abs,
             restored_audit_log is not None,
-            archive=archive,
+            admission=_admission_of(source),
         )
     finally:
         os.close(target_fd)
@@ -1620,26 +1662,28 @@ def restore(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
-    archive: ArchiveBinding | None = None,
+    source: BoundSource | None = None,
 ) -> RestoreReport:
     """Decrypt the envelope's database through the host identity into a fresh directory,
     copy the audit pair beside it, and verify them there — the target descriptor is held
     through the decrypt, the copy AND the verification; rto_s from start to verified. A
     decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``).
 
-    ``archive`` (N3-2): the source is an archive of a RETIRED schema, which the running
-    repository refuses by design; the binding's own checks (version below the running one,
-    head form, the envelope's source identity, exact head) replace repository acceptance,
-    reported as ``acceptance: archive:<head>``. Every other verifier (sha256, row counts,
-    audit chain) is unchanged. Restoring such a copy for use needs the code that last ran
-    that schema; a binding never makes it acceptable here."""
+    ``source`` (N3-2): the bound capability. When the flatten gate admitted it as the source
+    of a RETIRED-schema archive — a schema the running repository refuses by design — the
+    admission's checks (the envelope's source identity, exact head) replace repository
+    acceptance, reported as ``acceptance: archive:<head>``. Every other verifier (sha256, row
+    counts, audit chain) is unchanged. Without an admitted capability a retired-schema copy
+    verifies as the repository says: refused. Restoring such a copy for use needs the code
+    that last ran that schema; nothing here makes it acceptable to the running code."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
     _require_age_manifest(manifest)
     target_dir = Path(target_dir)
     target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
-    acceptance = "repository" if archive is None else f"archive:{archive.schema_head}"
+    admission = _admission_of(source)
+    acceptance = "repository" if admission is None else f"archive:{admission.schema_head}"
     started = clock.monotonic()
     env_fd, _env_abs = _open_envelope(manifest)
     try:
@@ -1671,7 +1715,7 @@ def restore(
                         os.close(src)
             os.fsync(target_fd)
             failures, facts = _verify_in(
-                manifest, target_fd, target_abs, has_audit, archive=archive
+                manifest, target_fd, target_abs, has_audit, admission=admission
             )
             if _nofollow_identity(target_abs) != _dir_identity(target_fd):
                 failures.append(
@@ -1774,13 +1818,12 @@ def run_drill(
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
     source: BoundSource | None = None,
-    archive: ArchiveBinding | None = None,
 ) -> DrillReport:
     """Backup → rpo → restore + verify, one report. ``source`` is the caller's bound
     capability (the N3-2 cutover shares one across gate, backup and rename; left to the
-    backup otherwise); ``archive`` is passed to :func:`restore` (the N3-2 cutover archive of
-    a retired schema) and a clean result is then ``ARCHIVE_VERIFIED``, never ``VERIFIED``;
-    the CLI never sets either."""
+    backup otherwise); when the flatten gate admitted it, :func:`restore` verifies by that
+    admission and a clean result is ``ARCHIVE_VERIFIED``, never ``VERIFIED``. The CLI never
+    passes a capability."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
@@ -1792,9 +1835,9 @@ def run_drill(
     except DrillRefused as error:
         rpo, basis = None, {"source": None, "refused": str(error)}
         failures.append(f"rpo: refused — {error}")
-    report = restore(manifest, restore_into, clock=clock, keys=keys, archive=archive)
+    report = restore(manifest, restore_into, clock=clock, keys=keys, source=source)
     failures.extend(report.failures)
-    clean = VERIFIED if archive is None else ARCHIVE_VERIFIED
+    clean = VERIFIED if _admission_of(source) is None else ARCHIVE_VERIFIED
     return DrillReport(
         manifest=manifest,
         restore=report,

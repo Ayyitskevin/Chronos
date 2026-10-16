@@ -77,8 +77,9 @@ and exit `2`; `--apply` writes nothing before every check has passed.
 
 3. **Apply.** Same command with `--apply`. Expect exit `0` and `"verdict": "ARCHIVED"`, with
    `drill.verdict` `ARCHIVE_VERIFIED` and `drill.acceptance` `archive:schema_version:17` (the
-   drill's distinct verdict for a retired-schema archive: version below the running one, the
-   envelope bound to the very inode the gate held, exact head — the running code refuses a
+   drill's distinct verdict for a retired-schema archive, reachable only through the admission
+   the gate places on the held store after every check passed: version below the running one,
+   the envelope bound to the very inode the gate held, exact head — the running code refuses a
    schema-17 store by design, see [`RESTORE-DRILL.md`](RESTORE-DRILL.md), "Archiving a retired
    schema"). Write down, from the JSON: `envelope`, `manifest_sha256`, `cleartext_sha256`,
    `ciphertext_sha256`, and every `moved_aside` pair. The old store is now

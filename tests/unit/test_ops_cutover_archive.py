@@ -1177,7 +1177,6 @@ def _admitted_source(store: Store) -> Any:
     return source
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the capability carries no admission")
 def test_8a_the_gate_s_admission_on_the_bound_source_verifies_a_retired_store_as_an_archive(
     tmp_path: Path,
 ) -> None:
@@ -1220,7 +1219,6 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: no _admit_archive seam on the capability")
 def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(tmp_path: Path) -> None:
     """The seam itself is checked by the drill: an admission naming another retired head than the
     copy really has verifies as nothing."""
@@ -1243,7 +1241,6 @@ def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(tmp_pat
     assert report.restore is not None and report.restore.acceptance.startswith("archive:")
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: no _admit_archive seam on the capability")
 def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
     tmp_path: Path,
 ) -> None:
@@ -1276,7 +1273,6 @@ def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an
     assert report.restore is not None and not report.restore.verified
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: restore() takes no source capability")
 def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archive(
     tmp_path: Path,
 ) -> None:
@@ -1295,9 +1291,6 @@ def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archiv
     assert report.acceptance.startswith("archive:")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="r2 RED @7ce4825: run_drill/restore/verify_restored still take archive="
-)
 def test_8g_the_bare_string_seam_and_the_public_binding_are_gone() -> None:
     for function in (drill.run_drill, drill.restore, drill.verify_restored):
         parameters = inspect.signature(function).parameters
@@ -1308,7 +1301,6 @@ def test_8g_the_bare_string_seam_and_the_public_binding_are_gone() -> None:
     assert "archived_schema_head" not in source and "ArchiveBinding" not in source
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the capability carries no admission")
 def test_8h_daybreak_s_counterexample_a_store_the_gate_refused_can_never_be_archive_verified(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

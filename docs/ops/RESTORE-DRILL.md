@@ -232,19 +232,26 @@ The N3 cutover archive (`python -m chronos.operations.cutover_archive`,
 [`N3-CUTOVER.md`](N3-CUTOVER.md)) runs this harness over the **pre-cutover** store — a schema
 the running repository refuses by design (`database.py`: "Unsupported Chronos schema
 version"). Step 5's repository acceptance can therefore never pass for that archive. The
-archive command passes an `ArchiveBinding` instead — the head it read from the source
-(`schema_version:17`), that head's numeric version, and the inode of the store it gated — and
-the drill checks every part itself: the version must be BELOW the running `SCHEMA_VERSION` (a
-current or newer store is never an archive), the head must have that version's form, the
-envelope's manifest must record that inode (`source_identity`: the backup was of the gated
-object, through the one bound connection), and `restored head == manifest head == bound head`;
-sha256, row counts and the audit chain verify exactly as before. All good, the verdict is
-`ARCHIVE_VERIFIED` with `"acceptance": "archive:<head>"` — **not** `VERIFIED`, which is only
-ever the repository's acceptance (`"acceptance": "repository"`, every ordinary drill). No
-caller-supplied value can turn a current store, or a store the gate did not hold, into a
-verified archive. The CLI never sets a binding, and a binding makes nothing acceptable to the
-running code: to USE a restored copy of a retired schema, check out the code that last ran it
-(the pre-cutover sha the cutover runbook records).
+archive command's flatten gate, at its END and only then, ADMITS the still-open bound source
+capability as that archive's source (the head it read, `schema_version:17`; that head's numeric
+version, which must be BELOW the running `SCHEMA_VERSION` — a current or newer store is never
+an archive; and the inode of the store it gated). That seam is the gate's alone: the drill's
+`run_drill` / `restore` / `verify_restored` take the capability itself (`source=`), never a
+value a caller could construct, and verify by the admission only when the capability carries
+one — the envelope's manifest must record the admitted inode (`source_identity`: the backup was
+of the gated object, through the one bound connection), and `restored head == manifest head ==
+admitted head`; sha256, row counts and the audit chain verify exactly as before. On that branch
+nothing is opened by pathname and no T-3 name check runs: the copy's bytes are the held
+descriptor's (sha256), while its head and row counts come through `_readonly_fd`, a
+resolved-pathname open. All good, the verdict is `ARCHIVE_VERIFIED` with `"acceptance":
+"archive:<head>"` — **not** `VERIFIED`, which is only ever the repository's acceptance
+(`"acceptance": "repository"`, every ordinary drill). A capability the gate refused carries no
+admission, so every public drill path over that store ends in the repository's own refusal of
+the retired version; a later `restore` of the envelope under the running code reports every
+verifier and exactly that refusal (`verified: false`, one `schema_acceptance:` failure) — the
+copy is there, usable only under the code that last ran it. The CLI never admits anything: to
+USE a restored copy of a retired schema, check out the code that last ran it (the pre-cutover
+sha the cutover runbook records).
 
 Every manifest now records `source_identity` (`[device, inode]`) of the file the backup
 connection was proven to have opened; a manifest written before this field exists reads as

@@ -46,9 +46,11 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    over the same capability: sqlite's online backup API through the bound connection, ``age``
    to the two recipients named by the existing custody variables, one atomically published
    envelope whose manifest records the source inode, an isolated restore and its verifiers —
-   with an ``ArchiveBinding`` (the head read in step 1, its numeric version, the held inode)
-   that the DRILL checks: version below the running one, the envelope's source identity, the
-   exact head (a retired schema that the running repository refuses by design; see the drill).
+   by the archive ADMISSION the gate placed on the capability at its end (r2: the head read
+   in step 1, its numeric version — below the running one — and the held inode; a seam only
+   the gate reaches, never a value a caller could construct), which the DRILL checks: the
+   envelope's source identity, the exact head (a retired schema that the running repository
+   refuses by design; see the drill). A capability the gate refused carries no admission.
 3. **Verdict ``ARCHIVE_VERIFIED`` required** — the drill's distinct verdict for a bound
    retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
    live store is untouched and the report names the envelope and the restore copy that exist.
@@ -106,7 +108,6 @@ from chronos.operations.restore_drill import (
     ARCHIVE_VERIFIED,
     MANIFEST_NAME,
     AgeKeys,
-    ArchiveBinding,
     BoundSource,
     Clock,
     DrillRefused,
@@ -470,6 +471,12 @@ def flatten_gate(source: BoundSource, *, now: datetime) -> GateReport:
                 ) from None
     finally:
         engine.dispose(close=False)  # the connection is the capability's, not the engine's
+    try:
+        # every check passed: the capability is admitted as the retired archive's source —
+        # the drill's ARCHIVE_VERIFIED exists only through this admission (r2, P1-2)
+        source._admit_archive(head, version)
+    except DrillRefused as error:
+        raise CutoverRefused("SCHEMA_UNREADABLE", str(error)) from None
     return GateReport(
         schema_version=version,
         schema_head=head,
@@ -956,12 +963,7 @@ def _archive_admitted(
             restore_into,
             clock=clock,
             keys=keys,
-            source=source,
-            archive=ArchiveBinding(
-                schema_head=gate.schema_head,
-                schema_version=gate.schema_version,
-                source_identity=source.identity,
-            ),
+            source=source,  # carries the gate's admission: the drill verifies by it
         )
     except DrillRefused as error:
         return ArchiveReport(
