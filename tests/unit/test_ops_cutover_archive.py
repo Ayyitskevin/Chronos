@@ -956,7 +956,6 @@ def _escrow(
     return completed, out
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
 def test_7c_the_escrow_tool_encrypts_the_key_it_is_given_and_proves_it_decrypts_back(
     tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
@@ -987,7 +986,6 @@ def test_7c_the_escrow_tool_encrypts_the_key_it_is_given_and_proves_it_decrypts_
     assert not list((tmp_path / "escrow").glob(".chronos-escrow-*"))  # the scratch is gone
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
 @pytest.mark.parametrize(
     "shape", ["empty", "newline-only", "63-hex", "65-hex", "uppercase", "not-hex", "two-lines"]
 )
@@ -1014,7 +1012,6 @@ def test_7d_the_escrow_tool_fails_closed_on_anything_but_one_64_lowercase_hex_li
     assert good not in completed.stdout + completed.stderr
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
 def test_7e_the_escrow_tool_never_reads_the_key_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

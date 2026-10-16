@@ -102,15 +102,27 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
    it is never typed into an agent, a handoff, a ticket or a chat. No example appears on this
    page on purpose.
 
-6. **Escrow one copy off-host, encrypted to your recovery key.** The same public key that is
-   the backups' second recipient (`KEVIN_RECOVERY_RECIPIENT` in `restore_drill.py`; its private
-   half lives in your password manager, never on a fleet host):
+6. **Escrow one copy off-host, encrypted, and prove it decrypts back.** The tool below reads the
+   key from a non-echoing prompt — type (or paste) the same 64 hex characters you put in `.env`;
+   it never takes them from the environment or the command line, so an unset variable cannot
+   silently escrow an empty line — refuses anything but exactly one line of 64 lowercase hex,
+   encrypts the line with `age` to the two recipients every backup uses (the host identity's
+   public key and `KEVIN_RECOVERY_RECIPIENT`, validated by the restore drill from
+   `CHRONOS_BACKUP_AGE_IDENTITY` / `CHRONOS_BACKUP_AGE_RECIPIENTS` exactly as in step 2),
+   immediately decrypts the new artifact through the host identity into a private scratch and
+   compares it in process (never printing it), and only then reports:
    ```bash
-   printf '%s\n' "$CHRONOS_PERSISTENCE_KEY" | age -r <your age1 recovery public key> -o chronos-persistence-key.age
+   python -m chronos.operations.persistence_key_escrow --out chronos-persistence-key.age --pretty
    ```
-   Move `chronos-persistence-key.age` off this host (password manager attachment or the same
-   place the backup escrow goes), then `shred -u` or `rm` the local file. One escrow copy,
-   exactly; the `.env` on the host is the only working copy.
+   Expect exit `0`, `"verdict": "ESCROWED"`, `"verified": true`, the two `recipients`, and the
+   artifact's `ciphertext_sha256`. Exit `2` with `code: KEY_MALFORMED` means the line was not
+   64 lowercase hex (nothing was written); `ESCROW_MISMATCH` means the artifact did not decrypt
+   to what you typed and was removed — do not keep it. Then move `chronos-persistence-key.age`
+   off this host (password manager attachment, or the same place the backup escrow goes), and
+   `shred -u` or `rm` the local file yourself — the tool never deletes a verified artifact. One
+   escrow copy, exactly; the `.env` on the host is the only working copy. Your recovery private
+   key never exists on a fleet host; the host identity can also open this artifact, as it can
+   every backup — that is what made the on-host decrypt-and-compare possible.
 
 7. **Start the backend.** With `data/chronos.db` absent, the backend's startup creates a fresh
    database at the running schema (18) — `python -m chronos.cli db-preflight` first, then
