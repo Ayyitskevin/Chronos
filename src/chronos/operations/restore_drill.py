@@ -59,12 +59,19 @@ What the drill does and does not do:
   ``Database.initialize()`` carries no alembic table). The head check on the
   restored copy compares that value AND runs the repository's own acceptance
   (``Database.initialize()`` on an already-versioned store verifies the version
-  and zero drift and applies no upgrade). One exception, by name only: the N3-2
-  cutover archive (``chronos.operations.cutover_archive``) backs up a store of a
-  RETIRED schema that the running repository refuses by design, and passes the head
-  it read from the source as ``archived_schema_head``; the restore then verifies
-  ``restored head == manifest head == that head`` with no repository acceptance and
-  says so (``acceptance: archived:<head>``). The CLI never sets it.
+  and zero drift and applies no upgrade). One DISTINCT verdict beside it, never a
+  substitute: the N3-2 cutover archive (``chronos.operations.cutover_archive``) backs
+  up a store of a RETIRED schema that the running repository refuses by design and
+  passes an :class:`ArchiveBinding` — the head it read from the source, that head's
+  numeric version, and the gated source inode. The drill then checks, itself, that the
+  version is BELOW the running ``SCHEMA_VERSION`` (a current-or-newer store is never
+  an archive), that the head has that version's form, that the envelope's manifest
+  records that inode (the backup was of the gated object), and that
+  ``restored head == manifest head == bound head``; sha256, row counts and the audit
+  chain verify as always; no repository acceptance runs. All good: the verdict is
+  ``ARCHIVE_VERIFIED`` with ``acceptance: archive:<head>`` — ``VERIFIED`` is only ever
+  the repository's acceptance, and no caller-supplied value can turn one into the
+  other. The CLI never sets a binding.
 - The database is encrypted at rest with ``age`` (route A: the age CLI — Muse
   ruling 2026-09-16, delegated by Kevin) to exactly TWO recipients — the host's
   operational public key and Kevin's recovery public key — inside the temp
@@ -126,7 +133,7 @@ from chronos.auditlog.log import (
     read_audit_pair,
     verify_pair_text,
 )
-from chronos.persistence.database import Database
+from chronos.persistence.database import SCHEMA_VERSION, Database
 
 #: Encryption at rest (R-2): the age CLI, X25519 recipients. ``"none"`` is what a manifest
 #: from before R-2 says; the drill no longer produces or restores such an envelope.
@@ -266,8 +273,9 @@ class RestoreReport:
     failures: tuple[str, ...]
     rto_s: float
     #: ``repository`` — the running repository accepted the copy (``Database.initialize()``,
-    #: version + zero drift); ``archived:<head>`` — the caller named a RETIRED schema head
-    #: (N3-2 cutover archive) and the copy was verified by exact head instead (see ``restore``).
+    #: version + zero drift); ``archive:<head>`` — an :class:`ArchiveBinding` was in effect
+    #: (N3-2 cutover archive of a RETIRED schema) and the copy was verified by exact head,
+    #: retired version and gated source identity instead (see ``restore``).
     acceptance: str = "repository"
 
     @property
@@ -282,13 +290,65 @@ class RestoreReport:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveBinding:
+    """What the N3-2 cutover binds a RETIRED-schema archive to (Daybreak P1-2): the head the
+    gate read from the source, its numeric version, and the gated source inode. The DRILL
+    checks every part against the envelope and the restored copy (see ``_verify_in``): a
+    binding is a claim to verify, never a switch that selects a weaker acceptance."""
+
+    schema_head: str
+    schema_version: int
+    source_identity: tuple[int, int]
+
+    def problems(self, manifest: BackupManifest, restored_head: str) -> list[str]:
+        """Every way this binding fails to describe the retired archive it names."""
+
+        failures: list[str] = []
+        if self.schema_version >= SCHEMA_VERSION:
+            failures.append(
+                f"archive: schema_version {self.schema_version} is not a retired schema (the "
+                f"running SCHEMA_VERSION is {SCHEMA_VERSION}); a current or newer store is never "
+                "an archive"
+            )
+        if self.schema_head != f"schema_version:{self.schema_version}":
+            failures.append(
+                f"archive: head {self.schema_head} is not the form schema_version:"
+                f"{self.schema_version}; an archive is bound to one numeric retired version"
+            )
+        if manifest.source_identity is None or (
+            tuple(manifest.source_identity) != tuple(self.source_identity)
+        ):
+            recorded = (
+                "none"
+                if manifest.source_identity is None
+                else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
+            )
+            failures.append(
+                f"archive: the envelope's source identity {recorded} is not the gated source "
+                f"{self.source_identity[0]}:{self.source_identity[1]} (device:inode); the "
+                "backup was not of the gated object"
+            )
+        if restored_head != self.schema_head:
+            failures.append(
+                f"schema_head: restored {restored_head} != archive head {self.schema_head}; "
+                "a retired-schema archive is verified by exact head"
+            )
+        return failures
+
+
+#: The drill's two verdicts for a verified copy — distinct on purpose (Daybreak P1-2).
+VERIFIED = "VERIFIED"
+ARCHIVE_VERIFIED = "ARCHIVE_VERIFIED"
+
+
+@dataclass(frozen=True, slots=True)
 class DrillReport:
     manifest: BackupManifest
     restore: RestoreReport | None
     rpo_s: float | None
     rpo_basis: dict[str, object]
     rto_s: float | None
-    verdict: str
+    verdict: str  # VERIFIED | ARCHIVE_VERIFIED | FAILED
     failures: tuple[str, ...] = field(default=())
 
     def to_dict(self) -> dict[str, object]:
@@ -1306,12 +1366,12 @@ def _verify_in(
     target_abs: Path,
     has_audit: bool,
     *,
-    archived_schema_head: str | None = None,
+    archive: ArchiveBinding | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers, every read through the target directory descriptor; the
     repository's own acceptance (a pathname open) is bound by identity checks before and
-    after it. With ``archived_schema_head`` the acceptance is the exact head the caller
-    named instead (a retired schema the running repository refuses by design)."""
+    after it. With an ``archive`` binding the acceptance is the binding's own checks
+    (retired version, head form, gated source identity, exact head) instead."""
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
@@ -1339,18 +1399,16 @@ def _verify_in(
         accepted = True
         lexical = target_abs / db_name
         facts["acceptance"] = "repository"
-        if archived_schema_head is not None:
+        if archive is not None:
             # N3-2: an archive of a RETIRED schema. The running repository refuses that
             # version by design (database.py, "Unsupported Chronos schema version"), so the
-            # acceptance is the exact head the caller read from the source before the backup;
-            # nothing is opened by pathname and nothing is initialized on the copy.
-            facts["acceptance"] = f"archived:{archived_schema_head}"
-            if head != archived_schema_head:
+            # acceptance is the binding's checks; nothing is opened by pathname and nothing is
+            # initialized on the copy.
+            facts["acceptance"] = f"archive:{archive.schema_head}"
+            problems = archive.problems(manifest, head)
+            if problems:
                 accepted = False
-                failures.append(
-                    f"schema_head: restored {head} != archived head {archived_schema_head} "
-                    "named by the caller; a retired-schema archive is verified by exact head only"
-                )
+                failures.extend(problems)
         elif not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
             target_abs
         ) != _dir_identity(target_fd):
@@ -1432,7 +1490,7 @@ def verify_restored(
     restored: Path,
     restored_audit_log: Path | None,
     *,
-    archived_schema_head: str | None = None,
+    archive: ArchiveBinding | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers against a restored copy named by path (the directory is reached
     by the no-follow walk and every read goes through it)."""
@@ -1445,7 +1503,7 @@ def verify_restored(
             target_fd,
             target_abs,
             restored_audit_log is not None,
-            archived_schema_head=archived_schema_head,
+            archive=archive,
         )
     finally:
         os.close(target_fd)
@@ -1490,28 +1548,26 @@ def restore(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
-    archived_schema_head: str | None = None,
+    archive: ArchiveBinding | None = None,
 ) -> RestoreReport:
     """Decrypt the envelope's database through the host identity into a fresh directory,
     copy the audit pair beside it, and verify them there — the target descriptor is held
     through the decrypt, the copy AND the verification; rto_s from start to verified. A
     decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``).
 
-    ``archived_schema_head`` (N3-2): the source is an archive of a RETIRED schema, which the
-    running repository refuses by design; name the head the caller read from the source
-    (``schema_head(source)``) and the schema check becomes ``restored == manifest == named``
-    with no repository acceptance, reported as ``acceptance: archived:<head>``. Every other
-    verifier (sha256, row counts, audit chain) is unchanged. Restoring such a copy for use
-    needs the code that last ran that schema; this flag never makes it acceptable here."""
+    ``archive`` (N3-2): the source is an archive of a RETIRED schema, which the running
+    repository refuses by design; the binding's own checks (version below the running one,
+    head form, the envelope's source identity, exact head) replace repository acceptance,
+    reported as ``acceptance: archive:<head>``. Every other verifier (sha256, row counts,
+    audit chain) is unchanged. Restoring such a copy for use needs the code that last ran
+    that schema; a binding never makes it acceptable here."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
     _require_age_manifest(manifest)
     target_dir = Path(target_dir)
     target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
-    acceptance = (
-        "repository" if archived_schema_head is None else f"archived:{archived_schema_head}"
-    )
+    acceptance = "repository" if archive is None else f"archive:{archive.schema_head}"
     started = clock.monotonic()
     env_fd, _env_abs = _open_envelope(manifest)
     try:
@@ -1543,11 +1599,7 @@ def restore(
                         os.close(src)
             os.fsync(target_fd)
             failures, facts = _verify_in(
-                manifest,
-                target_fd,
-                target_abs,
-                has_audit,
-                archived_schema_head=archived_schema_head,
+                manifest, target_fd, target_abs, has_audit, archive=archive
             )
             if _nofollow_identity(target_abs) != _dir_identity(target_fd):
                 failures.append(
@@ -1650,12 +1702,13 @@ def run_drill(
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
     source: BoundSource | None = None,
-    archived_schema_head: str | None = None,
+    archive: ArchiveBinding | None = None,
 ) -> DrillReport:
     """Backup → rpo → restore + verify, one report. ``source`` is the caller's bound
     capability (the N3-2 cutover shares one across gate, backup and rename; left to the
-    backup otherwise); ``archived_schema_head`` is passed to :func:`restore` (the N3-2
-    cutover archive of a retired schema); the CLI never sets either."""
+    backup otherwise); ``archive`` is passed to :func:`restore` (the N3-2 cutover archive of
+    a retired schema) and a clean result is then ``ARCHIVE_VERIFIED``, never ``VERIFIED``;
+    the CLI never sets either."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
@@ -1667,21 +1720,16 @@ def run_drill(
     except DrillRefused as error:
         rpo, basis = None, {"source": None, "refused": str(error)}
         failures.append(f"rpo: refused — {error}")
-    report = restore(
-        manifest,
-        restore_into,
-        clock=clock,
-        keys=keys,
-        archived_schema_head=archived_schema_head,
-    )
+    report = restore(manifest, restore_into, clock=clock, keys=keys, archive=archive)
     failures.extend(report.failures)
+    clean = VERIFIED if archive is None else ARCHIVE_VERIFIED
     return DrillReport(
         manifest=manifest,
         restore=report,
         rpo_s=rpo,
         rpo_basis=basis,
         rto_s=report.rto_s,
-        verdict="VERIFIED" if not failures else "FAILED",
+        verdict=clean if not failures else "FAILED",
         failures=tuple(failures),
     )
 

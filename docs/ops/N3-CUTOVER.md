@@ -64,13 +64,17 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
    what to do. Do not go on until the dry-run is clean.
 
 3. **Apply.** Same command with `--apply`. Expect exit `0` and `"verdict": "ARCHIVED"`, with
-   `drill.verdict` `VERIFIED` and `drill.acceptance` `archived:schema_version:17` (the drill
-   verified the archive by exact head — the running code refuses a schema-17 store by design,
-   see [`RESTORE-DRILL.md`](RESTORE-DRILL.md), "Archiving a retired schema"). Write down, from
-   the JSON: `envelope`, `manifest_sha256`, `cleartext_sha256`, `ciphertext_sha256`, and every
-   `moved_aside` pair. The old store is now `data/chronos.db.archived-<stamp>` (plus its
-   `-wal`/`-shm` siblings when they existed), `<stamp>` being the envelope's own
-   `chronos-<stamp>` — the moved-aside files are bound by name to their archive.
+   `drill.verdict` `ARCHIVE_VERIFIED` and `drill.acceptance` `archive:schema_version:17` (the
+   drill's distinct verdict for a retired-schema archive: version below the running one, the
+   envelope bound to the very inode the gate held, exact head — the running code refuses a
+   schema-17 store by design, see [`RESTORE-DRILL.md`](RESTORE-DRILL.md), "Archiving a retired
+   schema"). Write down, from the JSON: `envelope`, `manifest_sha256`, `cleartext_sha256`,
+   `ciphertext_sha256`, and every `moved_aside` pair. The old store is now
+   `data/chronos.db.archived-<stamp>` plus the `-wal`/`-shm` siblings the gate admitted
+   (including the empty bookkeeping the command's own read-only connection left), `<stamp>`
+   being the envelope's own `chronos-<stamp>` — the moved-aside files are bound by name to their
+   archive. `left_in_place` lists any sidecar that appeared after admission and was therefore
+   never renamed; expect `[]`, and if it is not, inspect the named file before step 7.
    - `"verdict": "ARCHIVE_NOT_VERIFIED"` (exit 2): the drill did not verify; **nothing moved**,
      the live store is untouched, and the JSON names the envelope and the restore copy that now
      exist. Read `drill.failures` against the drill runbook's table; do not retry blindly.

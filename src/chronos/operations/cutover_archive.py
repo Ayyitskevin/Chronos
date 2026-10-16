@@ -39,10 +39,12 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    over the same capability: sqlite's online backup API through the bound connection, ``age``
    to the two recipients named by the existing custody variables, one atomically published
    envelope whose manifest records the source inode, an isolated restore and its verifiers —
-   with the head read in step 1 named as ``archived_schema_head`` (a retired schema that the
-   running repository refuses by design is verified by exact head; see the drill).
-3. **Verdict ``VERIFIED`` required.** Otherwise nothing moves: the live store is untouched and
-   the report names the envelope and the restore copy that now exist.
+   with an ``ArchiveBinding`` (the head read in step 1, its numeric version, the held inode)
+   that the DRILL checks: version below the running one, the envelope's source identity, the
+   exact head (a retired schema that the running repository refuses by design; see the drill).
+3. **Verdict ``ARCHIVE_VERIFIED`` required** — the drill's distinct verdict for a bound
+   retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
+   live store is untouched and the report names the envelope and the restore copy that exist.
 4. **ONLY THEN the store moves aside, by rename, never delete:** in the store's directory,
    reached by the drill's no-follow walk: the manifest's ``source_identity`` must be the held
    inode (the archive IS of this store), the store by name must be the held inode, every
@@ -85,8 +87,10 @@ from sqlalchemy.pool import StaticPool
 from chronos.domain.enums import ReconciliationStatus
 from chronos.operations.restore_drill import (
     _RENAME_NOREPLACE,
+    ARCHIVE_VERIFIED,
     MANIFEST_NAME,
     AgeKeys,
+    ArchiveBinding,
     BoundSource,
     Clock,
     DrillRefused,
@@ -124,7 +128,6 @@ SIDECAR_SUFFIXES = ("-wal", "-shm")
 ENVELOPE_PREFIX = "chronos-"
 CLEAN = ReconciliationStatus.RECONCILED.value
 ORIGIN_CLASSES = ("MANAGED", "WHEEL", "MANUAL", "FOREIGN")
-VERIFIED = "VERIFIED"
 
 
 class CutoverRefused(RuntimeError):
@@ -793,7 +796,11 @@ def _archive_admitted(
             clock=clock,
             keys=keys,
             source=source,
-            archived_schema_head=gate.schema_head,
+            archive=ArchiveBinding(
+                schema_head=gate.schema_head,
+                schema_version=gate.schema_version,
+                source_identity=source.identity,
+            ),
         )
     except DrillRefused as error:
         return ArchiveReport(
@@ -824,7 +831,7 @@ def _archive_admitted(
             "acceptance": None if report.restore is None else report.restore.acceptance,
         },
     }
-    if report.verdict != VERIFIED:
+    if report.verdict != ARCHIVE_VERIFIED:
         return ArchiveReport(
             verdict="ARCHIVE_NOT_VERIFIED",
             dry_run=False,

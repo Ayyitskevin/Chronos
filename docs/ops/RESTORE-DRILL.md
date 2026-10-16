@@ -226,20 +226,29 @@ exactly this) or the official release; the harness refuses without it with the s
 docs/ops/RESTORE-DRILL.md, section 'Encryption at rest'*, and the test file skips with the
 same sentence on a host without it.
 
-## Archiving a retired schema — the N3 cutover (the one named exception)
+## Archiving a retired schema — the N3 cutover (a distinct verdict, never a substitute)
 
 The N3 cutover archive (`python -m chronos.operations.cutover_archive`,
 [`N3-CUTOVER.md`](N3-CUTOVER.md)) runs this harness over the **pre-cutover** store — a schema
 the running repository refuses by design (`database.py`: "Unsupported Chronos schema
-version"). Step 5's repository acceptance can therefore never pass for that archive, so the
-archive command names the head it read from the source before the backup
-(`archived_schema_head`, the value `schema_head(source)` returns) and the restore verifies
-`restored head == manifest head == that head` instead; sha256, row counts and the audit
-chain verify exactly as before. The report says which acceptance it ran: `"acceptance":
-"repository"` (the default — every ordinary drill) or `"acceptance": "archived:<head>"`.
-The CLI never sets it, and naming a head makes nothing acceptable to the running code: to
-USE a restored copy of a retired schema, check out the code that last ran it (the
-pre-cutover tag the cutover runbook records).
+version"). Step 5's repository acceptance can therefore never pass for that archive. The
+archive command passes an `ArchiveBinding` instead — the head it read from the source
+(`schema_version:17`), that head's numeric version, and the inode of the store it gated — and
+the drill checks every part itself: the version must be BELOW the running `SCHEMA_VERSION` (a
+current or newer store is never an archive), the head must have that version's form, the
+envelope's manifest must record that inode (`source_identity`: the backup was of the gated
+object, through the one bound connection), and `restored head == manifest head == bound head`;
+sha256, row counts and the audit chain verify exactly as before. All good, the verdict is
+`ARCHIVE_VERIFIED` with `"acceptance": "archive:<head>"` — **not** `VERIFIED`, which is only
+ever the repository's acceptance (`"acceptance": "repository"`, every ordinary drill). No
+caller-supplied value can turn a current store, or a store the gate did not hold, into a
+verified archive. The CLI never sets a binding, and a binding makes nothing acceptable to the
+running code: to USE a restored copy of a retired schema, check out the code that last ran it
+(the pre-cutover sha the cutover runbook records).
+
+Every manifest now records `source_identity` (`[device, inode]`) of the file the backup
+connection was proven to have opened; a manifest written before this field exists reads as
+`null` and restores as before.
 
 ## Owner asks (Kevin) — the seams, not implemented here
 

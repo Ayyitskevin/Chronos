@@ -652,7 +652,6 @@ class _NoSocket:
         raise AssertionError("the cutover archive opened a socket")
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1/P1-2: no ARCHIVE_VERIFIED, no source identity")
 def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelope_stamp(
     tmp_path: Path,
     age_keys: KeyMaterial,
@@ -1082,7 +1081,6 @@ def _binding(store: Store, *, version: int | None = None) -> Any:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-2: bare-string seam, verdict VERIFIED")
 def test_8a_run_drill_with_an_archive_binding_verifies_a_retired_store_as_an_archive(
     tmp_path: Path,
 ) -> None:
@@ -1117,7 +1115,6 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-2: the seam is a bare string")
 def test_8c_an_archive_head_that_is_not_the_store_s_head_is_not_verified(tmp_path: Path) -> None:
     store = _drill_store(tmp_path)
     report = run_drill(
@@ -1133,7 +1130,6 @@ def test_8c_an_archive_head_that_is_not_the_store_s_head_is_not_verified(tmp_pat
     assert report.restore is not None and report.restore.acceptance.startswith("archive:")
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-2: Daybreak's counterexample mints VERIFIED today")
 def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
     tmp_path: Path,
 ) -> None:
@@ -1161,7 +1157,6 @@ def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-2: the manifest carries no source identity")
 def test_8f_an_archive_binding_for_another_object_is_not_verified(tmp_path: Path) -> None:
     store = _drill_store(tmp_path)
     other = _identity(store.db.parent)  # a real inode that is not the store
@@ -1173,7 +1168,6 @@ def test_8f_an_archive_binding_for_another_object_is_not_verified(tmp_path: Path
     assert any("source identity" in f for f in report.failures), report.failures
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-2: the bare-string keyword still exists")
 def test_8g_the_bare_string_seam_is_gone() -> None:
     import inspect
 
