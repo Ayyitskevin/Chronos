@@ -14,7 +14,9 @@ pins (never reads ``CHRONOS_PERSISTENCE_KEY``; imports no broker/orders module i
 socket is ever opened), (7) the runbook contract and the escrow tool, (8) G1 — the drill's
 ``ArchiveBinding`` seam (a distinct ``ARCHIVE_VERIFIED`` verdict), with the control that proves
 the gap it closes, (9) r1 — one bound source capability across gate, backup and move (Daybreak's
-A/B substitution and the independent main-file, sidecar and manifest swaps).
+A/B substitution and the independent main-file, sidecar and manifest swaps), r2 — writer
+exclusion by kernel read lease and the move's final-syscall truth (9f-9l), the archive admission
+only the gate can mint (8h), the escrow cleanup bound to the file this run created (7g-7h).
 
 "Zero changes" is asserted EXACTLY, never through a filter: the store's bytes are unchanged and
 the only entries a run may add beside a WAL-mode store are SQLite's reader bookkeeping — an empty
@@ -29,6 +31,8 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
+import io
 import itertools
 import json
 import os
@@ -718,14 +722,13 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
         ).fetchall()
         assert c.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION - 1,)]
     assert chain_after == chain_before and len(chain_before) == 3
-    binding = drill.ArchiveBinding(
-        schema_head=manifest.schema_head,
-        schema_version=SCHEMA_VERSION - 1,
-        source_identity=source_identity,
-    )
-    again = drill.restore(manifest, tmp_path / "again", archive=binding)
-    assert again.verified, again.failures
-    assert again.acceptance == f"archive:{manifest.schema_head}"
+    # a later re-verification under the running code: every verifier runs and the ONLY failure
+    # is the repository's refusal of the retired version — ARCHIVE_VERIFIED exists only on
+    # cutover day, from the gate; no caller-made value re-creates it (r2, P1-2)
+    again = drill.restore(manifest, tmp_path / "again")
+    assert not again.verified and again.acceptance == "repository"
+    assert again.sha256_ok and again.row_counts_ok and not again.schema_head_ok
+    assert [f.split(":", 1)[0] for f in again.failures] == ["schema_acceptance"], again.failures
     assert report["restore_dir"] == str(tmp_path / "restored")
     assert any("CHRONOS_PERSISTENCE_KEY" in step for step in report["next_manual_steps"])
     assert any("token_hex(32)" in step for step in report["next_manual_steps"])
@@ -1054,6 +1057,82 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
     assert "decrypt" in step6 and "compare" in step6
 
 
+@pytest.mark.xfail(
+    strict=True, reason="r2 RED @7ce4825: the failure cleanup unlinks the name unconditionally"
+)
+@pytest.mark.parametrize(
+    "shape", ["swap-then-decrypt-fails", "swap-then-decrypt-succeeds", "decrypt-fails"]
+)
+def test_7g_escrow_failure_cleanup_deletes_only_the_file_this_run_created(
+    tmp_path: Path,
+    age_keys: KeyMaterial,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+) -> None:
+    """Daybreak P1-3 (r1): after the artifact is created, its name is swapped (the created file
+    renamed aside, a foreign file planted at the name) and/or the decrypt-and-compare fails. The
+    tool verifies through the descriptor it holds, proves the name still resolves to it before
+    success, and on failure unlinks the name only when it still IS that file: the foreign entry
+    survives, the created ciphertext is reported as possibly remaining under a renamed entry;
+    with no swap the created file is removed and the report says so."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    aside = out.with_name("artifact-aside")
+    foreign = b"not the file this run created"
+    real_decrypt = escrow._decrypts_back_to
+
+    def hooked(*args: Any, **kwargs: Any) -> None:
+        monkeypatch.setattr(escrow, "_decrypts_back_to", real_decrypt)
+        if shape.startswith("swap"):
+            os.rename(out, aside)
+            out.write_bytes(foreign)
+        if shape.endswith("fails"):
+            raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
+        real_decrypt(*args, **kwargs)
+
+    monkeypatch.setattr(escrow, "_decrypts_back_to", hooked)
+    key = _hex(f"n3-2 r2 TEST key for {shape} — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    expected_code = "TARGET_SWAPPED" if shape == "swap-then-decrypt-succeeds" else "AGE_FAILED"
+    assert report["code"] == expected_code, report  # succeeds: the decrypt read the HELD inode
+    created = report["created_artifact"]
+    assert created["path"] == str(out)
+    if shape.startswith("swap"):
+        assert out.read_bytes() == foreign  # the foreign entry survives
+        assert _entries(out.parent) == ["artifact-aside", out.name]
+        assert created["removed"] is False and "renamed entry" in created["note"]
+        assert AGE is not None
+        decrypted = subprocess.run(
+            [AGE, "-d", "-i", str(age_keys.identity), str(aside)], check=True, capture_output=True
+        )
+        assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact, aside
+    else:
+        assert not out.exists() and _entries(out.parent) == []
+        assert created["removed"] is True
+    assert key not in json.dumps(report)
+
+
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the runbook predates the r2 boundaries")
+def test_7h_the_runbook_states_the_r2_boundaries() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step6 = text[text.index("6. **Escrow") : text.index("7. **Start")]
+    assert "TARGET_SWAPPED" in step6 and "renamed entry" in step6
+    before = text[text.index("## Before you start") : text.index("## Steps")]
+    assert "lease" in before and "owner" in before  # the kernel lease needs the store's owner
+    step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
+    assert "left_in_place" in step3 and "do not go on" in step3  # a hard operator stop
+    assert "foreign_renamed" in step3
+    table = text[text.index("## What the gate's refusal codes mean") :]
+    assert "`WRITER_OPEN`" in table and "`WRITER_EXCLUSION_UNAVAILABLE`" in table
+
+
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
     assert "`N3-CUTOVER.md`" in OPS_README.read_text(encoding="utf-8")
 
@@ -1065,28 +1144,42 @@ def _drill_store(tmp_path: Path) -> Store:
     return _store(tmp_path, binding="closed")
 
 
-def _binding(store: Store, *, version: int | None = None) -> Any:
-    version = SCHEMA_VERSION - 1 if version is None else version
-    return drill.ArchiveBinding(
-        schema_head=f"schema_version:{version}",
-        schema_version=version,
-        source_identity=_identity(store.db),
-    )
+def _admitted_source(store: Store) -> Any:
+    """What only the flatten gate does: open the bound source and run the gate over it — the gate
+    admits the retired head ON the capability at its end — and hand the capability back still
+    open (the caller closes it)."""
+
+    source = drill.open_bound_source(store.db)
+    try:
+        cutover.flatten_gate(source, now=store.now)
+    except BaseException:
+        source.close()
+        raise
+    return source
 
 
-def test_8a_run_drill_with_an_archive_binding_verifies_a_retired_store_as_an_archive(
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the capability carries no admission")
+def test_8a_the_gate_s_admission_on_the_bound_source_verifies_a_retired_store_as_an_archive(
     tmp_path: Path,
 ) -> None:
     store = _drill_store(tmp_path)
     head = drill.schema_head(store.db)
     assert head == f"schema_version:{SCHEMA_VERSION - 1}"
-    report = run_drill(
-        store.db,
-        tmp_path / "out",
-        tmp_path / "restored",
-        clock=_clock(store.now),
-        archive=_binding(store),
-    )
+    source = _admitted_source(store)
+    try:
+        admission = source.archive_admission
+        assert admission is not None
+        assert (admission.schema_head, admission.schema_version) == (head, SCHEMA_VERSION - 1)
+        assert admission.source_identity == source.identity == _identity(store.db)
+        report = run_drill(
+            store.db,
+            tmp_path / "out",
+            tmp_path / "restored",
+            clock=_clock(store.now),
+            source=source,
+        )
+    finally:
+        source.close()
     assert report.verdict == "ARCHIVE_VERIFIED", report.failures  # never repository VERIFIED
     assert report.restore is not None
     assert report.restore.acceptance == f"archive:{head}"
@@ -1108,65 +1201,132 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-def test_8c_an_archive_head_that_is_not_the_store_s_head_is_not_verified(tmp_path: Path) -> None:
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: no _admit_archive seam on the capability")
+def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(tmp_path: Path) -> None:
+    """The seam itself is checked by the drill: an admission naming another retired head than the
+    copy really has verifies as nothing."""
+
     store = _drill_store(tmp_path)
-    report = run_drill(
-        store.db,
-        tmp_path / "out",
-        tmp_path / "restored",
-        clock=_clock(store.now),
-        archive=_binding(store, version=SCHEMA_VERSION - 2),
-    )
+    source = drill.open_bound_source(store.db)
+    try:
+        source._admit_archive(f"schema_version:{SCHEMA_VERSION - 2}", SCHEMA_VERSION - 2)
+        report = run_drill(
+            store.db,
+            tmp_path / "out",
+            tmp_path / "restored",
+            clock=_clock(store.now),
+            source=source,
+        )
+    finally:
+        source.close()
     assert report.verdict == "FAILED"
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
-    # default reports say the repository accepted the copy; this one says what was named instead
     assert report.restore is not None and report.restore.acceptance.startswith("archive:")
 
 
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: no _admit_archive seam on the capability")
 def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
     tmp_path: Path,
 ) -> None:
-    """P1-2: a non-archive store (AT the running SCHEMA_VERSION) named as an archive by a library
-    caller must verify as nothing — not ARCHIVE_VERIFIED, not VERIFIED."""
+    """P1-2 (r1): a store AT the running SCHEMA_VERSION is refused by the gate
+    (SCHEMA_ALREADY_CURRENT) and cannot be admitted even through the drill's own seam; lying the
+    version down is caught by the exact head on the copy."""
 
     store = _store(tmp_path, version_offset=0)
-    binding = _binding(store, version=SCHEMA_VERSION)  # the head the store really has
-    report = run_drill(
-        store.db, tmp_path / "out", tmp_path / "restored", clock=_clock(store.now), archive=binding
-    )
+    source = drill.open_bound_source(store.db)
+    try:
+        with pytest.raises(cutover.CutoverRefused) as refused:
+            cutover.flatten_gate(source, now=store.now)
+        assert refused.value.code == "SCHEMA_ALREADY_CURRENT"
+        assert source.archive_admission is None
+        with pytest.raises(drill.DrillRefused, match="not a retired schema"):
+            source._admit_archive(f"schema_version:{SCHEMA_VERSION}", SCHEMA_VERSION)
+        assert source.archive_admission is None
+        source._admit_archive(f"schema_version:{SCHEMA_VERSION - 1}", SCHEMA_VERSION - 1)  # a lie
+        report = run_drill(
+            store.db,
+            tmp_path / "out",
+            tmp_path / "restored",
+            clock=_clock(store.now),
+            source=source,
+        )
+    finally:
+        source.close()
     assert report.verdict == "FAILED", report.verdict
-    assert any("not a retired schema" in f for f in report.failures), report.failures
-    assert report.restore is not None and not report.restore.verified
-    # and a caller cannot lie the version down: the head on the copy must match the binding
-    lying = drill.ArchiveBinding(
-        schema_head=f"schema_version:{SCHEMA_VERSION - 1}",
-        schema_version=SCHEMA_VERSION - 1,
-        source_identity=_identity(store.db),
-    )
-    report = run_drill(
-        store.db, tmp_path / "out2", tmp_path / "restored2", clock=_clock(store.now), archive=lying
-    )
-    assert report.verdict == "FAILED"
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
+    assert report.restore is not None and not report.restore.verified
 
 
-def test_8f_an_archive_binding_for_another_object_is_not_verified(tmp_path: Path) -> None:
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: restore() takes no source capability")
+def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archive(
+    tmp_path: Path,
+) -> None:
     store = _drill_store(tmp_path)
-    other = _identity(store.db.parent)  # a real inode that is not the store
-    binding = replace(_binding(store), source_identity=other)
-    report = run_drill(
-        store.db, tmp_path / "out", tmp_path / "restored", clock=_clock(store.now), archive=binding
-    )
-    assert report.verdict == "FAILED"
+    source = _admitted_source(store)
+    try:
+        manifest = drill.backup(store.db, tmp_path / "out", clock=_clock(store.now), source=source)
+        other = _identity(store.db.parent)  # a real inode that is not the store
+        report = drill.restore(
+            replace(manifest, source_identity=other), tmp_path / "restored", source=source
+        )
+    finally:
+        source.close()
+    assert not report.verified
     assert any("source identity" in f for f in report.failures), report.failures
+    assert report.acceptance.startswith("archive:")
 
 
-def test_8g_the_bare_string_seam_is_gone() -> None:
-    import inspect
-
+@pytest.mark.xfail(
+    strict=True, reason="r2 RED @7ce4825: run_drill/restore/verify_restored still take archive="
+)
+def test_8g_the_bare_string_seam_and_the_public_binding_are_gone() -> None:
     for function in (drill.run_drill, drill.restore, drill.verify_restored):
-        assert "archived_schema_head" not in inspect.signature(function).parameters, function
-    assert "archived_schema_head" not in MODULE.read_text(encoding="utf-8")
+        parameters = inspect.signature(function).parameters
+        assert "archived_schema_head" not in parameters, function
+        assert "archive" not in parameters, function
+    assert not hasattr(drill, "ArchiveBinding")
+    source = MODULE.read_text(encoding="utf-8")
+    assert "archived_schema_head" not in source and "ArchiveBinding" not in source
+
+
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the capability carries no admission")
+def test_8h_daybreak_s_counterexample_a_store_the_gate_refused_can_never_be_archive_verified(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1-2 (r1): a retired store WITHOUT a reconciliation run. The gate refuses it; no public
+    path then reaches ARCHIVE_VERIFIED — the drill takes no binding a caller could construct, the
+    capability the gate refused carries no admission, and every public drill call over the store
+    ends in the running repository's own refusal of the retired version."""
+
+    store = _store(tmp_path, run=None)
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 2 and report["code"] == "NO_RECONCILIATION_RUN", report
+    source = drill.open_bound_source(store.db)
+    try:
+        with pytest.raises(cutover.CutoverRefused) as refused:
+            cutover.flatten_gate(source, now=store.now)
+        assert refused.value.code == "NO_RECONCILIATION_RUN"
+        assert source.archive_admission is None
+        for function in (run_drill, drill.restore, drill.verify_restored):
+            assert "archive" not in inspect.signature(function).parameters, function
+        assert not hasattr(drill, "ArchiveBinding")
+        unbound = run_drill(
+            store.db, tmp_path / "out-a", tmp_path / "restored-a", clock=_clock(store.now)
+        )
+        bound = run_drill(
+            store.db,
+            tmp_path / "out-b",
+            tmp_path / "restored-b",
+            clock=_clock(store.now),
+            source=source,
+        )
+    finally:
+        source.close()
+    prefix = "schema_acceptance: Unsupported Chronos schema version"
+    for drilled in (unbound, bound):
+        assert drilled.verdict == "FAILED", drilled.verdict
+        assert drilled.restore is not None and drilled.restore.acceptance == "repository"
+        assert any(f.startswith(prefix) for f in drilled.failures), drilled.failures
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -1324,3 +1484,251 @@ def test_9e_the_drill_s_own_backup_is_bound_to_its_no_follow_open_and_records_th
     assert BackupManifest.from_dict(manifest.to_dict()).source_identity == manifest.source_identity
     legacy = BackupManifest.from_dict({**manifest.to_dict(), "source_identity": None})
     assert legacy.source_identity is None
+
+
+# ------------------------------------------------- (9, r2) writer exclusion, the move's truth
+
+
+def _append_frames(wal: Path) -> None:
+    """Sixty-four bytes beyond the header into the SAME inode (Daybreak's probe): an open for
+    append on the name — never a new file, never a rename."""
+
+    with open(wal, "ab") as handle:
+        handle.write(b"\0" * 64)
+
+
+SIDECARS = ("chronos.db-wal", "chronos.db-shm")
+
+
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: ARCHIVED with a frameful admitted WAL")
+def test_9f_daybreak_s_counterexample_an_admitted_wal_that_gains_frames_in_place_is_never_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The admitted ``-wal`` (held, identity pinned) is written IN PLACE after the drill, just
+    before the move: the same inode, so every identity check passes — the move must still refuse
+    with nothing renamed, the store's bytes unchanged and the frames left where they were."""
+
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    wal = store.db.with_name("chronos.db-wal")
+    real_move = cutover._move_aside
+
+    def grow_then_move(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(cutover, "_move_aside", real_move)
+        identity = _identity(wal)
+        _append_frames(wal)
+        assert _identity(wal) == identity  # the same inode, grown
+        return real_move(*args, **kwargs)
+
+    monkeypatch.setattr(cutover, "_move_aside", grow_then_move)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] != "ARCHIVED", report
+    assert report["code"] == "WAL_FRAMES_PRESENT", report
+    assert report["moved_aside"] == [] and report["not_moved"] == []
+    assert store.db.exists() and _sha256(store.db) == before
+    assert wal.stat().st_size == 64  # never touched
+    assert not any(".archived-" in name for name in _entries(store.db.parent))
+    assert Path(report["envelope"]).is_dir()
+
+
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: ARCHIVED with a frameful admitted WAL")
+def test_9g_frames_appended_to_the_admitted_wal_during_the_drill_refuse_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    wal = store.db.with_name("chronos.db-wal")
+    real_run_drill = cutover.run_drill
+
+    def grow_then_drill(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(cutover, "run_drill", real_run_drill)
+        _append_frames(wal)
+        return real_run_drill(*args, **kwargs)
+
+    monkeypatch.setattr(cutover, "run_drill", grow_then_drill)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] != "ARCHIVED", report
+    assert report["code"] == "WAL_FRAMES_PRESENT", report
+    assert report["moved_aside"] == [] and _sha256(store.db) == before and store.db.exists()
+    assert wal.stat().st_size == 64
+
+
+@pytest.mark.xfail(
+    strict=True, reason="r2 RED @7ce4825: no writer exclusion; a held writer archives"
+)
+def test_9h_a_process_holding_the_store_open_for_writing_refuses_before_the_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Writer exclusion (P1-1): the command takes a kernel READ LEASE on the held store. While any
+    process has the store open for writing — a writable SQLite connection, idle or not — the lease
+    is refused and so is the command, before any fact is read: WRITER_OPEN, gate None, no envelope.
+    With nothing holding it open for writing, the same command archives."""
+
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    holder = sqlite3.connect(store.db)  # a writable connection: the store is open O_RDWR
+    try:
+        holder.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    finally:
+        holder.close()
+    assert code == 2 and report["code"] == "WRITER_OPEN", report
+    assert report["gate"] is None and report["envelope"] is None
+    assert not (tmp_path / "backups").exists() and _sha256(store.db) == before
+    assert "open for writing" in report["failures"][0]
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+
+
+@pytest.mark.xfail(
+    strict=True, reason="r2 RED @7ce4825: no lease; a write-open during the archive succeeds"
+)
+def test_9i_a_write_open_during_the_archive_is_refused_by_the_lease_and_stops_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After the gate, during the drill, a process tries to open the store for writing (a
+    non-blocking open, so the test does not wait out the lease break): the kernel refuses it
+    (EAGAIN) because the command holds the read lease — and that attempt breaks the lease, which
+    the command reads before the first rename: WRITER_OPEN, nothing moved. On return the command
+    has released its leases, so a writer may open the store again."""
+
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    real_backup = drill.backup
+    attempts: list[str] = []
+
+    def attempt_write_open(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(drill, "backup", real_backup)
+        try:
+            fd = os.open(store.db, os.O_RDWR | os.O_NONBLOCK)
+        except BlockingIOError:
+            attempts.append("EAGAIN")
+        else:
+            os.close(fd)
+            attempts.append("OPENED")
+        return real_backup(*args, **kwargs)
+
+    monkeypatch.setattr(drill, "backup", attempt_write_open)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert attempts == ["EAGAIN"], attempts  # the lease held: the writer was refused
+    assert code == 2 and report["code"] == "WRITER_OPEN", report
+    assert report["moved_aside"] == [] and _sha256(store.db) == before and store.db.exists()
+    assert not any(".archived-" in name for name in _entries(store.db.parent))
+    assert Path(report["envelope"]).is_dir()
+    fd = os.open(store.db, os.O_RDWR | os.O_NONBLOCK)  # released on return
+    os.close(fd)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="r2 RED @7ce4825: the renamed foreign entry is neither restored nor reported",
+)
+def test_9j_a_main_file_swap_at_the_final_syscall_is_renamed_back_and_reported_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Daybreak's final-syscall probe: the name is exchanged AFTER every precheck, immediately
+    before ``renameat2``, so the rename moves a foreign entry. The post-proof detects it, the
+    foreign entry is renamed BACK by name (never over anything), and the report is exact: nothing
+    of the admitted set moved, every admitted name is in ``not_moved``, the foreign entry is
+    listed with where it is now, and the held store's identity is named."""
+
+    a = _store(tmp_path / "a", binding="closed")
+    b = _store(tmp_path / "b", binding="closed")
+    a_identity, a_sha = _identity(a.db), _sha256(a.db)
+    b_identity, b_sha = _identity(b.db), _sha256(b.db)
+    real_rename = cutover._renameat2
+
+    def swap_then_rename(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        if src == "chronos.db":
+            monkeypatch.setattr(cutover, "_renameat2", real_rename)
+            os.rename(a.db, a.db.with_name("victim-away"))
+            os.rename(b.db, a.db)
+        real_rename(src_dir_fd, src, dst_dir_fd, dst, flags)
+
+    monkeypatch.setattr(cutover, "_renameat2", swap_then_rename)
+    code, report = _run(a, tmp_path / "a", "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED", report  # nothing of ours moved
+    assert report["code"] == "SOURCE_SWAPPED"
+    assert f"{a_identity[0]}:{a_identity[1]}" in report["failures"][0]
+    archived = a.db.with_name(f"chronos.db.archived-{a.stamp}")
+    assert report["moved_aside"] == []
+    assert report["not_moved"] == [str(a.db), *(str(a.db.with_name(n)) for n in SIDECARS)]
+    assert report["foreign_renamed"] == [
+        {
+            "renamed_to": str(archived),
+            "restored_to": str(a.db),
+            "identity": f"{b_identity[0]}:{b_identity[1]}",
+        }
+    ]
+    assert _entries(a.db.parent) == ["chronos.db", *SIDECARS, "victim-away"]
+    assert _sha256(a.db) == b_sha and _identity(a.db) == b_identity  # the foreign, back at its name
+    assert _sha256(a.db.with_name("victim-away")) == a_sha  # the store, where the swap put it
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="r2 RED @7ce4825: the renamed foreign entry is neither restored nor reported",
+)
+def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_reported_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    wal = store.db.with_name("chronos.db-wal")
+    shm = store.db.with_name("chronos.db-shm")
+    admitted: list[tuple[int, int]] = []
+    real_rename = cutover._renameat2
+
+    def swap_wal_then_rename(
+        src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int
+    ) -> None:
+        if src == "chronos.db-wal":
+            monkeypatch.setattr(cutover, "_renameat2", real_rename)
+            admitted.append(_identity(wal))
+            os.rename(wal, wal.with_name("wal-away"))
+            planted = wal.with_name("planted")
+            planted.write_bytes(b"")
+            os.rename(planted, wal)
+        real_rename(src_dir_fd, src, dst_dir_fd, dst, flags)
+
+    monkeypatch.setattr(cutover, "_renameat2", swap_wal_then_rename)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "MOVE_INCOMPLETE", report
+    assert report["code"] == "SOURCE_SWAPPED"
+    archived_db = store.db.with_name(f"chronos.db.archived-{store.stamp}")
+    archived_wal = wal.with_name(f"chronos.db-wal.archived-{store.stamp}")
+    assert report["moved_aside"] == [{"from": str(store.db), "to": str(archived_db)}]
+    assert report["not_moved"] == [str(wal), str(shm)]
+    assert report["foreign_renamed"] == [
+        {
+            "renamed_to": str(archived_wal),
+            "restored_to": str(wal),
+            "identity": "{}:{}".format(*_identity(wal)),
+        }
+    ]
+    assert _entries(store.db.parent) == [
+        "chronos.db-shm",
+        "chronos.db-wal",
+        archived_db.name,
+        "wal-away",
+    ]
+    assert _identity(wal.with_name("wal-away")) == admitted[0]  # the admitted sidecar, intact
+    # the runbook's rollback is exact: the one moved name renames back by name
+    os.rename(archived_db, store.db)
+    assert _entries(store.db.parent) == ["chronos.db", *SIDECARS, "wal-away"]
+
+
+@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the report carries no exclusion proof")
+def test_9l_an_archived_report_proves_the_admitted_wal_stayed_frame_free_through_the_move(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    exclusion = report["exclusion"]
+    assert exclusion["mechanism"].startswith("kernel read lease")
+    assert exclusion["leased"] == ["chronos.db", *SIDECARS]
+    assert exclusion["intact_after_move"] is True
+    assert exclusion["wal_bytes_after_move"] <= cutover.WAL_HEADER_BYTES
+    archived = store.db.with_name(f"chronos.db.archived-{store.stamp}")
+    fd = os.open(archived, os.O_RDWR | os.O_NONBLOCK)  # every lease released on return
+    os.close(fd)
