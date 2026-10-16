@@ -166,18 +166,21 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    Expect exit `0`, `"verdict": "ESCROWED"`, `"verified": true`, the two `recipients`, and the
    artifact's `ciphertext_sha256`. Exit `2` with `code: KEY_MALFORMED` means the line was not
    64 lowercase hex (nothing was written); `ESCROW_MISMATCH` means the artifact did not decrypt
-   to what you typed — do not keep it. After a failure, `created_artifact` in the report says
-   what became of the file this run created: `removed: true`, or `removed: false` with the
-   reason. `TARGET_SWAPPED` means the output name stopped naming the file the tool wrote before
-   the proof finished (something renamed or replaced it): the tool verifies through the
-   descriptor it holds and deletes nothing it did not create, so the ciphertext this run created
-   may remain under a renamed entry — `created_artifact` names its device:inode; find it
-   (`find <dir> -inum <inode>`) and shred it yourself. Then move `chronos-persistence-key.age`
-   off this host (password manager attachment, or the same place the backup escrow goes), and
-   `shred -u` or `rm` the local file yourself — the tool never deletes a verified artifact. One
-   escrow copy, exactly; the `.env` on the host is the only working copy. Your recovery private
-   key never exists on a fleet host; the host identity can also open this artifact, as it can
-   every backup — that is what made the on-host decrypt-and-compare possible.
+   to what you typed — do not keep it. After any failure once the file was created, the tool
+   **deletes nothing** (a removal would be by name, and a name can be swapped under it in the
+   last instant; only its own private scratch is ever removed): `created_artifact` in the report
+   names the ciphertext this run created by `path` and device:inode (`removed` is always
+   `false`) — find it (`find <dir> -inum <inode>`) and shred it yourself, at its name or under a
+   renamed entry. `TARGET_SWAPPED` means the output name stopped naming the file the tool wrote
+   before the proof finished (something renamed or replaced it): the tool verifies through the
+   descriptor it holds, so the ciphertext this run created sits under the renamed entry; the
+   foreign entry at the name is not the tool's and was not touched. Then move
+   `chronos-persistence-key.age` off this host (password manager attachment, or the same place
+   the backup escrow goes), and `shred -u` or `rm` the local file yourself — the tool never
+   deletes a verified artifact either. One escrow copy, exactly; the `.env` on the host is the
+   only working copy. Your recovery private key never exists on a fleet host; the host identity
+   can also open this artifact, as it can every backup — that is what made the on-host
+   decrypt-and-compare possible.
 
 7. **Vacate the live names yourself, then start the backend.** `ls -la data/` once more (step
    3's listing: four sentinel directories, three `.archived-<stamp>` files, the old siblings).

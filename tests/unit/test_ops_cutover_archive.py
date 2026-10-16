@@ -22,8 +22,6 @@ only the gate can mint (8h), the escrow cleanup bound to the file this run creat
 non-admitted name occupied), the archive drill that runs the gate itself (8a-8h: every seam on a
 refused store is tried), the escrow tool that deletes nothing after a post-create failure (7g, 7i).
 
-RED-r3 markers: ``_R3_P1_1`` / ``_R3_P1_2`` / ``_R3_P1_3`` are the strict-xfail reasons at 4890e25.
-
 "Zero changes" is asserted EXACTLY, never through a filter: the store's bytes are unchanged and
 the only entries a run may add beside a WAL-mode store are SQLite's reader bookkeeping — an empty
 ``chronos.db-wal`` and a ``chronos.db-shm`` — which ``--apply`` moves aside with the store.
@@ -104,11 +102,6 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R3_P1_3 = (
-    "r3 P1-3: at 4890e25 the post-create failure path unlinks by name after an identity check — "
-    "a swap in between deletes the foreign entry"
-)
-RED_P1_3 = pytest.mark.xfail(strict=True, reason=_R3_P1_3)
 
 
 def _hex(seed: str) -> str:
@@ -1136,7 +1129,7 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
     [
         "swap-then-decrypt-fails",
         "swap-then-decrypt-succeeds",
-        pytest.param("decrypt-fails", marks=RED_P1_3),
+        "decrypt-fails",
     ],
 )
 def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_created(
@@ -1231,7 +1224,6 @@ def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     assert "`LIVE_NAME_OCCUPIED`" in table
 
 
-@RED_P1_3
 def test_7k_the_runbook_says_the_escrow_tool_deletes_nothing_after_a_failure() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     step6 = text[text.index("6. **Escrow") : text.index("7. **")]
@@ -2003,7 +1995,6 @@ def test_9l_an_archived_report_proves_the_admitted_set_quiet_and_the_live_names_
 # ------------------------------------------------- (7, r3) the escrow tool deletes nothing
 
 
-@RED_P1_3
 def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothing(
     tmp_path: Path,
     age_keys: KeyMaterial,

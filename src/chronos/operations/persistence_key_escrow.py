@@ -14,12 +14,14 @@ through the proof: it is decrypted THROUGH THAT DESCRIPTOR (``/proc/self/fd/<n>`
 this run created, whatever the directory entry now says) through the host identity into a private
 0700 scratch directory and compared, byte for byte, in this process; the scratch is unlinked; the
 output name must still resolve to the held file (``TARGET_SWAPPED`` otherwise); only then does the
-tool report. On any failure after the file was created, the name is unlinked only when it still
-IS the file this run created — identity-checked, and the held descriptor's link count then proves
-what was unlinked (r2, Daybreak P1-3); a swapped name deletes nothing, and the report's
-``created_artifact`` says the created ciphertext may remain under a renamed entry (its
-device:inode named). The report never carries the key, nor a digest of it — the ciphertext's
-sha256, the output path and the recipients only::
+tool report. On any failure after the file was created, the tool DELETES NOTHING (r3, Daybreak
+P1-3: Linux has no unlink-by-descriptor, every unlink is by name, and a name can be swapped under
+the tool in the instant before the syscall — so no cleanup is bound to the file it made): the
+report's ``created_artifact`` names the created ciphertext's path and device:inode for the owner
+to find and shred, at its name or under a renamed entry. The only things the tool ever removes
+are its own private scratch (the cleartext the proof wrote, and the 0700 directory it made). The
+report never carries the key, nor a digest of it — the ciphertext's sha256, the output path and
+the recipients only::
 
     python -m chronos.operations.persistence_key_escrow --out chronos-persistence-key.age [--pretty]
 
@@ -167,37 +169,26 @@ def _decrypts_back_to(keys: AgeKeys, key: str, artifact_fd: int) -> None:
             os.rmdir(scratch)
 
 
-def _remove_created(
-    dfd: int, name: str, fd: int, identity: tuple[int, int], parent_abs: Path
-) -> Outcome:
-    """Failure cleanup bound to the file this run created (r2, Daybreak P1-3): the name is
-    unlinked only when it still IS that file, and the held descriptor's link count then proves
-    what was unlinked. Nothing else is ever deleted; the outcome says what became of the
-    created ciphertext, which may remain under a renamed entry."""
+def _report_created(name: str, identity: tuple[int, int], parent_abs: Path) -> Outcome:
+    """After a post-create failure the tool DELETES NOTHING (r3, Daybreak P1-3): Linux has no
+    unlink-by-descriptor, so any removal would be by name, and a name can be swapped under the
+    tool between its last look and the syscall — r2's identity-checked unlink still deleted a
+    foreign entry in that interval. The outcome names the ciphertext this run created, by path
+    and device:inode, for the owner to find and shred; ``removed`` is always false."""
 
     where = str(parent_abs / name)
     ident = f"{identity[0]}:{identity[1]}"
-    outcome: Outcome = {"path": where, "identity": ident, "removed": False, "note": ""}
-    if not _entry_is_real_file(dfd, name, identity):
-        outcome["note"] = (
-            f"{where} no longer names the file this run created; nothing was deleted. The "
-            f"created ciphertext (device:inode {ident}) may remain under a renamed entry in "
-            f"{parent_abs}: find it by inode (find {parent_abs} -inum {identity[1]}) and shred "
-            "it yourself"
-        )
-        return outcome
-    os.unlink(name, dir_fd=dfd)
-    if os.fstat(fd).st_nlink == 0:
-        outcome["removed"] = True
-        outcome["note"] = f"the file this run created at {where} was removed"
-        return outcome
-    outcome["note"] = (
-        f"the entry unlinked at {where} was NOT the file this run created (the name was swapped "
-        f"in the last instant): a foreign entry was deleted, and the created ciphertext "
-        f"(device:inode {ident}) remains under another name in {parent_abs} — find it by inode "
-        f"(find {parent_abs} -inum {identity[1]}) and shred it yourself"
-    )
-    return outcome
+    return {
+        "path": where,
+        "identity": ident,
+        "removed": False,
+        "note": (
+            f"the tool deletes nothing after a failure: the ciphertext this run created "
+            f"(device:inode {ident}) is left where it is — at {where}, or under a renamed entry "
+            f"in {parent_abs} if the name was swapped; find it by inode (find {parent_abs} -inum "
+            f"{identity[1]}) and shred it yourself"
+        ),
+    }
 
 
 def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
@@ -247,7 +238,7 @@ def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
                     )
                 os.fsync(dfd)
             except BaseException as error:
-                outcome = _remove_created(dfd, name, fd, identity, parent_abs)
+                outcome = _report_created(name, identity, parent_abs)  # never an unlink
                 if isinstance(error, EscrowRefused):
                     error.created = outcome
                 raise
