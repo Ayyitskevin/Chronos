@@ -1209,7 +1209,6 @@ def _swap_at_next_connect(monkeypatch: pytest.MonkeyPatch, victim: Path, imposto
     monkeypatch.setattr(sqlite3, "connect", swapping)
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1: the gate re-resolves the pathname after the inode")
 def test_9a_daybreak_s_a_b_substitution_is_refused_before_any_fact_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1228,7 +1227,6 @@ def test_9a_daybreak_s_a_b_substitution_is_refused_before_any_fact_is_read(
     assert a.db.exists() and a.db.with_name("victim-away").exists()  # both stores untouched
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1: the drill backs up whatever the name resolves to")
 def test_9b_a_main_file_swap_after_the_gate_cannot_reach_the_envelope_or_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1262,7 +1260,6 @@ def test_9b_a_main_file_swap_after_the_gate_cannot_reach_the_envelope_or_the_mov
     assert not any(name.startswith("chronos.db.archived-") for name in _entries(a.db.parent))
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1: sidecars are re-enumerated by name at the move")
 def test_9c_a_sidecar_swapped_or_planted_after_admission_stops_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1304,7 +1301,6 @@ def test_9c_a_sidecar_swapped_or_planted_after_admission_stops_the_move(
     assert planted_store.db.with_name("chronos.db-wal").read_bytes() == b"x" * 64  # never touched
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1: the manifest carries no binding to compare")
 def test_9d_the_move_compares_the_manifest_s_source_identity_with_the_held_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1324,7 +1320,6 @@ def test_9d_the_move_compares_the_manifest_s_source_identity_with_the_held_one(
     assert report["moved_aside"] == [] and _sha256(store.db) == before and store.db.exists()
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P1-1: the drill's backup opens, closes, re-resolves")
 def test_9e_the_drill_s_own_backup_is_bound_to_its_no_follow_open_and_records_the_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

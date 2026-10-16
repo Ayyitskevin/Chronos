@@ -28,7 +28,14 @@ What the drill does and does not do:
   read-only (``mode=ro``) connection under SQLite's normal locking and WAL
   semantics — never ``immutable=1``, never inferred from a sidecar precheck, so a
   WAL that appears after any check is still honoured — never a file copy of a
-  live database. The source is never opened for writing.
+  live database. The source is never opened for writing. The connection is ONE
+  :class:`BoundSource` (N3-2 r1): the source is opened no-follow and held, and the
+  connection is proven — by the descriptors this process gained when it connected —
+  to have opened that very inode (SQLite resolves even ``/proc/self/fd/<n>`` back to
+  a pathname before opening, measured on 3.53); a swap at the name between the two
+  opens is a typed refusal before any byte is read. The manifest records that inode
+  as ``source_identity`` so a later step can compare what was archived with what it
+  holds. A caller may pass its own capability so gate, backup and rename share it.
 - The backup is ONE ENVELOPE: a dot-prefixed temp DIRECTORY under ``--out``
   holding the database (written into the O_EXCL temp descriptor via
   ``/proc/self/fd/<n>``, stored in rollback-journal mode), the audit log and
@@ -189,9 +196,15 @@ class BackupManifest:
     audit_log_path: str | None
     encryption: dict[str, object] = field(default_factory=lambda: {"scheme": "none"})
     ciphertext_sha256: str | None = None
+    #: ``(device, inode)`` of the source file the backup connection was proven to have opened
+    #: (N3-2 r1); ``None`` only in a manifest written before the field existed.
+    source_identity: tuple[int, int] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if self.source_identity is not None:
+            data["source_identity"] = list(self.source_identity)  # as manifest.json writes it
+        return data
 
     @property
     def cleartext_name(self) -> str:
@@ -218,7 +231,18 @@ class BackupManifest:
             ciphertext_sha256=None
             if data.get("ciphertext_sha256") is None
             else str(data["ciphertext_sha256"]),
+            source_identity=_identity_field(data.get("source_identity")),
         )
+
+
+def _identity_field(raw: object) -> tuple[int, int] | None:
+    """``[device, inode]`` as the manifest writes it; absent in a pre-r1 manifest."""
+
+    if raw is None:
+        return None
+    if isinstance(raw, list | tuple) and len(raw) == 2:
+        return int(raw[0]), int(raw[1])
+    raise DrillRefused(f"manifest source_identity is not [device, inode]: {raw!r}")
 
 
 def _encryption_block(raw: object) -> dict[str, object]:
@@ -777,27 +801,106 @@ def _fresh_directory(target: Path, what: str) -> int:
 # ----------------------------------------------------------------- store inspection
 
 
-def _readonly(path: Path) -> contextlib.closing[sqlite3.Connection]:
-    """A read-only connection on the SOURCE under SQLite's normal locking and WAL semantics.
+def _descriptor_identities() -> dict[int, tuple[int, int]]:
+    """Every open descriptor of this process and the ``(device, inode)`` it refers to."""
 
-    Never ``immutable=1``: that flag makes SQLite ignore a WAL, and "no ``-wal`` right
-    now" is not a fact about the next instant (Daybreak's R-1 probe committed a row
-    between such a check and the open). A read-only reader on a WAL-mode file may
-    create empty ``-wal``/``-shm`` beside it — a directory write, never a database
-    write; the retained copies are stored in rollback-journal mode so readers leave
-    nothing beside them.
+    found: dict[int, tuple[int, int]] = {}
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            number = int(name)
+            st = os.fstat(number)
+        except (ValueError, OSError):
+            continue
+        found[number] = (st.st_dev, st.st_ino)
+    return found
+
+
+class SourceSwapped(DrillRefused):
+    """The name a read-only connection opened no longer designated the object held open."""
+
+
+class BoundSource:
+    """ONE capability on the source for a whole operation (N3-2 r1, Daybreak P1-1).
+
+    ``fd`` is the file opened ``O_RDONLY|O_NOFOLLOW`` and proven regular; ``identity`` is its
+    ``(device, inode)``, which cannot be recycled while the descriptor is open. ``connection``
+    is a ``mode=ro`` connection under SQLite's normal locking and WAL semantics (never
+    ``immutable=1``: "no ``-wal`` right now" is not a fact about the next instant) that was
+    PROVEN to have opened that inode: SQLite resolves a pathname — even ``/proc/self/fd/<n>``
+    — before it opens (measured, 3.53), so the proof is structural: among the descriptors
+    this process gained by connecting and reading once, one refers to ``identity``, else
+    :class:`SourceSwapped` and nothing was read. Every later read of the source goes
+    through ``connection``; a rename at the end is by name and re-proves ``identity``
+    before and after. A read-only reader leaves SQLite's bookkeeping beside a WAL-mode
+    store — an empty ``-wal`` and a ``-shm``; a directory entry, never a database write.
     """
 
-    # closing(): a ``with`` on a sqlite3 Connection is a transaction scope, not a closer —
-    # without it the connection (and its descriptor on the store) lingers until the garbage
-    # collector runs (T-3)
-    return contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    __slots__ = ("_connection_open", "_fd_open", "connection", "fd", "identity", "path")
+
+    def __init__(
+        self, path: Path, fd: int, identity: tuple[int, int], connection: sqlite3.Connection
+    ) -> None:
+        self.path = path
+        self.fd = fd
+        self.identity = identity
+        self.connection = connection
+        self._connection_open = True
+        self._fd_open = True
+
+    def close_connection(self) -> None:
+        if self._connection_open:
+            self._connection_open = False
+            self.connection.close()
+
+    def close(self) -> None:
+        self.close_connection()
+        if self._fd_open:
+            self._fd_open = False
+            os.close(self.fd)
+
+
+def open_bound_source(path: Path, subject: str = "source database") -> BoundSource:
+    """Open ``path`` no-follow (regular file required), hold it, connect read-only by name,
+    and prove the connection opened the held inode (see :class:`BoundSource`)."""
+
+    path = Path(path)
+    fd = _open_regular(path, subject)
+    try:
+        st = os.fstat(fd)
+        identity = (st.st_dev, st.st_ino)
+        absolute = path if path.is_absolute() else Path.cwd() / path
+        before = _descriptor_identities()
+        connection = sqlite3.connect(f"{absolute.as_uri()}?mode=ro", uri=True)
+        try:
+            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            gained = {
+                number: found
+                for number, found in _descriptor_identities().items()
+                if number not in before
+            }
+            if identity not in gained.values():
+                others = sorted({f"{dev}:{ino}" for dev, ino in gained.values()})
+                raise SourceSwapped(
+                    f"{subject} {path} swapped: the read-only connection opened "
+                    f"{', '.join(others) or 'no file'} (device:inode), not the object held open "
+                    f"no-follow ({identity[0]}:{identity[1]}) — the name changed between the two "
+                    "opens; nothing was read"
+                )
+        except BaseException:
+            connection.close()
+            raise
+    except BaseException:
+        os.close(fd)
+        raise
+    return BoundSource(path, fd, identity, connection)
 
 
 def _readonly_fd(fd: int) -> contextlib.closing[sqlite3.Connection]:
-    """A read-only connection on an already-open descriptor (a retained copy): sqlite
-    opens ``/proc/self/fd/<n>``, so no pathname is re-resolved. Closed on exit (see
-    :func:`_readonly`)."""
+    """A read-only connection on an already-open descriptor of a RETAINED copy. SQLite resolves
+    ``/proc/self/fd/<n>`` to the pathname before opening (measured, 3.53), so this binds by
+    name at that instant; the callers re-prove the copy's identity through ``fd`` before and
+    after (T-3). Closed on exit: a ``with`` on a Connection is a transaction scope, not a
+    closer, and an unclosed connection lingers until the garbage collector runs."""
 
     return contextlib.closing(sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro", uri=True))
 
@@ -974,14 +1077,22 @@ def _read_text_at(dfd: int, name: str, subject: str) -> str:
 
 
 def backup(
-    db_path: Path, out_dir: Path, *, clock: Clock | None = None, keys: AgeKeys | None = None
+    db_path: Path,
+    out_dir: Path,
+    *,
+    clock: Clock | None = None,
+    keys: AgeKeys | None = None,
+    source: BoundSource | None = None,
 ) -> BackupManifest:
     """A consistent online backup of ``db_path`` as ONE envelope under ``out_dir``.
 
-    The source is opened read-only (``mode=ro``, normal SQLite locking) and never
-    written. The envelope is staged as a dot-temp directory (database through the
-    O_EXCL temp descriptor, audit pair from one ``read_audit_pair`` after the backup
-    completed, ``manifest.json``), every file and the directory fsynced, then
+    The source is read through ONE :class:`BoundSource` — the caller's (``source``, so a
+    gate, this backup and a later rename share one capability) or this call's own, opened
+    before any directory is created and closed before returning — read-only (``mode=ro``,
+    normal SQLite locking), proven to be the held inode, never written; the manifest records
+    that inode as ``source_identity``. The envelope is staged as a dot-temp directory
+    (database through the O_EXCL temp descriptor, audit pair from one ``read_audit_pair``
+    after the backup completed, ``manifest.json``), every file and the directory fsynced, then
     published with ONE ``renameat2(RENAME_NOREPLACE)`` — EEXIST or any other error
     is a typed refusal and the temp is removed — then ``out_dir`` is fsynced. The
     directory capability admitted by the walk is held through every manifest read
@@ -992,8 +1103,18 @@ def backup(
     keys = keys or load_age_keys()  # every key refusal precedes the source open
     db_path = Path(db_path)
     out_dir = Path(out_dir)
-    fd = _open_regular(db_path, "source database")
-    os.close(fd)
+    owned = source is None
+    source = source or open_bound_source(db_path, "source database")
+    try:
+        return _backup_bound(source, out_dir, clock=clock, keys=keys)
+    finally:
+        if owned:
+            source.close()
+
+
+def _backup_bound(
+    source: BoundSource, out_dir: Path, *, clock: Clock, keys: AgeKeys
+) -> BackupManifest:
     out_fd, out_abs = _walk_directory(out_dir, "backup directory", create=True)
     try:
         taken_at = clock.wall()
@@ -1003,7 +1124,7 @@ def backup(
         env_fd = os.open(temp_name, _DIR_FLAGS, dir_fd=out_fd)
         try:
             manifest = _stage_envelope(
-                env_fd, db_path, db_name, out_abs / final_name, taken_at, clock
+                env_fd, source, db_name, out_abs / final_name, taken_at, clock
             )
             manifest = _encrypt_staged(env_fd, db_name, manifest, keys)
             _stage_bytes_at(
@@ -1062,10 +1183,16 @@ def backup(
 
 
 def _stage_envelope(
-    env_fd: int, db_path: Path, db_name: str, final_dir: Path, taken_at: datetime, clock: Clock
+    env_fd: int,
+    source: BoundSource,
+    db_name: str,
+    final_dir: Path,
+    taken_at: datetime,
+    clock: Clock,
 ) -> BackupManifest:
-    """Fill the temp envelope: the database, the audit pair (one read, after the backup
-    completed), and the manifest facts read back through the descriptors."""
+    """Fill the temp envelope: the database (through the bound connection — no reopen), the
+    audit pair (one read, after the backup completed), and the manifest facts read back
+    through the descriptors."""
 
     tmp_fd = _create_exclusive_at(env_fd, db_name, flags=os.O_RDWR)
     try:
@@ -1075,8 +1202,7 @@ def _stage_envelope(
         destination = sqlite3.connect(f"/proc/self/fd/{tmp_fd}")
         try:
             destination.execute("PRAGMA journal_mode=OFF")
-            with _readonly(db_path) as source:
-                source.backup(destination)
+            source.connection.backup(destination)
             snapshot_completed_at = clock.wall()
             # one self-contained file: readers of the retained copy leave no sidecars
             destination.execute("PRAGMA journal_mode=DELETE")
@@ -1088,7 +1214,7 @@ def _stage_envelope(
         os.fsync(tmp_fd)
         # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
         # log, no-follow, one capability read each — the audit log's own reader)
-        audit_log = db_path.parent / AUDIT_LOG_NAME
+        audit_log = source.path.parent / AUDIT_LOG_NAME
         try:
             log_text, anchor_bytes = read_audit_pair(audit_log)
         except AuditLogCorruptionError as error:
@@ -1117,13 +1243,14 @@ def _stage_envelope(
     return BackupManifest(
         taken_at=taken_at.isoformat(),
         snapshot_completed_at=snapshot_completed_at.isoformat(),
-        source_path=str(db_path),
+        source_path=str(source.path),
         backup_path=str(final_dir / db_name),
         sha256=sha256,
         schema_head=head,
         row_counts=counts,
         audit_head=audit_head,
         audit_log_path=audit_log_path,
+        source_identity=source.identity,
     )
 
 
@@ -1522,14 +1649,17 @@ def run_drill(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
+    source: BoundSource | None = None,
     archived_schema_head: str | None = None,
 ) -> DrillReport:
-    """Backup → rpo → restore + verify, one report. ``archived_schema_head`` is passed to
-    :func:`restore` (the N3-2 cutover archive of a retired schema); the CLI never sets it."""
+    """Backup → rpo → restore + verify, one report. ``source`` is the caller's bound
+    capability (the N3-2 cutover shares one across gate, backup and rename; left to the
+    backup otherwise); ``archived_schema_head`` is passed to :func:`restore` (the N3-2
+    cutover archive of a retired schema); the CLI never sets either."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
-    manifest = backup(db_path, out_dir, clock=clock, keys=keys)
+    manifest = backup(db_path, out_dir, clock=clock, keys=keys, source=source)
     failures: list[str] = []
     rpo: float | None
     try:

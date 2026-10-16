@@ -5,14 +5,23 @@ One command, owner-run, with every Chronos process stopped::
     python -m chronos.operations.cutover_archive --db data/chronos.db \\
         --out /var/backups/chronos/n3 --restore-into /tmp/chronos-n3-verify [--apply] [--pretty]
 
-Dry-run (the default) runs the gate below, prints what ``--apply`` would do, and creates
-nothing — not even the envelope. ``--apply`` runs, in this order, each step a typed stop:
+Dry-run (the default) runs the gate below, prints what ``--apply`` would do, writes nothing
+to the store and creates no envelope. One directory effect is SQLite's, not the command's: a
+read-only connection on a WAL-mode store leaves its reader bookkeeping beside it — an empty
+``chronos.db-wal`` and a ``chronos.db-shm`` — and nothing else; ``--apply`` moves them aside
+with the store. ``--apply`` runs, in this order, each step a typed stop:
 
+0. **One source capability** (:class:`chronos.operations.restore_drill.BoundSource`): the
+   store is opened no-follow and HELD until the last rename is proven, and the one read-only
+   connection every fact is read through is proven to have opened that very inode (SQLite
+   resolves a pathname before it opens, so the proof is the descriptors this process gained);
+   a swap at the name between the two opens is ``SOURCE_SWAPPED`` before any fact is read.
+   The drill backs up through the same connection and its manifest records the inode.
 1. **The flatten gate** — read-only, from the store ALONE: never a broker call, never an
-   operator override, no ``--force``. The store is opened ``mode=ro`` through a plain engine
-   (never ``immutable=1``, so a WAL that exists is honoured; never ``Database``, whose
-   pragma listener and ``initialize()`` are for the running schema). What the store must prove:
-   it is a regular file with regular sidecars; its ``schema_version`` is BELOW the running
+   operator override, no ``--force``. The rows are read through the bound connection over a
+   plain engine (never ``immutable=1``, so a WAL that exists is honoured; never ``Database``,
+   whose pragma listener and ``initialize()`` are for the running schema). What the store must
+   prove: it is a regular file with regular sidecars; its ``schema_version`` is BELOW the running
    ``SCHEMA_VERSION`` (a store already at the running version is never archived); it carries a
    ``database_scope`` row; no writer lease is live (the backend holds and renews the row while it
    runs and deletes it on a clean stop); no uncheckpointed write-ahead frames sit beside it
@@ -21,20 +30,28 @@ nothing — not even the envelope. ``--apply`` runs, in this order, each step a 
    the latest ``reconciliation_runs`` row exists, is ``RECONCILED`` with a ``RECONCILED``
    readiness latch, completed within ``MAX_RECONCILIATION_AGE``, and recorded NO broker
    position (the ruling: "no open position at cutover"; when it refuses, the count is broken
-   down by origin class from the run's own ``position_provenance`` rows).
-2. **The R-2 restore drill**, reused whole (:func:`chronos.operations.restore_drill.run_drill`):
-   sqlite's online backup API, ``age`` to the two recipients named by the existing custody
-   variables, one atomically published envelope, an isolated restore and its verifiers — with
-   the head read in step 1 named as ``archived_schema_head`` (a retired schema that the running
-   repository refuses by design is verified by exact head; see the drill).
+   down by origin class from the run's own ``position_provenance`` rows). At the end of the
+   gate the sidecars present (``-wal``/``-shm``, each a regular file, the ``-wal`` without
+   frames) are ADMITTED: opened no-follow and held, their identities pinned; this is the whole
+   set the move may rename — a sidecar that appears later is never renamed (with frames it
+   refuses the move; without, it is reported ``left_in_place``).
+2. **The R-2 restore drill**, reused whole (:func:`chronos.operations.restore_drill.run_drill`)
+   over the same capability: sqlite's online backup API through the bound connection, ``age``
+   to the two recipients named by the existing custody variables, one atomically published
+   envelope whose manifest records the source inode, an isolated restore and its verifiers —
+   with the head read in step 1 named as ``archived_schema_head`` (a retired schema that the
+   running repository refuses by design is verified by exact head; see the drill).
 3. **Verdict ``VERIFIED`` required.** Otherwise nothing moves: the live store is untouched and
    the report names the envelope and the restore copy that now exist.
 4. **ONLY THEN the store moves aside, by rename, never delete:** in the store's directory,
-   reached by the drill's no-follow walk, the source is re-proved by identity, the three
-   target names are proved absent, then ONE ``renameat2(RENAME_NOREPLACE)`` per file —
-   ``chronos.db`` → ``chronos.db.archived-<stamp>``, and the ``-wal``/``-shm`` sidecars when
-   present — where ``<stamp>`` is the envelope's own (``chronos-<stamp>``), so the moved-aside
-   files are bound by name to their archive. A failure after the first rename is reported as
+   reached by the drill's no-follow walk: the manifest's ``source_identity`` must be the held
+   inode (the archive IS of this store), the store by name must be the held inode, every
+   admitted sidecar by name must be its held inode, every target name must be absent — all
+   before any rename — then ONE ``renameat2(RENAME_NOREPLACE)`` per admitted file, each
+   re-proved after it (the archived name must be the held inode) — ``chronos.db`` →
+   ``chronos.db.archived-<stamp>``, and the admitted ``-wal``/``-shm`` likewise — where
+   ``<stamp>`` is the envelope's own (``chronos-<stamp>``), so the moved-aside files are bound
+   by name to their archive. A failure after the first rename is reported as
    ``MOVE_INCOMPLETE`` with ``moved`` and ``not_moved``; the runbook's rollback renames back.
 5. **A JSON report**: envelope, manifest path and sha256, cleartext and ciphertext sha256,
    the moved-aside names, and the next MANUAL steps (the runbook's) — never a fingerprint,
@@ -63,22 +80,26 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from chronos.domain.enums import ReconciliationStatus
 from chronos.operations.restore_drill import (
     _RENAME_NOREPLACE,
     MANIFEST_NAME,
     AgeKeys,
+    BoundSource,
     Clock,
     DrillRefused,
+    SourceSwapped,
     _fresh_directory,
     _open_regular,
     _renameat2,
+    _schema_head_on,
     _sha256_of,
     _walk_directory,
     load_age_keys,
+    open_bound_source,
     run_drill,
-    schema_head,
     system_clock,
 )
 from chronos.persistence.database import SCHEMA_VERSION
@@ -161,17 +182,13 @@ class GateReport:
         }
 
 
-def _read_only_engine(db_path: Path) -> Engine:
-    """A plain engine over ``mode=ro`` connections (the db-preflight pattern, copied): no WAL
-    pragma, no foreign-key pragma, no ``Database`` construction, nothing written."""
+def _read_only_engine(connection: sqlite3.Connection) -> Engine:
+    """A plain engine over the ONE bound connection (a static pool returns that connection
+    to every checkout): no WAL pragma, no foreign-key pragma, no ``Database`` construction,
+    nothing written, and never a second pathname open. The caller disposes it with
+    ``close=False`` — the connection belongs to the capability."""
 
-    absolute = db_path if db_path.is_absolute() else Path.cwd() / db_path
-    uri = f"{absolute.as_uri()}?mode=ro"
-
-    def connect() -> sqlite3.Connection:
-        return sqlite3.connect(uri, uri=True)
-
-    return create_engine("sqlite://", creator=connect)
+    return create_engine("sqlite://", creator=lambda: connection, poolclass=StaticPool)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -179,8 +196,9 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _sidecar_facts(db_path: Path) -> dict[str, object]:
-    """The ``-wal``/``-shm`` siblings by lstat: each must be absent or a regular file; frames
-    beyond the WAL header are a refusal (the last writer did not checkpoint and close)."""
+    """The ``-wal``/``-shm`` siblings by lstat (the precheck, before any row is read): each
+    must be absent or a regular file; frames beyond the WAL header are a refusal (the last
+    writer did not checkpoint and close). Admission — holding them — comes after the gate."""
 
     facts: dict[str, object] = {"present": False, "size": 0}
     for suffix in SIDECAR_SUFFIXES:
@@ -376,33 +394,26 @@ def _refuse_positions(session: Session, run: ReconciliationRunRow, count: int) -
     )
 
 
-def flatten_gate(db_path: Path, *, now: datetime) -> GateReport:
+def flatten_gate(source: BoundSource, *, now: datetime) -> GateReport:
     """Every proof the OLD store must give before a single byte is written anywhere.
 
-    The first refusal stops the gate (:class:`CutoverRefused`, ``code`` names it). Reads only:
-    the source by descriptor (no-follow), the sidecars by lstat, the rows through a
-    ``mode=ro`` engine. No broker, no override, no write.
+    The first refusal stops the gate (:class:`CutoverRefused`, ``code`` names it). Reads only,
+    all through the one bound capability: the source is the held descriptor (regular,
+    no-follow, its inode pinned), the sidecars by lstat, the head and every row through the
+    bound ``mode=ro`` connection — never a second pathname open. No broker, no override, no
+    write.
     """
 
-    db_path = Path(db_path)
-    passed: list[str] = []
-    try:
-        fd = _open_regular(db_path, "source database")
-    except DrillRefused as error:
-        raise CutoverRefused("SOURCE_NOT_REGULAR", str(error)) from None
-    try:
-        st = os.fstat(fd)
-        identity = (st.st_dev, st.st_ino)
-    finally:
-        os.close(fd)
-    passed.append("source_regular")
+    db_path = source.path
+    identity = source.identity
+    passed: list[str] = ["source_regular"]
     wal = _sidecar_facts(db_path)
     passed.append("wal_checkpointed")
     try:
-        head = schema_head(db_path)
-    except DrillRefused as error:
-        raise CutoverRefused("SCHEMA_UNREADABLE", str(error)) from None
-    engine = _read_only_engine(db_path)
+        head = _schema_head_on(source.connection)
+    except sqlite3.Error as error:
+        raise CutoverRefused("SCHEMA_UNREADABLE", f"{type(error).__name__}: {error}") from None
+    engine = _read_only_engine(source.connection)
     try:
         with Session(engine) as session:
             try:
@@ -434,7 +445,7 @@ def flatten_gate(db_path: Path, *, now: datetime) -> GateReport:
                     "STORE_UNREADABLE", f"{type(error).__name__}: {error}"
                 ) from None
     finally:
-        engine.dispose()
+        engine.dispose(close=False)  # the connection is the capability's, not the engine's
     return GateReport(
         schema_version=version,
         schema_head=head,
@@ -463,33 +474,117 @@ def _archived_name(name: str, stamp: str) -> str:
     return f"{name}{ARCHIVED_INFIX}{stamp}"
 
 
-def _move_aside(db_path: Path, identity: tuple[int, int], stamp: str) -> tuple[dict[str, str], ...]:
-    """Rename the store and its present sidecars to ``<name>.archived-<stamp>`` in their own
-    directory: the source re-proved by identity, every target proved absent, then ONE
-    ``renameat2(RENAME_NOREPLACE)`` per file; nothing is ever deleted or renamed over."""
+@dataclass(frozen=True, slots=True)
+class AdmittedSidecar:
+    """A ``-wal``/``-shm`` present at the end of the gate: opened no-follow, regular, HELD."""
 
-    dfd, parent_abs = _walk_directory(db_path.parent, "database directory", create=False)
+    name: str
+    fd: int
+    identity: tuple[int, int]
+
+
+def _admit_sidecars(source: BoundSource) -> tuple[AdmittedSidecar, ...]:
+    """The stable set the move may rename, fixed at the end of the gate — after the bound
+    connection's own reader bookkeeping exists, so it is in the set: each present sidecar
+    opened no-follow (a symlink or a directory refuses), its identity pinned by the held
+    descriptor, the ``-wal`` proven frame-free by ``fstat``."""
+
+    admitted: list[AdmittedSidecar] = []
     try:
-        by_name = os.stat(db_path.name, dir_fd=dfd, follow_symlinks=False)
-        if not stat.S_ISREG(by_name.st_mode) or (by_name.st_dev, by_name.st_ino) != identity:
-            raise CutoverRefused(
-                "SOURCE_SWAPPED",
-                f"{parent_abs / db_path.name} is no longer the file the gate read (identity "
-                "changed between the gate and the move); nothing moved — inspect by hand",
-            )
-        names = [db_path.name]
         for suffix in SIDECAR_SUFFIXES:
-            name = db_path.name + suffix
+            sibling = source.path.with_name(source.path.name + suffix)
+            try:
+                os.lstat(sibling)
+            except FileNotFoundError:
+                continue
+            try:
+                fd = _open_regular(sibling, "sidecar")
+            except DrillRefused as error:
+                raise CutoverRefused("SOURCE_NOT_REGULAR", str(error)) from None
+            st = os.fstat(fd)
+            admitted.append(AdmittedSidecar(sibling.name, fd, (st.st_dev, st.st_ino)))
+            if suffix == "-wal" and st.st_size > WAL_HEADER_BYTES:
+                raise CutoverRefused(
+                    "WAL_FRAMES_PRESENT",
+                    f"{sibling} holds {st.st_size} bytes of write-ahead log at admission: a "
+                    "writer is active; nothing moves",
+                )
+    except BaseException:
+        for sidecar in admitted:
+            os.close(sidecar.fd)
+        raise
+    return tuple(admitted)
+
+
+def _identity_by_name(dfd: int, name: str) -> tuple[int, int] | None:
+    """``(device, inode)`` of a regular file at ``name`` under the directory fd, by lstat;
+    ``None`` when absent or not a regular file."""
+
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _move_aside(
+    source: BoundSource,
+    sidecars: tuple[AdmittedSidecar, ...],
+    manifest_identity: tuple[int, int] | None,
+    stamp: str,
+) -> tuple[tuple[dict[str, str], ...], tuple[str, ...]]:
+    """Rename the store and its ADMITTED sidecars to ``<name>.archived-<stamp>`` in their own
+    directory. Before ANY rename: the manifest's ``source_identity`` must be the held inode,
+    the store by name must be the held inode, every admitted sidecar by name must be its held
+    inode, a non-admitted ``-wal`` with frames refuses, every target is proved absent. Then ONE
+    ``renameat2(RENAME_NOREPLACE)`` per file, each re-proved after it by the archived name's
+    identity. Nothing is ever deleted or renamed over; a non-admitted sidecar is never renamed
+    and is returned as ``left_in_place``."""
+
+    if manifest_identity != source.identity:
+        recorded = (
+            "none"
+            if manifest_identity is None
+            else f"{manifest_identity[0]}:{manifest_identity[1]}"
+        )
+        raise CutoverRefused(
+            "SOURCE_SWAPPED",
+            f"the envelope's manifest records source identity {recorded} (device:inode), not the "
+            f"gated store's {source.identity[0]}:{source.identity[1]}: the archive is not of this "
+            "store; nothing moved — inspect by hand",
+        )
+    dfd, parent_abs = _walk_directory(source.path.parent, "database directory", create=False)
+    try:
+        expected: dict[str, tuple[int, int]] = {source.path.name: source.identity}
+        for sidecar in sidecars:
+            expected[sidecar.name] = sidecar.identity
+        for name, identity in expected.items():
+            if _identity_by_name(dfd, name) != identity:
+                raise CutoverRefused(
+                    "SOURCE_SWAPPED",
+                    f"{parent_abs / name} is no longer the object the gate admitted (identity "
+                    "changed between the gate and the move); nothing moved — inspect by hand",
+                )
+        left_in_place: list[str] = []
+        for suffix in SIDECAR_SUFFIXES:
+            name = source.path.name + suffix
+            if name in expected:
+                continue
             try:
                 st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
             except FileNotFoundError:
                 continue
-            if not stat.S_ISREG(st.st_mode):
+            if suffix == "-wal" and stat.S_ISREG(st.st_mode) and st.st_size > WAL_HEADER_BYTES:
                 raise CutoverRefused(
-                    "SOURCE_NOT_REGULAR",
-                    f"{parent_abs / name} is not a regular file; nothing moved",
+                    "WAL_FRAMES_PRESENT",
+                    f"{parent_abs / name} appeared after the gate admitted the sidecars and holds "
+                    f"{st.st_size} bytes of write-ahead log: a writer is active or a foreign file "
+                    "was planted; nothing moved — stop every Chronos process and inspect by hand",
                 )
-            names.append(name)
+            left_in_place.append(str(parent_abs / name))
+        names = list(expected)
         targets = {name: _archived_name(name, stamp) for name in names}
         for target in targets.values():
             if _entry_exists(dfd, target):
@@ -520,11 +615,22 @@ def _move_aside(db_path: Path, identity: tuple[int, int], stamp: str) -> tuple[d
                     moved=tuple(moved),
                     not_moved=not_moved,
                 ) from None
+            if _identity_by_name(dfd, targets[name]) != expected[name]:
+                not_moved = tuple(str(parent_abs / other) for other in names[len(moved) + 1 :])
+                raise MoveIncomplete(
+                    "SOURCE_SWAPPED",
+                    f"the entry now at {parent_abs / targets[name]} is not the object the gate "
+                    f"admitted as {name} (identity changed during the rename): it is NOT the "
+                    f"store; {len(moved)} file(s) moved before it — inspect by hand before "
+                    f"anything starts ({RUNBOOK}, Rollback)",
+                    moved=tuple(moved),
+                    not_moved=not_moved,
+                ) from None
             moved.append({"from": str(parent_abs / name), "to": str(parent_abs / targets[name])})
         os.fsync(dfd)
     finally:
         os.close(dfd)
-    return tuple(moved)
+    return tuple(moved), tuple(left_in_place)
 
 
 # ----------------------------------------------------------------- the command
@@ -548,6 +654,7 @@ class ArchiveReport:
     drill: dict[str, object] | None = None
     moved_aside: tuple[dict[str, str], ...] = ()
     not_moved: tuple[str, ...] = ()
+    left_in_place: tuple[str, ...] = ()
     next_manual_steps: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -568,6 +675,7 @@ class ArchiveReport:
             "drill": self.drill,
             "moved_aside": [dict(entry) for entry in self.moved_aside],
             "not_moved": list(self.not_moved),
+            "left_in_place": list(self.left_in_place),
             "next_manual_steps": list(self.next_manual_steps),
             "runbook": RUNBOOK,
         }
@@ -616,7 +724,39 @@ def archive(
         keys = keys or load_age_keys()  # every key refusal precedes the source open
     except DrillRefused as error:
         raise CutoverRefused("KEYS_REFUSED", str(error)) from None
-    gate = flatten_gate(db_path, now=now)
+    try:
+        source = open_bound_source(db_path, "source database")
+    except SourceSwapped as error:
+        raise CutoverRefused("SOURCE_SWAPPED", str(error)) from None
+    except DrillRefused as error:
+        raise CutoverRefused("SOURCE_NOT_REGULAR", str(error)) from None
+    try:
+        gate = flatten_gate(source, now=now)
+        sidecars = _admit_sidecars(source)
+        try:
+            return _archive_admitted(
+                source, sidecars, gate, out_dir, restore_into, apply=apply, clock=clock, keys=keys
+            )
+        finally:
+            for sidecar in sidecars:
+                os.close(sidecar.fd)
+    finally:
+        source.close()
+
+
+def _archive_admitted(
+    source: BoundSource,
+    sidecars: tuple[AdmittedSidecar, ...],
+    gate: GateReport,
+    out_dir: Path,
+    restore_into: Path,
+    *,
+    apply: bool,
+    clock: Clock,
+    keys: AgeKeys,
+) -> ArchiveReport:
+    db_path = source.path
+    now = clock.wall()
     if not apply:
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
         out_abs = out_dir if out_dir.is_absolute() else Path.cwd() / out_dir
@@ -652,6 +792,7 @@ def archive(
             restore_into,
             clock=clock,
             keys=keys,
+            source=source,
             archived_schema_head=gate.schema_head,
         )
     except DrillRefused as error:
@@ -693,8 +834,9 @@ def archive(
             **facts,
         )
     stamp = envelope.name.removeprefix(ENVELOPE_PREFIX)
+    source.close_connection()  # the move needs the held descriptor only, never the connection
     try:
-        moved = _move_aside(db_path, gate.source_identity, stamp)
+        moved, left_in_place = _move_aside(source, sidecars, report.manifest.source_identity, stamp)
     except MoveIncomplete as error:
         return ArchiveReport(
             verdict="MOVE_INCOMPLETE",
@@ -717,6 +859,7 @@ def archive(
         verdict="ARCHIVED",
         dry_run=False,
         moved_aside=moved,
+        left_in_place=left_in_place,
         next_manual_steps=_next_manual_steps(restore_dir, report.manifest.schema_head),
         **facts,
     )
