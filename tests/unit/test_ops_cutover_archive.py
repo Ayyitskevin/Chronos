@@ -1076,9 +1076,6 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
     assert "decrypt" in step6 and "compare" in step6
 
 
-@pytest.mark.xfail(
-    strict=True, reason="r2 RED @7ce4825: the failure cleanup unlinks the name unconditionally"
-)
 @pytest.mark.parametrize(
     "shape", ["swap-then-decrypt-fails", "swap-then-decrypt-succeeds", "decrypt-fails"]
 )
@@ -1138,7 +1135,6 @@ def test_7g_escrow_failure_cleanup_deletes_only_the_file_this_run_created(
     assert key not in json.dumps(report)
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the runbook predates the r2 boundaries")
 def test_7h_the_runbook_states_the_r2_boundaries() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     step6 = text[text.index("6. **Escrow") : text.index("7. **Start")]

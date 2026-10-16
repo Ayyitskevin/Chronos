@@ -142,7 +142,13 @@ and exit `2`; `--apply` writes nothing before every check has passed.
    Expect exit `0`, `"verdict": "ESCROWED"`, `"verified": true`, the two `recipients`, and the
    artifact's `ciphertext_sha256`. Exit `2` with `code: KEY_MALFORMED` means the line was not
    64 lowercase hex (nothing was written); `ESCROW_MISMATCH` means the artifact did not decrypt
-   to what you typed and was removed — do not keep it. Then move `chronos-persistence-key.age`
+   to what you typed — do not keep it. After a failure, `created_artifact` in the report says
+   what became of the file this run created: `removed: true`, or `removed: false` with the
+   reason. `TARGET_SWAPPED` means the output name stopped naming the file the tool wrote before
+   the proof finished (something renamed or replaced it): the tool verifies through the
+   descriptor it holds and deletes nothing it did not create, so the ciphertext this run created
+   may remain under a renamed entry — `created_artifact` names its device:inode; find it
+   (`find <dir> -inum <inode>`) and shred it yourself. Then move `chronos-persistence-key.age`
    off this host (password manager attachment, or the same place the backup escrow goes), and
    `shred -u` or `rm` the local file yourself — the tool never deletes a verified artifact. One
    escrow copy, exactly; the `.env` on the host is the only working copy. Your recovery private
