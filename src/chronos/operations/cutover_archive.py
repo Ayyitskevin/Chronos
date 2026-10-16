@@ -17,6 +17,13 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    resolves a pathname before it opens, so the proof is the descriptors this process gained);
    a swap at the name between the two opens is ``SOURCE_SWAPPED`` before any fact is read.
    The drill backs up through the same connection and its manifest records the inode.
+   **Writer exclusion (r2):** before the gate the command takes a kernel READ LEASE on the held
+   store (``fcntl(F_SETLEASE)``): the kernel grants it only while no process has the file open
+   for writing — a writable SQLite connection, idle or not, holds it O_RDWR — and from then on
+   blocks every writer's open until the command returns; a writer already holding the store is
+   ``WRITER_OPEN`` before any fact is read, a lease the kernel will not grant for another reason
+   (not the file's owner, a filesystem without leases) is ``WRITER_EXCLUSION_UNAVAILABLE``. The
+   store is never opened for writing; the lease lives on the read-only descriptor.
 1. **The flatten gate** — read-only, from the store ALONE: never a broker call, never an
    operator override, no ``--force``. The rows are read through the bound connection over a
    plain engine (never ``immutable=1``, so a WAL that exists is honoured; never ``Database``,
@@ -46,15 +53,24 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
    live store is untouched and the report names the envelope and the restore copy that exist.
 4. **ONLY THEN the store moves aside, by rename, never delete:** in the store's directory,
-   reached by the drill's no-follow walk: the manifest's ``source_identity`` must be the held
-   inode (the archive IS of this store), the store by name must be the held inode, every
-   admitted sidecar by name must be its held inode, every target name must be absent — all
+   reached by the drill's no-follow walk: the bound connection is closed and every admitted
+   sidecar is leased likewise (a process holding one open read-write — a read-only SQLite
+   connection does — is ``WRITER_OPEN``); the store's lease must be whole; the manifest's
+   ``source_identity`` must be the held inode (the archive IS of this store); the admitted
+   ``-wal`` must still be frame-free by ``fstat`` on the held descriptor (the same inode can
+   grow in place: identity is not content — ``WAL_FRAMES_PRESENT``); the store by name must be
+   the held inode, every admitted sidecar by name its held inode, every target name absent — all
    before any rename — then ONE ``renameat2(RENAME_NOREPLACE)`` per admitted file, each
-   re-proved after it (the archived name must be the held inode) — ``chronos.db`` →
-   ``chronos.db.archived-<stamp>``, and the admitted ``-wal``/``-shm`` likewise — where
-   ``<stamp>`` is the envelope's own (``chronos-<stamp>``), so the moved-aside files are bound
-   by name to their archive. A failure after the first rename is reported as
-   ``MOVE_INCOMPLETE`` with ``moved`` and ``not_moved``; the runbook's rollback renames back.
+   re-proved after it: the archived name must be the held inode, and when it is NOT (the name
+   was exchanged in the instant before the syscall) the foreign entry is renamed BACK by name
+   (``RENAME_NOREPLACE``, never over anything) and reported in ``foreign_renamed`` — the admitted
+   object was not moved, so its name is in ``not_moved``. ``chronos.db`` →
+   ``chronos.db.archived-<stamp>``, the admitted ``-wal``/``-shm`` likewise, ``<stamp>`` being
+   the envelope's own (``chronos-<stamp>``), so the moved-aside files are bound by name to their
+   archive. After the last rename every lease must still be whole and the admitted ``-wal`` still
+   frame-free — the proof, in the report's ``exclusion``, that the admitted set was quiet through
+   the irreversible boundary. A failure after the first rename is ``MOVE_INCOMPLETE`` with
+   ``moved_aside`` and ``not_moved`` exact; the runbook's rollback renames back by name.
 5. **A JSON report**: envelope, manifest path and sha256, cleartext and ciphertext sha256,
    the moved-aside names, and the next MANUAL steps (the runbook's) — never a fingerprint,
    a position id or a row payload; counts and the run's own id, trigger and times only.
@@ -94,8 +110,11 @@ from chronos.operations.restore_drill import (
     BoundSource,
     Clock,
     DrillRefused,
+    SourceBusy,
     SourceSwapped,
     _fresh_directory,
+    _lease_intact,
+    _lease_read,
     _open_regular,
     _renameat2,
     _schema_head_on,
@@ -149,10 +168,12 @@ class MoveIncomplete(CutoverRefused):
         *,
         moved: tuple[dict[str, str], ...],
         not_moved: tuple[str, ...],
+        foreign: tuple[dict[str, str | None], ...] = (),
     ) -> None:
         super().__init__(code, message)
         self.moved = moved
         self.not_moved = not_moved
+        self.foreign = foreign
 
 
 # ----------------------------------------------------------------- the flatten gate
@@ -532,19 +553,90 @@ def _identity_by_name(dfd: int, name: str) -> tuple[int, int] | None:
     return st.st_dev, st.st_ino
 
 
+def _require_excluded(source: BoundSource, when: str) -> None:
+    """The store's read lease must still be whole: a process that opened the store for writing
+    since the lease was taken broke it, and nothing read or written after that is trusted."""
+
+    if not source.writers_excluded:
+        raise CutoverRefused(
+            "WRITER_OPEN",
+            f"a process opened {source.path} for writing {when} (the kernel read lease taken "
+            f"before the gate is broken): the store is not quiet. Stop every Chronos process "
+            f"({RUNBOOK} step 1) and re-run",
+        )
+
+
+def _wal_of(sidecars: tuple[AdmittedSidecar, ...]) -> AdmittedSidecar | None:
+    return next((s for s in sidecars if s.name.endswith("-wal")), None)
+
+
+def _not_quiet(
+    source: BoundSource, sidecars: tuple[AdmittedSidecar, ...], parent_abs: Path
+) -> tuple[str, str] | None:
+    """``(code, message)`` when the admitted set is not provably quiet: a lease broken (some
+    process opened the store or a sidecar for writing) or frames in the admitted ``-wal`` by
+    ``fstat`` on the held descriptor — the same inode grown in place. ``None`` when every lease
+    is whole and the WAL is within its header."""
+
+    if not source.writers_excluded:
+        return "WRITER_OPEN", f"a process opened {source.path} for writing after the gate"
+    for sidecar in sidecars:
+        if not _lease_intact(sidecar.fd):
+            return "WRITER_OPEN", f"a process opened {parent_abs / sidecar.name} for writing"
+    wal = _wal_of(sidecars)
+    if wal is not None:
+        size = os.fstat(wal.fd).st_size
+        if size > WAL_HEADER_BYTES:
+            return (
+                "WAL_FRAMES_PRESENT",
+                f"the admitted {parent_abs / wal.name} (the same inode the gate admitted) now "
+                f"holds {size} bytes of write-ahead log: a writer appended frames after admission",
+            )
+    return None
+
+
+def _rename_back(
+    dfd: int, parent_abs: Path, archived: str, name: str, found: tuple[int, int] | None
+) -> dict[str, str | None]:
+    """The entry our rename moved to ``archived`` was not the admitted object: rename it back to
+    ``name`` (``RENAME_NOREPLACE`` — never over anything) and say where it is now."""
+
+    restored_to: str | None = None
+    try:
+        _renameat2(dfd, archived, dfd, name, _RENAME_NOREPLACE)
+    except OSError:
+        pass
+    else:
+        if _identity_by_name(dfd, name) == found:
+            restored_to = str(parent_abs / name)
+    return {
+        "renamed_to": str(parent_abs / archived),
+        "restored_to": restored_to,
+        "identity": "absent" if found is None else f"{found[0]}:{found[1]}",
+    }
+
+
 def _move_aside(
     source: BoundSource,
     sidecars: tuple[AdmittedSidecar, ...],
     manifest_identity: tuple[int, int] | None,
     stamp: str,
-) -> tuple[tuple[dict[str, str], ...], tuple[str, ...]]:
+) -> tuple[tuple[dict[str, str], ...], tuple[str, ...], dict[str, object]]:
     """Rename the store and its ADMITTED sidecars to ``<name>.archived-<stamp>`` in their own
-    directory. Before ANY rename: the manifest's ``source_identity`` must be the held inode,
-    the store by name must be the held inode, every admitted sidecar by name must be its held
-    inode, a non-admitted ``-wal`` with frames refuses, every target is proved absent. Then ONE
-    ``renameat2(RENAME_NOREPLACE)`` per file, each re-proved after it by the archived name's
-    identity. Nothing is ever deleted or renamed over; a non-admitted sidecar is never renamed
-    and is returned as ``left_in_place``."""
+    directory, with the admitted set proven quiet through the boundary (r2, Daybreak P1-1).
+
+    Before ANY rename: every admitted sidecar is leased (the bound connection held them
+    read-write until it closed; a process still holding one is ``WRITER_OPEN``); the store's
+    lease must be whole; the manifest's ``source_identity`` must be the held inode; the admitted
+    ``-wal`` must be frame-free by ``fstat`` on its held descriptor; the store by name must be the
+    held inode, every admitted sidecar by name its held inode; a non-admitted ``-wal`` with frames
+    refuses; every target is proved absent. Then ONE ``renameat2(RENAME_NOREPLACE)`` per file,
+    each re-proved after it by the archived name's identity — a foreign entry the rename moved
+    (the name exchanged in the instant before the syscall) is renamed BACK by name and reported,
+    and the admitted name counts as not moved. After the last rename the leases and the WAL are
+    re-proved; the proof is returned as the report's ``exclusion``. Nothing is ever deleted or
+    renamed over; a non-admitted sidecar is never renamed and is returned as ``left_in_place``.
+    """
 
     if manifest_identity != source.identity:
         recorded = (
@@ -560,6 +652,27 @@ def _move_aside(
         )
     dfd, parent_abs = _walk_directory(source.path.parent, "database directory", create=False)
     try:
+        for sidecar in sidecars:
+            try:
+                _lease_read(sidecar.fd, f"sidecar {parent_abs / sidecar.name}")
+            except SourceBusy as error:
+                raise CutoverRefused(
+                    "WRITER_OPEN",
+                    f"{error} — every SQLite connection, a read-only one included, holds the "
+                    f"sidecars read-write; nothing moved. Stop every Chronos process ({RUNBOOK} "
+                    "step 1) and re-run",
+                ) from None
+            except DrillRefused as error:
+                raise CutoverRefused(
+                    "WRITER_EXCLUSION_UNAVAILABLE", f"{error}; nothing moved"
+                ) from None
+        problem = _not_quiet(source, sidecars, parent_abs)
+        if problem is not None:
+            raise CutoverRefused(
+                problem[0],
+                f"{problem[1]}; nothing moved — stop every Chronos process ({RUNBOOK} step 1), "
+                "inspect by hand, and re-run",
+            )
         expected: dict[str, tuple[int, int]] = {source.path.name: source.identity}
         for sidecar in sidecars:
             expected[sidecar.name] = sidecar.identity
@@ -618,22 +731,51 @@ def _move_aside(
                     moved=tuple(moved),
                     not_moved=not_moved,
                 ) from None
-            if _identity_by_name(dfd, targets[name]) != expected[name]:
-                not_moved = tuple(str(parent_abs / other) for other in names[len(moved) + 1 :])
+            found = _identity_by_name(dfd, targets[name])
+            if found != expected[name]:
+                foreign = _rename_back(dfd, parent_abs, targets[name], name, found)
+                where = (
+                    f"renamed back to {foreign['restored_to']}"
+                    if foreign["restored_to"] is not None
+                    else f"left at {foreign['renamed_to']} (it could not be renamed back)"
+                )
+                not_moved = tuple(str(parent_abs / other) for other in names[len(moved) :])
                 raise MoveIncomplete(
                     "SOURCE_SWAPPED",
-                    f"the entry now at {parent_abs / targets[name]} is not the object the gate "
-                    f"admitted as {name} (identity changed during the rename): it is NOT the "
-                    f"store; {len(moved)} file(s) moved before it — inspect by hand before "
-                    f"anything starts ({RUNBOOK}, Rollback)",
+                    f"the entry at {parent_abs / name} in the instant of its rename was not the "
+                    f"object the gate admitted (device:inode {expected[name][0]}:"
+                    f"{expected[name][1]}) but a foreign one ({foreign['identity']}), now "
+                    f"{where}; the admitted object was not moved and is not at its name — this "
+                    f"process holds it open until it exits (find it by inode); "
+                    f"{len(moved)} file(s) moved before it — inspect by hand before anything "
+                    f"starts ({RUNBOOK}, Rollback)",
                     moved=tuple(moved),
                     not_moved=not_moved,
+                    foreign=(foreign,),
                 ) from None
             moved.append({"from": str(parent_abs / name), "to": str(parent_abs / targets[name])})
         os.fsync(dfd)
+        problem = _not_quiet(source, sidecars, parent_abs)
+        if problem is not None:
+            raise MoveIncomplete(
+                problem[0],
+                f"{problem[1]} — every rename succeeded, but the admitted set was not quiet "
+                f"through the boundary: rename the moved files back by name ({RUNBOOK}, "
+                "Rollback), stop every Chronos process, and investigate before anything starts",
+                moved=tuple(moved),
+                not_moved=(),
+            )
+        wal = _wal_of(sidecars)
+        exclusion: dict[str, object] = {
+            "mechanism": "kernel read lease (fcntl F_SETLEASE) on the held store and every "
+            "admitted sidecar",
+            "leased": [source.path.name, *(sidecar.name for sidecar in sidecars)],
+            "intact_after_move": True,
+            "wal_bytes_after_move": None if wal is None else os.fstat(wal.fd).st_size,
+        }
     finally:
         os.close(dfd)
-    return tuple(moved), tuple(left_in_place)
+    return tuple(moved), tuple(left_in_place), exclusion
 
 
 # ----------------------------------------------------------------- the command
@@ -658,6 +800,11 @@ class ArchiveReport:
     moved_aside: tuple[dict[str, str], ...] = ()
     not_moved: tuple[str, ...] = ()
     left_in_place: tuple[str, ...] = ()
+    #: an entry that sat at an admitted name at the instant of its rename and was NOT the
+    #: admitted object: renamed back by name (``restored_to``) or left where the rename put it
+    foreign_renamed: tuple[dict[str, str | None], ...] = ()
+    #: ARCHIVED only: the writer-exclusion proof through the move
+    exclusion: dict[str, object] | None = None
     next_manual_steps: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -679,6 +826,8 @@ class ArchiveReport:
             "moved_aside": [dict(entry) for entry in self.moved_aside],
             "not_moved": list(self.not_moved),
             "left_in_place": list(self.left_in_place),
+            "foreign_renamed": [dict(entry) for entry in self.foreign_renamed],
+            "exclusion": None if self.exclusion is None else dict(self.exclusion),
             "next_manual_steps": list(self.next_manual_steps),
             "runbook": RUNBOOK,
         }
@@ -734,6 +883,16 @@ def archive(
     except DrillRefused as error:
         raise CutoverRefused("SOURCE_NOT_REGULAR", str(error)) from None
     try:
+        try:
+            source.exclude_writers()  # from here, no process can open the store for writing
+        except SourceBusy as error:
+            raise CutoverRefused(
+                "WRITER_OPEN",
+                f"{error}; no fact was read. Stop every Chronos process ({RUNBOOK} step 1) — "
+                "a backend that is stopped but still holds the store counts — and re-run",
+            ) from None
+        except DrillRefused as error:
+            raise CutoverRefused("WRITER_EXCLUSION_UNAVAILABLE", str(error)) from None
         gate = flatten_gate(source, now=now)
         sidecars = _admit_sidecars(source)
         try:
@@ -760,6 +919,7 @@ def _archive_admitted(
 ) -> ArchiveReport:
     db_path = source.path
     now = clock.wall()
+    _require_excluded(source, "after the gate")
     if not apply:
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
         out_abs = out_dir if out_dir.is_absolute() else Path.cwd() / out_dir
@@ -788,6 +948,7 @@ def _archive_admitted(
         os.close(_fresh_directory(restore_into, "restore target"))
     except DrillRefused as error:
         raise CutoverRefused("RESTORE_TARGET_NOT_FRESH", str(error)) from None
+    _require_excluded(source, "before the drill")
     try:
         report = run_drill(
             db_path,
@@ -843,15 +1004,18 @@ def _archive_admitted(
     stamp = envelope.name.removeprefix(ENVELOPE_PREFIX)
     source.close_connection()  # the move needs the held descriptor only, never the connection
     try:
-        moved, left_in_place = _move_aside(source, sidecars, report.manifest.source_identity, stamp)
+        moved, left_in_place, exclusion = _move_aside(
+            source, sidecars, report.manifest.source_identity, stamp
+        )
     except MoveIncomplete as error:
         return ArchiveReport(
-            verdict="MOVE_INCOMPLETE",
+            verdict="MOVE_INCOMPLETE" if error.moved else "REFUSED",
             dry_run=False,
             code=error.code,
             failures=(f"{error.code}: {error}",),
             moved_aside=error.moved,
             not_moved=error.not_moved,
+            foreign_renamed=error.foreign,
             **facts,
         )
     except CutoverRefused as error:
@@ -867,6 +1031,7 @@ def _archive_admitted(
         dry_run=False,
         moved_aside=moved,
         left_in_place=left_in_place,
+        exclusion=exclusion,
         next_manual_steps=_next_manual_steps(restore_dir, report.manifest.schema_head),
         **facts,
     )

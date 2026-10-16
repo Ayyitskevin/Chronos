@@ -106,6 +106,7 @@ import argparse
 import contextlib
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -879,6 +880,48 @@ class SourceSwapped(DrillRefused):
     """The name a read-only connection opened no longer designated the object held open."""
 
 
+class SourceBusy(DrillRefused):
+    """Another process holds the file open for writing: the read lease was refused."""
+
+
+def _lease_read(fd: int, subject: str) -> None:
+    """A kernel READ LEASE on an open read-only descriptor (Linux ``fcntl(F_SETLEASE, F_RDLCK)``;
+    N3-2 r2, Daybreak P1-1): granted only while NO process has the file open for writing
+    (:class:`SourceBusy` otherwise — a writable SQLite connection, idle or not, holds its main
+    file O_RDWR); from then on any open for writing, or a truncate, by any process blocks until
+    the lease is released or the kernel breaks it (``/proc/sys/fs/lease-break-time``, 45 s by
+    default), and :func:`_lease_intact` reports the break. Read-only opens are unaffected. The
+    lease's owner is cleared (``F_SETOWN 0``) so a break delivers no SIGIO — whose default action
+    would terminate this process — and the holder polls instead. The kernel grants a lease to the
+    file's owner (or CAP_LEASE) on a local filesystem; anything else is a typed refusal, never a
+    silent fallback. Measured on this host (tmpfs and ext4 alike, SQLite 3.53): our own ``mode=ro``
+    connection holds the main file O_RDONLY and does not conflict, but holds the ``-wal`` and
+    ``-shm`` O_RDWR, so their leases are possible only after it closes."""
+
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+    except OSError as error:
+        if error.errno == errno.EAGAIN:
+            raise SourceBusy(
+                f"{subject} is open for writing by another process (a writable SQLite "
+                "connection, idle or not, holds it open read-write): the kernel refused the "
+                "read lease, so writers cannot be excluded"
+            ) from None
+        raise DrillRefused(
+            f"the kernel refused a read lease on {subject}: [errno {error.errno}] "
+            f"{error.strerror}; writers cannot be excluded here — run as the file's owner, "
+            "on a local filesystem"
+        ) from None
+    fcntl.fcntl(fd, fcntl.F_SETOWN, 0)
+
+
+def _lease_intact(fd: int) -> bool:
+    """True while the read lease taken by :func:`_lease_read` is still whole: no process has
+    opened the file for writing since (a pending or completed break reads as F_UNLCK)."""
+
+    return fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_RDLCK
+
+
 class BoundSource:
     """ONE capability on the source for a whole operation (N3-2 r1, Daybreak P1-1).
 
@@ -893,9 +936,22 @@ class BoundSource:
     through ``connection``; a rename at the end is by name and re-proves ``identity``
     before and after. A read-only reader leaves SQLite's bookkeeping beside a WAL-mode
     store — an empty ``-wal`` and a ``-shm``; a directory entry, never a database write.
+
+    :meth:`exclude_writers` (r2) takes the kernel read lease on ``fd`` (see :func:`_lease_read`):
+    from that instant no process can hold or obtain a write-capable open on the store, and
+    :attr:`writers_excluded` says whether that has held. The drill's own backups never call it
+    (an online backup beside a live backend stays possible); the cutover does, before its gate.
     """
 
-    __slots__ = ("_connection_open", "_fd_open", "connection", "fd", "identity", "path")
+    __slots__ = (
+        "_connection_open",
+        "_fd_open",
+        "_leased",
+        "connection",
+        "fd",
+        "identity",
+        "path",
+    )
 
     def __init__(
         self, path: Path, fd: int, identity: tuple[int, int], connection: sqlite3.Connection
@@ -906,6 +962,22 @@ class BoundSource:
         self.connection = connection
         self._connection_open = True
         self._fd_open = True
+        self._leased = False
+
+    def exclude_writers(self) -> None:
+        """Take the kernel read lease on the held store: refused (:class:`SourceBusy`) while any
+        process has it open for writing; afterwards every writer's open blocks and breaks the
+        lease, which :attr:`writers_excluded` reports."""
+
+        _lease_read(self.fd, f"source database {self.path}")
+        self._leased = True
+
+    @property
+    def writers_excluded(self) -> bool:
+        """True while the lease from :meth:`exclude_writers` is whole: no process opened the
+        store for writing since it was taken."""
+
+        return self._leased and self._fd_open and _lease_intact(self.fd)
 
     def close_connection(self) -> None:
         if self._connection_open:

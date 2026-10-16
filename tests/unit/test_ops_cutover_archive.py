@@ -609,23 +609,42 @@ def test_4a_a_live_writer_lease_refuses_and_an_expired_one_passes(
     assert code == 0 and report["gate"]["writer_lease"]["live"] is False
 
 
+WRITE_A_FRAME = (
+    "import sqlite3, sys, time\n"
+    "c = sqlite3.connect(sys.argv[1])\n"
+    "c.execute('PRAGMA wal_autocheckpoint=0')\n"
+    'c.execute("INSERT INTO application_events (event_type, severity, message, event_data,'
+    " occurred_at) VALUES ('n3', 'INFO', 'frame', '{}', '2026-10-01 00:00:00.000000')\")\n"
+    "c.commit()\n"
+    "print('committed', flush=True)\n"
+    "time.sleep(120)\n"
+)
+
+
 def test_4b_write_ahead_frames_beside_the_store_refuse(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A writer that committed and is STILL OPEN is refused by the r2 writer exclusion before
+    the gate (WRITER_OPEN — the lease is refused while it holds the store); a writer that died
+    without checkpointing (killed) leaves its frames and nothing open: the gate's own
+    WAL_FRAMES_PRESENT. Either way no envelope exists."""
+
     store = _store(tmp_path)
-    # a connection that committed and is still open: the frames sit in -wal, uncheckpointed
-    holder = sqlite3.connect(store.db)
+    wal = store.db.with_name("chronos.db-wal")
+    writer = subprocess.Popen(
+        [sys.executable, "-c", WRITE_A_FRAME, str(store.db)], stdout=subprocess.PIPE, text=True
+    )
     try:
-        holder.execute("PRAGMA wal_autocheckpoint=0")
-        holder.execute(
-            "INSERT INTO application_events (event_type, severity, message, event_data,"
-            " occurred_at) VALUES ('n3', 'INFO', 'frame', '{}', '2026-10-01 00:00:00.000000')"
-        )
-        holder.commit()
-        assert store.db.with_name("chronos.db-wal").stat().st_size > 32
+        assert writer.stdout is not None and writer.stdout.readline().strip() == "committed"
+        assert wal.stat().st_size > cutover.WAL_HEADER_BYTES
         code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+        assert code == 2 and report["code"] == "WRITER_OPEN", report
+        assert report["gate"] is None
     finally:
-        holder.close()
+        writer.kill()
+        writer.wait()
+    assert wal.stat().st_size > cutover.WAL_HEADER_BYTES  # the frames outlived the writer
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["code"] == "WAL_FRAMES_PRESENT", report
     assert not (tmp_path / "backups").exists()
 
@@ -1500,7 +1519,6 @@ def _append_frames(wal: Path) -> None:
 SIDECARS = ("chronos.db-wal", "chronos.db-shm")
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: ARCHIVED with a frameful admitted WAL")
 def test_9f_daybreak_s_counterexample_an_admitted_wal_that_gains_frames_in_place_is_never_archived(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1531,7 +1549,6 @@ def test_9f_daybreak_s_counterexample_an_admitted_wal_that_gains_frames_in_place
     assert Path(report["envelope"]).is_dir()
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: ARCHIVED with a frameful admitted WAL")
 def test_9g_frames_appended_to_the_admitted_wal_during_the_drill_refuse_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1553,9 +1570,6 @@ def test_9g_frames_appended_to_the_admitted_wal_during_the_drill_refuse_the_move
     assert wal.stat().st_size == 64
 
 
-@pytest.mark.xfail(
-    strict=True, reason="r2 RED @7ce4825: no writer exclusion; a held writer archives"
-)
 def test_9h_a_process_holding_the_store_open_for_writing_refuses_before_the_gate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1580,9 +1594,6 @@ def test_9h_a_process_holding_the_store_open_for_writing_refuses_before_the_gate
     assert code == 0 and report["verdict"] == "ARCHIVED", report
 
 
-@pytest.mark.xfail(
-    strict=True, reason="r2 RED @7ce4825: no lease; a write-open during the archive succeeds"
-)
 def test_9i_a_write_open_during_the_archive_is_refused_by_the_lease_and_stops_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1619,10 +1630,6 @@ def test_9i_a_write_open_during_the_archive_is_refused_by_the_lease_and_stops_th
     os.close(fd)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="r2 RED @7ce4825: the renamed foreign entry is neither restored nor reported",
-)
 def test_9j_a_main_file_swap_at_the_final_syscall_is_renamed_back_and_reported_exactly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1660,15 +1667,11 @@ def test_9j_a_main_file_swap_at_the_final_syscall_is_renamed_back_and_reported_e
             "identity": f"{b_identity[0]}:{b_identity[1]}",
         }
     ]
-    assert _entries(a.db.parent) == ["chronos.db", *SIDECARS, "victim-away"]
+    assert _entries(a.db.parent) == sorted(["chronos.db", *SIDECARS, "victim-away"])
     assert _sha256(a.db) == b_sha and _identity(a.db) == b_identity  # the foreign, back at its name
     assert _sha256(a.db.with_name("victim-away")) == a_sha  # the store, where the swap put it
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="r2 RED @7ce4825: the renamed foreign entry is neither restored nor reported",
-)
 def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_reported_exactly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1714,10 +1717,9 @@ def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_rep
     assert _identity(wal.with_name("wal-away")) == admitted[0]  # the admitted sidecar, intact
     # the runbook's rollback is exact: the one moved name renames back by name
     os.rename(archived_db, store.db)
-    assert _entries(store.db.parent) == ["chronos.db", *SIDECARS, "wal-away"]
+    assert _entries(store.db.parent) == sorted(["chronos.db", *SIDECARS, "wal-away"])
 
 
-@pytest.mark.xfail(strict=True, reason="r2 RED @7ce4825: the report carries no exclusion proof")
 def test_9l_an_archived_report_proves_the_admitted_wal_stayed_frame_free_through_the_move(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

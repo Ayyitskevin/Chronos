@@ -18,8 +18,9 @@ page; nothing here runs the migration.
 
 **What the command never does:** it never generates, reads or prints the persistence key;
 never starts the service; never initializes the fresh database; never opens the old store for
-writing; never deletes anything; never calls the broker; has no `--force`. Every refusal is a
-typed `code` in its JSON and exit `2`; `--apply` writes nothing before every check has passed.
+writing (its writer exclusion is a kernel read lease on a read-only descriptor); never deletes
+anything; never calls the broker; has no `--force`. Every refusal is a typed `code` in its JSON
+and exit `2`; `--apply` writes nothing before every check has passed.
 
 ## Before you start
 
@@ -27,6 +28,14 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
   from the store (no live writer lease, no uncheckpointed write-ahead frames) and refuses
   otherwise; a read-only backend holds no lease, so **your** `is-active` check is part of the
   proof.
+- Run the command as the user that owns `data/chronos.db` — the service user; `systemctl --user`
+  units run as you. Before the gate the command takes a kernel **read lease** on the store (and,
+  at the move, on its `-wal`/`-shm`): the kernel grants it only while no process has the file
+  open for writing, and from then on blocks any writer's open until the command returns. The
+  lease needs the file's owner. `WRITER_OPEN` means a process still has the store (or a sidecar)
+  open — a backend that is stopped but still holds the store counts, as does a read-only
+  connection at the move — and `WRITER_EXCLUSION_UNAVAILABLE` means the kernel would not grant
+  the lease at all (wrong user, or a filesystem without leases). Neither has an override.
 - The broker account must hold **no position** (the ruling's "no open position at cutover").
   The command enforces it from the store, never from the broker: every managed-position binding
   must replay to a closed position, and the latest reconciliation run — `RECONCILED`, with a
@@ -76,16 +85,28 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
    `data/chronos.db.archived-<stamp>` plus the `-wal`/`-shm` siblings the gate admitted
    (including the empty bookkeeping the command's own read-only connection left), `<stamp>`
    being the envelope's own `chronos-<stamp>` — the moved-aside files are bound by name to their
-   archive. `left_in_place` lists any sidecar that appeared after admission and was therefore
-   never renamed; expect `[]`, and if it is not, inspect the named file before step 7.
+   archive. `exclusion` is the proof that the admitted set stayed quiet through the move: every
+   lease whole after the last rename and the admitted `-wal` still within its 32-byte header.
+   `left_in_place` lists any sidecar that appeared after admission and was therefore never
+   renamed; expect `[]`. If it is not `[]`, **stop here**: do not go on to step 7 until you
+   understand the named file and have moved it out of the way by hand — a sidecar that appeared
+   while every process was supposedly stopped means something was not.
    - `"verdict": "ARCHIVE_NOT_VERIFIED"` (exit 2): the drill did not verify; **nothing moved**,
      the live store is untouched, and the JSON names the envelope and the restore copy that now
      exist. Read `drill.failures` against the drill runbook's table; do not retry blindly.
    - `code: TARGET_EXISTS` (exit 2): a moved-aside name already exists; nothing moved; move that
      entry out of the way by hand and re-run (the next run makes a new envelope and stamp).
-   - `"verdict": "MOVE_INCOMPLETE"` (exit 2): a rename failed after an earlier one succeeded;
+   - `"verdict": "MOVE_INCOMPLETE"` (exit 2): a rename failed after an earlier one succeeded, or
+     the admitted set was not quiet after the last rename (`WRITER_OPEN`, `WAL_FRAMES_PRESENT`);
      `moved_aside` and `not_moved` list exactly which. Rename the moved ones back by name
-     (Rollback, below) before anything starts, then investigate the errno.
+     (Rollback, below) before anything starts, then investigate.
+   - `code: SOURCE_SWAPPED` with `foreign_renamed` (exit 2): at the instant of a rename the name
+     held a foreign entry, not the file the gate admitted; the command renamed that entry back
+     (`restored_to`) and did not move the admitted file, whose name is in `not_moved` and whose
+     device:inode the message gives. Nothing of yours was deleted. Something swapped files under
+     a stopped service: find out what before anything starts.
+   - `code: WRITER_OPEN` after the gate (exit 2): a process opened the store (or a sidecar) for
+     writing while the command ran; nothing moved. Step 1 again — then re-run.
 
 4. **Remove the restore copy.** `/tmp/chronos-n3-verify` holds a CLEARTEXT copy of the
    archived store (the drill verified it there): `rm -r /tmp/chronos-n3-verify`. Your `rm` —
@@ -191,3 +212,5 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
 | `POSITION_OBSERVED` / `PROVENANCE_MISSING` | the latest run recorded a broker position (the message breaks it down by origin class) | flatten at the broker, reconcile, re-run |
 | `DRILL_REFUSED` | the drill refused before verifying (an envelope name collision, a rename error) | the drill runbook's `refused:` row; nothing moved |
 | `TARGET_EXISTS` / `SOURCE_SWAPPED` / `MOVE_FAILED` | the move-aside could not start, or the source changed under the command | step 3's bullets |
+| `WRITER_OPEN` | a process holds the store (or, at the move, a sidecar) open for writing, or opened it for writing while the command ran — the kernel read lease was refused or broken | step 1; a stopped backend that still holds the store counts; then re-run |
+| `WRITER_EXCLUSION_UNAVAILABLE` | the kernel would not grant the read lease (not the file's owner, or a filesystem without leases) | run as the user that owns `data/chronos.db`, on a local filesystem |
