@@ -319,14 +319,20 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
 - **How a delete is bound to the right directory:** the envelope is opened once (no-follow) and
   its identity must equal the one that was classified; it is then renamed to a private
   `.n3-prune-<random>` name inside the root and checked again; its files are unlinked through the
-  open descriptor and the quarantine is removed. If a different directory takes the name at any
-  moment before its files are removed the envelope is left alone (and put back if it was moved):
-  the report names it under `failed`, the exit is 2, and the substitute is not deleted. One
-  window stays open: between the last identity check and the final `rmdir` of the private
-  quarantine name, someone with write access to the root can swap in a directory of their own.
-  If it is empty it is removed (they made it; the run reports success); if it holds anything it
-  stays untouched and the delete is reported as `failed`. Content is never deleted that way; only
-  an empty directory an attacker created can be. A `.n3-prune-…` leftover means a delete was
+  open descriptor and the quarantine is removed. If a different directory takes the name, what
+  happens depends on when:
+  1. **Before the quarantine identity check passes:** the classified envelope is not touched (it is
+     put back if it was moved), the report names it under `failed`, the exit is 2.
+  2. **After that check, before its files are unlinked:** the classified envelope's files ARE
+     removed (through the descriptor that was opened and checked; the swap cannot redirect
+     that), the substitute's content is not touched, the report names the envelope under
+     `failed`, the exit is 2, and the emptied envelope directory is wherever the swap moved it.
+  3. **After the last identity check, before the final `rmdir`:** someone with write access to
+     the root can swap in a directory of their own. If it is empty it is removed (they made it;
+     the run reports success); if it holds anything it stays untouched and the delete is
+     reported as `failed`. Only an empty directory an attacker created can be removed this way.
+
+  In every case a substitute's content is never deleted. A `.n3-prune-…` leftover means a delete was
   interrupted; the next run lists it under `unclassified`.
 - **Exit codes:** `0` nothing to prune · `10` dry run found candidates (nothing deleted) ·
   `11` pruned · `2` refused (or a delete failed; the report names it).
