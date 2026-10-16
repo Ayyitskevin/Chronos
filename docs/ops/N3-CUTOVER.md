@@ -165,9 +165,15 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
   (`age -d -i data/keys/backup-host.age`, or your recovery key) exactly as any backup does
   (`RESTORE-DRILL.md`, step 4); a restored schema-17 copy is usable only under the pre-cutover
   code.
-- **The key is lost after cutover:** the keyed store cannot bind and has no proof path. Restore
-  the escrow copy (step 6) first; if that is gone too, this page runs again from step 1 over the
-  keyed store — it is then the pre-cutover store of the next cutover — with a new key.
+- **The key is lost after cutover:** the keyed store cannot bind and has no proof path;
+  the escrow copy is the only supported recovery (step 6): decrypt it with your recovery key
+  (or the host identity), put the value back in the 0600 `.env`, start. If the escrow copy is gone too,
+  this is an owner decision, not a procedure: this command refuses the keyed store
+  (`SCHEMA_ALREADY_CURRENT` — a store at the running schema is not a pre-cutover store), nothing
+  on this page re-keys it, and its rows written since cutover are unrecoverable as a bound store;
+  the last recoverable state is the pre-cutover archive plus the moved-aside files, under the
+  pre-cutover code. Re-keying or archiving a store at the running schema would need a later
+  running schema and a separately reviewed procedure — none exists today; do not improvise one.
 
 ## What the gate's refusal codes mean
 

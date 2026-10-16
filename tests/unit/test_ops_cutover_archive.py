@@ -1040,9 +1040,6 @@ def test_7e_the_escrow_tool_never_reads_the_key_from_the_environment(
     assert "sentinel-never-read" not in capsys.readouterr().out
 
 
-@pytest.mark.xfail(
-    strict=True, reason="r1 P2-2: the runbook promises the command as a lost-key path"
-)
 def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_command() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     rollback = text[text.index("## Rollback") :]
