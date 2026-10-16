@@ -79,8 +79,14 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    refuses a non-regular path and makes no file; a sqlite3 shell, which cannot open a
    directory; a rename, which cannot replace a directory with a file) can put a store the gate
    never saw at the live name — not during the command and not after it exits, until the
-   owner's own ``rmdir`` (runbook step 7). Each exchange is re-proved on BOTH names: the archive
-   name must be the held inode and the live name this run's sentinel; otherwise (a foreign entry
+   owner's own ``rmdir`` (runbook step 7). That holds exactly as far as the PARENT is private
+   (r4, Daybreak r3 P1-1): removing an empty directory is authorized by write permission on
+   its parent, not by its own mode, so before the source is even opened — and again on the
+   descriptor the exchanges use — the database parent must be owner-private: owned by the
+   effective uid, no group or other write bit (``PARENT_NOT_PRIVATE`` otherwise, dry-run and
+   apply alike; the documented deployment creates ``data/`` 0700). Each exchange is re-proved
+   on BOTH names: the archive name must be the held inode and the live name this run's
+   sentinel; otherwise (a foreign entry
    at the live name, or a foreign directory renamed over the sentinel, in the instant before the
    syscall) it is exchanged BACK — exact — and reported in ``foreign_renamed``; the admitted
    object was not moved, so its name is in ``not_moved``. ``<stamp>`` is the envelope's own
@@ -594,6 +600,65 @@ def _identity_by_name(dfd: int, name: str) -> tuple[int, int] | None:
     return st.st_dev, st.st_ino
 
 
+def _parent_problem(st: os.stat_result, euid: int) -> str | None:
+    """Why the database parent is NOT an owner-private directory, or ``None`` (r4, Daybreak r3
+    P1-1). Removing an entry — a sentinel — is authorized by WRITE and SEARCH permission on its
+    PARENT, never by the entry's own mode, so the sentinels are exactly as private as this
+    directory: it must be owned by the effective uid and carry no group or other write bit. The
+    sticky bit is not consulted (it would only narrow a writable parent, and a writable parent
+    is refused outright)."""
+
+    if not stat.S_ISDIR(st.st_mode):
+        return "is not a directory"
+    mode = stat.S_IMODE(st.st_mode)
+    if st.st_uid != euid:
+        return (
+            f"is owned by uid {st.st_uid}, not this process's effective uid {euid} (mode "
+            f"{mode:04o})"
+        )
+    if mode & 0o022:
+        return (
+            f"is writable by its group or by others (mode {mode:04o}): removing an empty "
+            "directory is authorized by write permission on its PARENT, so another uid could "
+            "remove a sentinel there and plant a store the gate never saw"
+        )
+    return None
+
+
+def _private_parent_facts(st: os.stat_result, parent_abs: Path, when: str) -> dict[str, object]:
+    """``PARENT_NOT_PRIVATE`` unless the directory is owner-private; the facts for the report."""
+
+    problem = _parent_problem(st, os.geteuid())
+    if problem is not None:
+        raise CutoverRefused(
+            "PARENT_NOT_PRIVATE",
+            f"{parent_abs} {problem}; nothing {when}. As the owner, make it owner-private — "
+            f"chmod 0700 {parent_abs} — ({RUNBOOK}, Before you start) and re-run",
+        )
+    return {
+        "path": str(parent_abs),
+        "mode": f"{stat.S_IMODE(st.st_mode):04o}",
+        "owner_uid": st.st_uid,
+        "owner_is_effective_uid": True,
+    }
+
+
+def _require_private_parent(parent: Path, when: str) -> dict[str, object]:
+    """The database parent, reached by the no-follow walk, must be owner-private BEFORE the
+    source is opened — before any envelope, exchange or move (r4): the sentinels' whole
+    guarantee rests on it."""
+
+    try:
+        dfd, parent_abs = _walk_directory(parent, "database directory", create=False)
+    except DrillRefused as error:
+        raise CutoverRefused("PARENT_NOT_PRIVATE", f"{error}; nothing {when}") from None
+    try:
+        st = os.fstat(dfd)
+    finally:
+        os.close(dfd)
+    return _private_parent_facts(st, parent_abs, when)
+
+
 def _require_excluded(source: BoundSource, when: str) -> None:
     """The store's read lease must still be whole: a process that opened the store for writing
     since the lease was taken broke it, and nothing read or written after that is trusted."""
@@ -759,7 +824,9 @@ def _live_names_problem(
                 f"{parent_abs / sentinel.name} is no longer this run's sentinel directory "
                 f"(device:inode {sentinel.identity[0]}:{sentinel.identity[1]}) but "
                 f"{_describe_entry(dfd, sentinel.name)}: the live name was vacated and refilled "
-                "after the exchange — only the store owner's uid can remove a sentinel",
+                "after the exchange — in an owner-private parent (proved before the move) only "
+                "the owner's uid can remove a sentinel: removing an entry is authorized by write "
+                "permission on its parent",
             )
     for name, identity in expected.items():
         if _identity_by_name(dfd, targets[name]) != identity:
@@ -802,7 +869,10 @@ def _move_aside(
     (``exclusion``), then the namespace: every live name IS its sentinel, every archive name IS
     its admitted inode. Nothing is ever deleted or renamed over — a sentinel included: the ones
     this run made are returned with where each is now, and only the owner's ``rmdir`` (the
-    runbook's step 7) vacates the names.
+    runbook's step 7) vacates the names — because the parent is owner-private, which the move
+    requires (``PARENT_NOT_PRIVATE`` otherwise, re-proved here on the descriptor the exchanges
+    use; r4): removing an entry is authorized by write permission on its parent, never by the
+    entry's own 0500.
     """
 
     if manifest_identity != source.identity:
@@ -821,6 +891,8 @@ def _move_aside(
     namespace = [source.path.name, *(source.path.name + suffix for suffix in LIVE_NAME_SUFFIXES)]
     sentinels: list[Sentinel] = []
     try:
+        # r4: re-proved on the very descriptor the exchanges will use — owner-private, or nothing
+        parent = _private_parent_facts(os.fstat(dfd), parent_abs, "moved")
         for sidecar in sidecars:
             try:
                 _lease_read(sidecar.fd, f"sidecar {parent_abs / sidecar.name}")
@@ -1012,6 +1084,7 @@ def _move_aside(
             "live_names": [str(parent_abs / name) for name in namespace],
             "live_names_sealed": True,
             "sentinel_mode": f"{SENTINEL_MODE:04o}",
+            "parent": parent,
         }
         report = _sentinels_report(dfd, parent_abs, sentinels, namespace)
     except CutoverRefused as error:
@@ -1136,6 +1209,8 @@ def archive(
         keys = keys or load_age_keys()  # every key refusal precedes the source open
     except DrillRefused as error:
         raise CutoverRefused("KEYS_REFUSED", str(error)) from None
+    # r4: the parent's privacy is the sentinels' guarantee — proved before the source is opened
+    parent = _require_private_parent(db_path.parent, "was opened")
     try:
         source = open_bound_source(db_path, "source database")
     except SourceSwapped as error:
@@ -1166,6 +1241,7 @@ def archive(
                 now=now,
                 clock=clock,
                 keys=keys,
+                parent=parent,
             )
         finally:
             for sidecar in sidecars:
@@ -1185,6 +1261,7 @@ def _archive_admitted(
     now: datetime,
     clock: Clock,
     keys: AgeKeys,
+    parent: dict[str, object],
 ) -> ArchiveReport:
     db_path = source.path
     _require_excluded(source, "after the gate")
@@ -1199,9 +1276,10 @@ def _archive_admitted(
                 for suffix in ("", *SIDECAR_SUFFIXES)
             ],
             "sentinels": list(_live_names_of(db_abs)),
+            "parent": dict(parent),
             "note": "the stamp is the envelope's; --apply takes it from the backup's taken_at, "
             "moves a sidecar only when it is present, and leaves a sentinel directory at every "
-            "live name until your rmdir",
+            "live name until your rmdir — in an owner-private parent, proved before anything",
         }
         return ArchiveReport(
             verdict="DRY_RUN",

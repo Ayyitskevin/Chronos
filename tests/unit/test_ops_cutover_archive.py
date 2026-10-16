@@ -103,15 +103,10 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R4_P1_1 = (
-    "r4 P1-1: at 84f4ff1 the database parent's owner and mode are never checked — the "
-    "documented group-writable data/ is archived, and another uid could then rmdir a sentinel"
-)
 _R4_P1_2 = (
     "r4 P1-2: at 84f4ff1 _ArchiveAdmission is a module-level constructible value and "
     "_restore_verified/_verify_in accept it: a module-level callable verifies an ungated store"
 )
-RED_R4_P1_1 = pytest.mark.xfail(strict=True, reason=_R4_P1_1)
 RED_R4_P1_2 = pytest.mark.xfail(strict=True, reason=_R4_P1_2)
 
 
@@ -301,6 +296,7 @@ def _store(
 
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
+    os.chmod(data, 0o700)  # the documented deployment's owner-private data/ (r4), umask-proof
     db = data / "chronos.db"
     database = Database(f"sqlite:///{db}")
     try:
@@ -2517,10 +2513,9 @@ PRIVATE_MODES = (0o700, 0o750, 0o755, 0o711, 0o500)
 WRITABLE_MODES = (0o775, 0o770, 0o707, 0o777, 0o2775, 0o1775, 0o1777)
 
 
-@RED_R4_P1_1
 @pytest.mark.parametrize("mode", WRITABLE_MODES, ids=[f"{mode:04o}" for mode in WRITABLE_MODES])
 def test_11a_a_group_or_other_writable_database_parent_is_refused_before_anything_is_published(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: int
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: int
 ) -> None:
     """Daybreak r3 P1-1: the sentinels are only as private as their PARENT — removing an empty
     directory is authorized by write permission on the parent, not by the directory's own 0500.
@@ -2543,12 +2538,11 @@ def test_11a_a_group_or_other_writable_database_parent_is_refused_before_anythin
     assert _sha256(store.db) == before and _entries(store.db.parent) == entries
     os.chmod(store.db.parent, 0o700)
     # owned by another uid (the identity source substituted; the directory is this test's)
-    monkeypatch.setattr(os, "geteuid", lambda: OWNER + 1 if os.getuid() != OWNER + 1 else OWNER)
-    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
-    assert (
-        code == 2 and report["code"] == "PARENT_NOT_PRIVATE" and "owned by" in report["failures"][0]
-    )
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "geteuid", lambda: OWNER + 1 if os.getuid() != OWNER + 1 else OWNER)
+        code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "PARENT_NOT_PRIVATE", report
+    assert "owned by" in report["failures"][0]
     assert _entries(store.db.parent) == entries
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 0 and report["verdict"] == "ARCHIVED", report
@@ -2556,7 +2550,6 @@ def test_11a_a_group_or_other_writable_database_parent_is_refused_before_anythin
     assert report["exclusion"]["parent"]["owner_is_effective_uid"] is True
 
 
-@RED_R4_P1_1
 def test_11b_the_private_parent_rule_is_exactly_what_denies_a_non_owner_the_rmdir(
     tmp_path: Path,
 ) -> None:
@@ -2714,7 +2707,6 @@ def test_11c_a_second_uid_in_the_owner_s_group_cannot_remove_or_replace_a_sentin
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-@RED_R4_P1_1
 def test_11d_the_deployment_and_the_runbook_make_the_database_parent_owner_private() -> None:
     deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "chmod 0700 data" in deployment

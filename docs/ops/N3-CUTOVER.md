@@ -25,6 +25,15 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 
 ## Before you start
 
+- **`data/` must be owner-private — `chmod 0700 data`**, as the owner. Removing an empty
+  directory is authorized by write permission on **its parent**, not by the directory's own
+  mode, so a group- or other-writable `data/` would let another uid remove one of step 3's
+  sentinel directories and put a store the gate never saw at the live name. The command
+  therefore refuses a `data/` that is not owned by your uid or that carries a group or other
+  write bit — `PARENT_NOT_PRIVATE`, dry-run and apply alike, before it opens anything — and
+  proves it again on the directory descriptor the renames use. `DEPLOYMENT.md` creates `data/`
+  0700 from now on; an older deployment's `mkdir -p data` under umask 002 left it 0775
+  (group-writable): fix that here, once. The sticky bit is no substitute and is not consulted.
 - Every Chronos process on this host must be stopped (step 1). The command proves what it can
   from the store (no live writer lease, no uncheckpointed write-ahead frames) and refuses
   otherwise; a read-only backend holds no lease, so **your** `is-active` check is part of the
@@ -102,8 +111,10 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    must show now: the four sentinel directories (`dr-x------`), the three `.archived-<stamp>`
    files, and the siblings that were there before (`keys/`, the audit pair, locks, logs).
    Anything else — a file at a live name, a missing sentinel — **stop here** and find out what
-   wrote under a stopped service before anything starts; only the store owner's uid can remove
-   a sentinel.
+   wrote under a stopped service before anything starts. Only your uid can remove a sentinel —
+   not because of the sentinel's own 0500, but because `data/` is owner-private (the command
+   proved it before opening the store and again before the exchanges; `exclusion.parent` says
+   so) and removing an entry needs write permission on **its parent**.
    - `"verdict": "ARCHIVE_NOT_VERIFIED"` (exit 2): the drill did not verify; **nothing moved**,
      the live store is untouched, and the JSON names the envelope and the restore copy that now
      exist. Read `drill.failures` against the drill runbook's table; do not retry blindly.
@@ -248,6 +259,7 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 | code | the store did not prove | what to do |
 |---|---|---|
 | `SOURCE_NOT_REGULAR` | `--db`, or a `-wal`/`-shm` beside it, is a symlink, directory or FIFO | name the real file; never a link |
+| `PARENT_NOT_PRIVATE` | `data/` (the store's parent) is owned by another uid, or writable by its group or by others — the sentinels would be removable by another uid | as the owner: `chmod 0700 data` (Before you start); re-run |
 | `KEYS_REFUSED` | the drill's age keys (identity 0600, exactly the two recipients) | the drill runbook, "Encryption at rest" |
 | `SCHEMA_UNREADABLE` / `STORE_UNREADABLE` | the store could not be read as a Chronos store | stop; do not guess — inspect by hand, read-only |
 | `SCHEMA_ALREADY_CURRENT` | the store is already at the running `SCHEMA_VERSION` | this is not a pre-cutover store; nothing to do |

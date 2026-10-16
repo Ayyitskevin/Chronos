@@ -87,9 +87,17 @@ parent), but creating things explicitly keeps first-run behavior obvious:
 
 ```bash
 mkdir -p data logs
+chmod 0700 data                                    # owner-private: see below
 .venv/bin/python scripts/initialize_database.py   # wheel dashboard DB (data/chronos.db)
 .venv/bin/python -m chronos.cli status            # platform: shows HALTED (NEVER_ARMED)
 ```
+
+`data/` must be owner-private. Under the common umask 002 a plain `mkdir -p` leaves it 0775
+(group-writable), and removing an entry from a directory is authorized by write permission on
+that directory — so a group-writable `data/` lets any uid in the group remove or replace what
+lives there, including the sentinel directories the N3 cutover relies on
+([`docs/ops/N3-CUTOVER.md`](ops/N3-CUTOVER.md), which refuses a `data/` that is not 0700-class:
+`PARENT_NOT_PRIVATE`). The files inside are 0600 regardless; the directory needs the same care.
 
 A fresh deployment reports `TRADING HALTED | reason: NEVER_ARMED`. That is correct: a new
 deployment starts halted until the operator arms it once
