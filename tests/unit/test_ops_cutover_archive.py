@@ -16,7 +16,13 @@ socket is ever opened), (7) the runbook contract and the escrow tool, (8) G1 —
 the gap it closes, (9) r1 — one bound source capability across gate, backup and move (Daybreak's
 A/B substitution and the independent main-file, sidecar and manifest swaps), r2 — writer
 exclusion by kernel read lease and the move's final-syscall truth (9f-9l), the archive admission
-only the gate can mint (8h), the escrow cleanup bound to the file this run created (7g-7h).
+only the gate can mint (8h), the escrow cleanup bound to the file this run created (7g-7h); r3 —
+(10) the live namespace is never vacant: sentinel directories exchanged into every live name
+(Daybreak's post-rename planting, the owner-uid vacate, every name until the owner's rmdir, a
+non-admitted name occupied), the archive drill that runs the gate itself (8a-8h: every seam on a
+refused store is tried), the escrow tool that deletes nothing after a post-create failure (7g, 7i).
+
+RED-r3 markers: ``_R3_P1_1`` / ``_R3_P1_2`` / ``_R3_P1_3`` are the strict-xfail reasons at 4890e25.
 
 "Zero changes" is asserted EXACTLY, never through a filter: the store's bytes are unchanged and
 the only entries a run may add beside a WAL-mode store are SQLite's reader bookkeeping — an empty
@@ -30,16 +36,20 @@ not the gate's input — the binding and its position-management stream are.
 from __future__ import annotations
 
 import ast
+import contextlib
+import copy
 import hashlib
 import inspect
 import io
 import itertools
 import json
 import os
+import pickle
 import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 from collections.abc import Iterator, MutableMapping
@@ -94,6 +104,26 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
+_R3_P1_1 = (
+    "r3 P1-1: at 4890e25 the live names are vacant after the final rename — no sentinel "
+    "directory, no live-name proof, a planted store yields ARCHIVED"
+)
+_R3_P1_1_OCCUPIED = (
+    "r3 P1-1: at 4890e25 a non-admitted frame-free sidecar is left_in_place and a -journal is "
+    "ignored: the move proceeds"
+)
+_R3_P1_2 = (
+    "r3 P1-2: at 4890e25 BoundSource._admit_archive is a callable mint and the drill has no "
+    "archive entry that runs the gate itself"
+)
+_R3_P1_3 = (
+    "r3 P1-3: at 4890e25 the post-create failure path unlinks by name after an identity check — "
+    "a swap in between deletes the foreign entry"
+)
+RED_P1_1 = pytest.mark.xfail(strict=True, reason=_R3_P1_1)
+RED_P1_1_OCCUPIED = pytest.mark.xfail(strict=True, reason=_R3_P1_1_OCCUPIED)
+RED_P1_2 = pytest.mark.xfail(strict=True, reason=_R3_P1_2)
+RED_P1_3 = pytest.mark.xfail(strict=True, reason=_R3_P1_3)
 
 
 def _hex(seed: str) -> str:
@@ -271,10 +301,14 @@ def _store(
     positions: tuple[dict[str, Any], ...] = (),
     provenance: tuple[str, ...] = (),
     lease_expires_in: timedelta | None = None,
+    journal_mode: str = "wal",
 ) -> Store:
     """A pre-cutover store. ``run``: ``clean`` | ``manual_review`` | ``readiness_pending`` |
     ``None``; ``binding``: ``closed`` | ``open`` | ``orphan`` (no stream) | ``tampered``
-    (stream payload edited) | ``None``; ``provenance``: origin classes written for the run."""
+    (stream payload edited) | ``None``; ``provenance``: origin classes written for the run;
+    ``journal_mode``: ``wal`` (the repository's) or ``delete`` (a rollback-journal store: a
+    read-only connection then leaves NO bookkeeping beside it, so the admitted set is the store
+    alone)."""
 
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
@@ -379,6 +413,10 @@ def _store(
             "UPDATE schema_version SET version = ?", (SCHEMA_VERSION + version_offset,)
         )
     _checkpoint_and_drop_sidecars(db)
+    if journal_mode == "delete":
+        with closing(sqlite3.connect(db)) as connection:
+            assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+        assert _entries(db.parent) == ["chronos.db"]
     return Store(db=db, now=now)
 
 
@@ -392,6 +430,28 @@ def _sha256(path: Path) -> str:
 
 
 READER_BOOKKEEPING = ("chronos.db-wal", "chronos.db-shm")
+#: the store's whole live namespace — the four names the repository's R-21 admission checks
+#: (`database._SQLITE_SIDECAR_SUFFIXES`); after ARCHIVED each is a sentinel directory (r3)
+LIVE_NAMES = ("chronos.db", "chronos.db-wal", "chronos.db-shm", "chronos.db-journal")
+
+
+def _is_sentinel(path: Path) -> bool:
+    """A 0500 directory owned by this user, empty, by lstat: what the move leaves at a live name."""
+
+    st = os.lstat(path)
+    return (
+        stat.S_ISDIR(st.st_mode)
+        and (st.st_mode & 0o777) == 0o500
+        and st.st_uid == os.geteuid()
+        and os.listdir(path) == []
+    )
+
+
+def _rmdir_sentinels(db: Path) -> None:
+    """The owner's step 7: the four live names are vacated by hand, nothing else."""
+
+    for name in LIVE_NAMES:
+        os.rmdir(db.with_name(name))
 
 
 def _entries(directory: Path) -> list[str]:
@@ -674,6 +734,7 @@ class _NoSocket:
         raise AssertionError("the cutover archive opened a socket")
 
 
+@RED_P1_1
 def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelope_stamp(
     tmp_path: Path,
     age_keys: KeyMaterial,
@@ -708,14 +769,24 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
     moved = {entry["from"]: entry["to"] for entry in report["moved_aside"]}
     archived = store.db.with_name(f"chronos.db.archived-{store.stamp}")
     assert moved[str(store.db)] == str(archived)
-    assert not store.db.exists() and _sha256(archived) == original
+    assert not store.db.is_file() and _sha256(archived) == original
     assert _identity(archived) == source_identity
     # the admitted set — the store and the reader bookkeeping the gate's own connection left —
-    # is exactly what was moved: nothing else is in the directory, nothing was left in place
+    # is exactly what was moved; every live name of the store's namespace now holds a sentinel
+    # directory this run made (r3): nothing can create a fresh store there until the owner's rmdir
     assert _entries(store.db.parent) == sorted(
-        f"{name}.archived-{store.stamp}" for name in ("chronos.db", *READER_BOOKKEEPING)
+        [
+            *LIVE_NAMES,
+            *(f"{name}.archived-{store.stamp}" for name in ("chronos.db", *READER_BOOKKEEPING)),
+        ]
     )
-    assert report["left_in_place"] == []
+    assert all(_is_sentinel(store.db.with_name(name)) for name in LIVE_NAMES)
+    assert "left_in_place" not in report  # retired: an occupied live name refuses the move
+    assert [s["name"] for s in report["sentinels"]] == [
+        str(store.db.with_name(name)) for name in LIVE_NAMES
+    ]
+    assert all(s["at"] == s["name"] for s in report["sentinels"])
+    assert any("rmdir" in step for step in report["next_manual_steps"])
     # the original content is recoverable: by-hand age -d, then the drill's own restore
     assert AGE is not None
     by_hand = tmp_path / "by-hand"
@@ -1077,21 +1148,27 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
 
 
 @pytest.mark.parametrize(
-    "shape", ["swap-then-decrypt-fails", "swap-then-decrypt-succeeds", "decrypt-fails"]
+    "shape",
+    [
+        "swap-then-decrypt-fails",
+        "swap-then-decrypt-succeeds",
+        pytest.param("decrypt-fails", marks=RED_P1_3),
+    ],
 )
-def test_7g_escrow_failure_cleanup_deletes_only_the_file_this_run_created(
+def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_created(
     tmp_path: Path,
     age_keys: KeyMaterial,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     shape: str,
 ) -> None:
-    """Daybreak P1-3 (r1): after the artifact is created, its name is swapped (the created file
-    renamed aside, a foreign file planted at the name) and/or the decrypt-and-compare fails. The
-    tool verifies through the descriptor it holds, proves the name still resolves to it before
-    success, and on failure unlinks the name only when it still IS that file: the foreign entry
-    survives, the created ciphertext is reported as possibly remaining under a renamed entry;
-    with no swap the created file is removed and the report says so."""
+    """Daybreak P1-3 (r1, r2): after the artifact is created, its name is swapped (the created
+    file renamed aside, a foreign file planted at the name) and/or the decrypt-and-compare fails.
+    The tool verifies through the descriptor it holds, proves the name still resolves to it
+    before success, and after a post-create failure DELETES NOTHING (r3: Linux has no
+    unlink-by-descriptor, so any unlink is by name and can hit a swapped-in foreign entry): the
+    foreign entry survives, the created ciphertext stays — at its name, or under the renamed
+    entry — and the report names it by device:inode for the owner to shred."""
 
     from chronos.operations import persistence_key_escrow as escrow
 
@@ -1120,32 +1197,57 @@ def test_7g_escrow_failure_cleanup_deletes_only_the_file_this_run_created(
     assert report["code"] == expected_code, report  # succeeds: the decrypt read the HELD inode
     created = report["created_artifact"]
     assert created["path"] == str(out)
+    assert created["removed"] is False and "shred" in created["note"]  # the tool deletes nothing
     if shape.startswith("swap"):
         assert out.read_bytes() == foreign  # the foreign entry survives
         assert _entries(out.parent) == ["artifact-aside", out.name]
-        assert created["removed"] is False and "renamed entry" in created["note"]
-        assert AGE is not None
-        decrypted = subprocess.run(
-            [AGE, "-d", "-i", str(age_keys.identity), str(aside)], check=True, capture_output=True
-        )
-        assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact, aside
+        assert "renamed entry" in created["note"]
+        ciphertext = aside
     else:
-        assert not out.exists() and _entries(out.parent) == []
-        assert created["removed"] is True
+        assert _entries(out.parent) == [out.name]  # the created file stays at its name
+        ciphertext = out
+    assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
+    assert AGE is not None
+    decrypted = subprocess.run(
+        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
+    )
+    assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
     assert key not in json.dumps(report)
 
 
 def test_7h_the_runbook_states_the_r2_boundaries() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
-    step6 = text[text.index("6. **Escrow") : text.index("7. **Start")]
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
     assert "TARGET_SWAPPED" in step6 and "renamed entry" in step6
     before = text[text.index("## Before you start") : text.index("## Steps")]
     assert "lease" in before and "owner" in before  # the kernel lease needs the store's owner
     step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
-    assert "left_in_place" in step3 and "do not go on" in step3  # a hard operator stop
     assert "foreign_renamed" in step3
     table = text[text.index("## What the gate's refusal codes mean") :]
     assert "`WRITER_OPEN`" in table and "`WRITER_EXCLUSION_UNAVAILABLE`" in table
+
+
+@RED_P1_1
+def test_7j_the_runbook_states_the_r3_boundaries() -> None:
+    """r3: the sentinel directories, the owner's rmdir as step 7's first line, the rollback order
+    (rmdir, then mv -n), the new refusal row; the escrow step says the tool deletes nothing."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
+    assert "sentinel" in step3 and "rmdir" in step3 and "left_in_place" not in step3
+    assert "LIVE_NAME_OCCUPIED" in step3
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
+    assert "deletes nothing" in step6 and "shred" in step6 and "removed: true" not in step6
+    step7 = text[text.index("7. **") : text.index("8. **Bind")]
+    assert (
+        "rmdir data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal"
+        in step7
+    )
+    assert "non-regular" in step7  # what every writer says until then
+    rollback = text[text.index("## Rollback") :]
+    assert rollback.index("rmdir") < rollback.index("mv -n")
+    table = text[text.index("## What the gate's refusal codes mean") :]
+    assert "`LIVE_NAME_OCCUPIED`" in table
 
 
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
@@ -1159,47 +1261,57 @@ def _drill_store(tmp_path: Path) -> Store:
     return _store(tmp_path, binding="closed")
 
 
-def _admitted_source(store: Store) -> Any:
-    """What only the flatten gate does: open the bound source and run the gate over it — the gate
-    admits the retired head ON the capability at its end — and hand the capability back still
-    open (the caller closes it)."""
+def _archive_drill(store: Store, tmp_path: Path, tag: str = "") -> tuple[Any, Any]:
+    """The r3 archive path: the drill opens nothing by itself here — it is handed the bound
+    capability and runs the REAL flatten gate over it inside its own frame; the admission is a
+    value local to that frame. Returns ``(gate, report)``; the caller's capability is closed."""
 
     source = drill.open_bound_source(store.db)
     try:
-        cutover.flatten_gate(source, now=store.now)
-    except BaseException:
+        return drill.run_archive_drill(
+            source,
+            tmp_path / f"out{tag}",
+            tmp_path / f"restored{tag}",
+            now=store.now,
+            clock=_clock(store.now),
+        )
+    finally:
         source.close()
-        raise
-    return source
 
 
-def test_8a_the_gate_s_admission_on_the_bound_source_verifies_a_retired_store_as_an_archive(
+def _gate_claim(source: Any, version: int) -> Any:
+    """A GateReport a substituted gate could return (test-only: the real gate never lies)."""
+
+    return cutover.GateReport(
+        schema_version=version,
+        schema_head=f"schema_version:{version}",
+        source_identity=source.identity,
+        writer_lease={},
+        wal={},
+        bindings={},
+        reconciliation={},
+        positions_observed=0,
+        checks_passed=(),
+    )
+
+
+@RED_P1_2
+def test_8a_the_archive_drill_runs_the_gate_itself_and_verifies_a_retired_store_by_that_run(
     tmp_path: Path,
 ) -> None:
     store = _drill_store(tmp_path)
     head = drill.schema_head(store.db)
     assert head == f"schema_version:{SCHEMA_VERSION - 1}"
-    source = _admitted_source(store)
-    try:
-        admission = source.archive_admission
-        assert admission is not None
-        assert (admission.schema_head, admission.schema_version) == (head, SCHEMA_VERSION - 1)
-        assert admission.source_identity == source.identity == _identity(store.db)
-        report = run_drill(
-            store.db,
-            tmp_path / "out",
-            tmp_path / "restored",
-            clock=_clock(store.now),
-            source=source,
-        )
-    finally:
-        source.close()
+    source_identity = _identity(store.db)
+    gate, report = _archive_drill(store, tmp_path)
+    assert (gate.schema_head, gate.schema_version) == (head, SCHEMA_VERSION - 1)
+    assert gate.source_identity == source_identity
     assert report.verdict == "ARCHIVE_VERIFIED", report.failures  # never repository VERIFIED
     assert report.restore is not None
     assert report.restore.acceptance == f"archive:{head}"
     restored = report.restore
     assert restored.schema_head_ok and restored.sha256_ok and restored.row_counts_ok
-    assert tuple(report.manifest.source_identity) == _identity(store.db)
+    assert tuple(report.manifest.source_identity) == source_identity
 
 
 def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
@@ -1215,79 +1327,100 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(tmp_path: Path) -> None:
-    """The seam itself is checked by the drill: an admission naming another retired head than the
-    copy really has verifies as nothing."""
+@RED_P1_2
+def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drill checks the admission it built: a gate run that returned another retired head
+    than the copy really has (a test-only substitution of the real gate — no library seam) verifies
+    as nothing; the exact head is compared on the restored copy."""
 
     store = _drill_store(tmp_path)
-    source = drill.open_bound_source(store.db)
-    try:
-        source._admit_archive(f"schema_version:{SCHEMA_VERSION - 2}", SCHEMA_VERSION - 2)
-        report = run_drill(
-            store.db,
-            tmp_path / "out",
-            tmp_path / "restored",
-            clock=_clock(store.now),
-            source=source,
-        )
-    finally:
-        source.close()
+    lie = SCHEMA_VERSION - 2
+    real_gate = cutover.flatten_gate
+
+    def lying_gate(source: Any, *, now: datetime) -> Any:
+        truth = real_gate(source, now=now)
+        return replace(truth, schema_head=f"schema_version:{lie}", schema_version=lie)
+
+    monkeypatch.setattr(cutover, "flatten_gate", lying_gate)
+    gate, report = _archive_drill(store, tmp_path)
+    assert gate.schema_version == lie
     assert report.verdict == "FAILED"
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
-    assert report.restore is not None and report.restore.acceptance.startswith("archive:")
+    assert (
+        report.restore is not None and report.restore.acceptance == f"archive:schema_version:{lie}"
+    )
 
 
+@RED_P1_2
 def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P1-2 (r1): a store AT the running SCHEMA_VERSION is refused by the gate
-    (SCHEMA_ALREADY_CURRENT) and cannot be admitted even through the drill's own seam; lying the
-    version down is caught by the exact head on the copy."""
+    """P1-2 (r1): a store AT the running SCHEMA_VERSION. The archive drill's path IS the gate's:
+    the real gate refuses (SCHEMA_ALREADY_CURRENT) and nothing is created; a substituted gate that
+    claims the running version is refused by the drill's own version bound; one that lies the
+    version DOWN is caught by the exact head on the copy."""
 
     store = _store(tmp_path, version_offset=0)
     source = drill.open_bound_source(store.db)
     try:
         with pytest.raises(cutover.CutoverRefused) as refused:
-            cutover.flatten_gate(source, now=store.now)
+            drill.run_archive_drill(
+                source,
+                tmp_path / "out",
+                tmp_path / "restored",
+                now=store.now,
+                clock=_clock(store.now),
+            )
         assert refused.value.code == "SCHEMA_ALREADY_CURRENT"
-        assert source.archive_admission is None
+        assert not (tmp_path / "out").exists() and not (tmp_path / "restored").exists()
+        monkeypatch.setattr(
+            cutover, "flatten_gate", lambda s, *, now: _gate_claim(s, SCHEMA_VERSION)
+        )
         with pytest.raises(drill.DrillRefused, match="not a retired schema"):
-            source._admit_archive(f"schema_version:{SCHEMA_VERSION}", SCHEMA_VERSION)
-        assert source.archive_admission is None
-        source._admit_archive(f"schema_version:{SCHEMA_VERSION - 1}", SCHEMA_VERSION - 1)  # a lie
-        report = run_drill(
-            store.db,
-            tmp_path / "out",
-            tmp_path / "restored",
-            clock=_clock(store.now),
-            source=source,
+            drill.run_archive_drill(
+                source,
+                tmp_path / "out",
+                tmp_path / "restored",
+                now=store.now,
+                clock=_clock(store.now),
+            )
+        assert not (tmp_path / "out").exists()
+        monkeypatch.setattr(
+            cutover, "flatten_gate", lambda s, *, now: _gate_claim(s, SCHEMA_VERSION - 1)
+        )
+        gate, report = drill.run_archive_drill(
+            source, tmp_path / "out", tmp_path / "restored", now=store.now, clock=_clock(store.now)
         )
     finally:
         source.close()
+    assert gate.schema_version == SCHEMA_VERSION - 1
     assert report.verdict == "FAILED", report.verdict
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
     assert report.restore is not None and not report.restore.verified
 
 
+@RED_P1_2
 def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _drill_store(tmp_path)
-    source = _admitted_source(store)
-    try:
-        manifest = drill.backup(store.db, tmp_path / "out", clock=_clock(store.now), source=source)
-        other = _identity(store.db.parent)  # a real inode that is not the store
-        report = drill.restore(
-            replace(manifest, source_identity=other), tmp_path / "restored", source=source
-        )
-    finally:
-        source.close()
-    assert not report.verified
+    other = _identity(store.db.parent)  # a real inode that is not the store
+    real_backup = drill.backup
+
+    def lying_backup(*args: Any, **kwargs: Any) -> Any:
+        return replace(real_backup(*args, **kwargs), source_identity=other)
+
+    monkeypatch.setattr(drill, "backup", lying_backup)
+    _gate, report = _archive_drill(store, tmp_path)
+    assert report.verdict == "FAILED"
     assert any("source identity" in f for f in report.failures), report.failures
-    assert report.acceptance.startswith("archive:")
+    assert report.restore is not None and report.restore.acceptance.startswith("archive:")
 
 
-def test_8g_the_bare_string_seam_and_the_public_binding_are_gone() -> None:
+@RED_P1_2
+def test_8g_the_bare_string_seam_the_public_binding_and_the_capability_mint_are_gone() -> None:
     for function in (drill.run_drill, drill.restore, drill.verify_restored):
         parameters = inspect.signature(function).parameters
         assert "archived_schema_head" not in parameters, function
@@ -1295,45 +1428,125 @@ def test_8g_the_bare_string_seam_and_the_public_binding_are_gone() -> None:
     assert not hasattr(drill, "ArchiveBinding")
     source = MODULE.read_text(encoding="utf-8")
     assert "archived_schema_head" not in source and "ArchiveBinding" not in source
+    # r3: no admission state or method on the capability; only run_drill still takes a source
+    # (for the backup's identity binding) and it can yield VERIFIED or FAILED alone
+    assert not hasattr(drill.BoundSource, "_admit_archive")
+    assert not hasattr(drill.BoundSource, "archive_admission")
+    assert "_archive" not in drill.BoundSource.__slots__
+    for function in (drill.restore, drill.verify_restored):
+        assert "source" not in inspect.signature(function).parameters, function
+    assert "admission" not in inspect.signature(drill.run_archive_drill).parameters
+    assert "_admit_archive" not in source and "archive_admission" not in source
 
 
-def test_8h_daybreak_s_counterexample_a_store_the_gate_refused_can_never_be_archive_verified(
+@RED_P1_2
+def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and_none_verifies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P1-2 (r1): a retired store WITHOUT a reconciliation run. The gate refuses it; no public
-    path then reaches ARCHIVE_VERIFIED — the drill takes no binding a caller could construct, the
-    capability the gate refused carries no admission, and every public drill call over the store
-    ends in the running repository's own refusal of the retired version."""
+    """P1-2 (r1, r2): a retired store WITHOUT a reconciliation run. The command and the gate refuse
+    it. Then every callable seam is actively tried on the refused capability — the r2 method, an
+    attribute set, ``object.__setattr__``, a ``__class__`` swap to a subclass that carries a forged
+    admission, a copy, a pickle — and the archive drill itself over the refused store; the public
+    surface is swept for any parameter that admits an archive. Nothing reaches ARCHIVE_VERIFIED:
+    the only producer runs the real gate in its own frame, and the gate refuses."""
 
     store = _store(tmp_path, run=None)
-    code, report = _run(store, tmp_path, capsys=capsys)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["code"] == "NO_RECONCILIATION_RUN", report
+    assert not (tmp_path / "backups").exists()
+    head = drill.schema_head(store.db)
     source = drill.open_bound_source(store.db)
+    drilled: list[Any] = []
     try:
         with pytest.raises(cutover.CutoverRefused) as refused:
             cutover.flatten_gate(source, now=store.now)
         assert refused.value.code == "NO_RECONCILIATION_RUN"
-        assert source.archive_admission is None
-        for function in (run_drill, drill.restore, drill.verify_restored):
-            assert "archive" not in inspect.signature(function).parameters, function
-        assert not hasattr(drill, "ArchiveBinding")
-        unbound = run_drill(
-            store.db, tmp_path / "out-a", tmp_path / "restored-a", clock=_clock(store.now)
+        forged = drill._ArchiveAdmission(head, SCHEMA_VERSION - 1, source.identity)  # by hand
+        # (1) the r2 mint is gone; (2) no attribute on the capability accepts an admission
+        with pytest.raises(AttributeError):
+            source._admit_archive(head, SCHEMA_VERSION - 1)
+        for attribute in ("archive_admission", "_archive", "admission"):
+            with pytest.raises(AttributeError):
+                setattr(source, attribute, forged)
+            with pytest.raises(AttributeError):
+                object.__setattr__(source, attribute, forged)
+            assert not hasattr(source, attribute)
+        # (3) a subclass that carries the forged value under every r2 name: never read
+        with pytest.raises(cutover.CutoverRefused):  # the archive drill: the gate's own refusal
+            drill.run_archive_drill(
+                source,
+                tmp_path / "out-c",
+                tmp_path / "restored-c",
+                now=store.now,
+                clock=_clock(store.now),
+            )
+        assert not (tmp_path / "out-c").exists()
+
+        class Forging(drill.BoundSource):  # type: ignore[misc]
+            __slots__ = ()
+            archive_admission = forged
+            _archive = forged
+
+            def _admit_archive(self, *args: object) -> None:
+                return None
+
+        source.__class__ = Forging
+        assert (
+            source.archive_admission is forged
+        )  # the forgery is in place, for the drill to ignore
+        drilled.append(
+            run_drill(
+                store.db,
+                tmp_path / "out-a",
+                tmp_path / "restored-a",
+                clock=_clock(store.now),
+                source=source,
+            )
         )
-        bound = run_drill(
-            store.db,
-            tmp_path / "out-b",
-            tmp_path / "restored-b",
-            clock=_clock(store.now),
-            source=source,
+        with pytest.raises(cutover.CutoverRefused):
+            drill.run_archive_drill(
+                source,
+                tmp_path / "out-d",
+                tmp_path / "restored-d",
+                now=store.now,
+                clock=_clock(store.now),
+            )
+        # (4) a copy carries nothing either; a pickle is impossible (the connection, the descriptor)
+        copied = copy.copy(source)  # shares the descriptor and connection; never closed here
+        drilled.append(
+            run_drill(
+                store.db,
+                tmp_path / "out-b",
+                tmp_path / "restored-b",
+                clock=_clock(store.now),
+                source=copied,
+            )
+        )
+        with pytest.raises((TypeError, pickle.PicklingError, AttributeError)):
+            pickle.dumps(source)
+        # (5) the public surface: no parameter anywhere admits an archive
+        for name in dir(drill):
+            member = getattr(drill, name)
+            if name.startswith("_") or not callable(member) or isinstance(member, type):
+                continue
+            parameters = set(inspect.signature(member).parameters)
+            assert not parameters & {"admission", "archive", "binding", "archived_schema_head"}, (
+                name
+            )
+        assert not hasattr(drill, "ArchiveBinding")
+        # (6) the plain drill over the store: the repository's own refusal
+        drilled.append(
+            run_drill(
+                store.db, tmp_path / "out-e", tmp_path / "restored-e", clock=_clock(store.now)
+            )
         )
     finally:
         source.close()
     prefix = "schema_acceptance: Unsupported Chronos schema version"
-    for drilled in (unbound, bound):
-        assert drilled.verdict == "FAILED", drilled.verdict
-        assert drilled.restore is not None and drilled.restore.acceptance == "repository"
-        assert any(f.startswith(prefix) for f in drilled.failures), drilled.failures
+    for result in drilled:
+        assert result.verdict == "FAILED", result.verdict
+        assert result.restore is not None and result.restore.acceptance == "repository"
+        assert any(f.startswith(prefix) for f in result.failures), result.failures
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -1618,48 +1831,114 @@ def test_9i_a_write_open_during_the_archive_is_refused_by_the_lease_and_stops_th
     os.close(fd)
 
 
-def test_9j_a_main_file_swap_at_the_final_syscall_is_renamed_back_and_reported_exactly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param("file-at-live-name", marks=RED_P1_1),
+        pytest.param("dir-over-sentinel", marks=RED_P1_1),
+    ],
+)
+def test_9j_a_main_file_swap_at_the_final_syscall_is_exchanged_back_and_reported_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], shape: str
 ) -> None:
-    """Daybreak's final-syscall probe: the name is exchanged AFTER every precheck, immediately
-    before ``renameat2``, so the rename moves a foreign entry. The post-proof detects it, the
-    foreign entry is renamed BACK by name (never over anything), and the report is exact: nothing
-    of the admitted set moved, every admitted name is in ``not_moved``, the foreign entry is
-    listed with where it is now, and the held store's identity is named."""
+    """Daybreak's final-syscall probe: a name is exchanged AFTER every precheck, immediately before
+    the syscall. ``file-at-live-name``: a foreign store is put at the live name, so the exchange
+    moves it to the archive name. ``dir-over-sentinel`` (r3, owner-uid only): a foreign empty
+    directory is renamed over this run's sentinel at the archive name, so the exchange puts the
+    store at the archive name and the foreign directory at the live name. Either way the post-proof
+    (archive name == held inode AND live name == held sentinel) fails, the exchange is reversed
+    EXACTLY (one more exchange, never a rename over anything), and the report is exact: nothing of
+    the admitted set moved, every admitted name is in ``not_moved``, the foreign entry is listed
+    with where it is now, the held store's identity is named, and the sentinels this run created
+    are listed where they are (the command deletes nothing, a sentinel included)."""
 
     a = _store(tmp_path / "a", binding="closed")
     b = _store(tmp_path / "b", binding="closed")
     a_identity, a_sha = _identity(a.db), _sha256(a.db)
     b_identity, b_sha = _identity(b.db), _sha256(b.db)
+    archived = a.db.with_name(f"chronos.db.archived-{a.stamp}")
+    foreign_dir = a.db.with_name("foreign-dir")
     real_rename = cutover._renameat2
 
     def swap_then_rename(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
         if src == "chronos.db":
             monkeypatch.setattr(cutover, "_renameat2", real_rename)
-            os.rename(a.db, a.db.with_name("victim-away"))
-            os.rename(b.db, a.db)
+            if shape == "file-at-live-name":
+                os.rename(a.db, a.db.with_name("victim-away"))
+                os.rename(b.db, a.db)
+            else:
+                foreign_dir.mkdir()
+                os.rename(foreign_dir, archived)  # over the empty sentinel: the owner's uid can
         real_rename(src_dir_fd, src, dst_dir_fd, dst, flags)
 
     monkeypatch.setattr(cutover, "_renameat2", swap_then_rename)
     code, report = _run(a, tmp_path / "a", "--apply", capsys=capsys)
     assert code == 2 and report["verdict"] == "REFUSED", report  # nothing of ours moved
-    assert report["code"] == "SOURCE_SWAPPED"
     assert f"{a_identity[0]}:{a_identity[1]}" in report["failures"][0]
-    archived = a.db.with_name(f"chronos.db.archived-{a.stamp}")
     assert report["moved_aside"] == []
     assert report["not_moved"] == [str(a.db), *(str(a.db.with_name(n)) for n in SIDECARS)]
-    assert report["foreign_renamed"] == [
-        {
-            "renamed_to": str(archived),
-            "restored_to": str(a.db),
-            "identity": f"{b_identity[0]}:{b_identity[1]}",
-        }
-    ]
-    assert _entries(a.db.parent) == sorted(["chronos.db", *SIDECARS, "victim-away"])
-    assert _sha256(a.db) == b_sha and _identity(a.db) == b_identity  # the foreign, back at its name
-    assert _sha256(a.db.with_name("victim-away")) == a_sha  # the store, where the swap put it
+    sentinels = {s["name"]: s for s in report["sentinels"]}
+    journal = a.db.with_name("chronos.db-journal")
+    wal_archived = a.db.with_name(f"chronos.db-wal.archived-{a.stamp}")
+    shm_archived = a.db.with_name(f"chronos.db-shm.archived-{a.stamp}")
+    assert sentinels[str(journal)]["at"] == str(journal) and _is_sentinel(journal)
+    assert sentinels[str(a.db.with_name("chronos.db-wal"))]["at"] == str(wal_archived)
+    assert sentinels[str(a.db.with_name("chronos.db-shm"))]["at"] == str(shm_archived)
+    assert _is_sentinel(wal_archived) and _is_sentinel(shm_archived)
+    if shape == "file-at-live-name":
+        assert report["code"] == "SOURCE_SWAPPED"
+        assert report["foreign_renamed"] == [
+            {
+                "renamed_to": str(archived),
+                "restored_to": str(a.db),
+                "identity": f"{b_identity[0]}:{b_identity[1]}",
+            }
+        ]
+        assert sentinels[str(a.db)]["at"] == str(archived) and _is_sentinel(archived)
+        assert _entries(a.db.parent) == sorted(
+            [
+                "chronos.db",
+                *SIDECARS,
+                "victim-away",
+                journal.name,
+                archived.name,
+                wal_archived.name,
+                shm_archived.name,
+            ]
+        )
+        assert (
+            _sha256(a.db) == b_sha and _identity(a.db) == b_identity
+        )  # the foreign, back at its name
+        assert _sha256(a.db.with_name("victim-away")) == a_sha  # the store, where the swap put it
+    else:
+        assert report["code"] == "LIVE_NAME_OCCUPIED"
+        assert report["foreign_renamed"] == [
+            {
+                "renamed_to": str(a.db),
+                "restored_to": str(archived),
+                "identity": "{}:{}".format(*_identity(archived)),
+            }
+        ]
+        assert sentinels[str(a.db)]["at"] is None  # replaced by the foreign directory
+        assert stat.S_ISDIR(
+            os.lstat(archived).st_mode
+        )  # the foreign directory, back where it was put
+        assert _entries(a.db.parent) == sorted(
+            [
+                "chronos.db",
+                *SIDECARS,
+                journal.name,
+                archived.name,
+                wal_archived.name,
+                shm_archived.name,
+            ]
+        )
+        assert (
+            _sha256(a.db) == a_sha and _identity(a.db) == a_identity
+        )  # the store, back at its name
 
 
+@RED_P1_1
 def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_reported_exactly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1696,19 +1975,30 @@ def test_9k_a_sidecar_swap_at_the_final_syscall_after_the_main_file_moved_is_rep
             "identity": "{}:{}".format(*_identity(wal)),
         }
     ]
-    assert _entries(store.db.parent) == [
-        "chronos.db-shm",
-        "chronos.db-wal",
-        archived_db.name,
-        "wal-away",
-    ]
+    journal = store.db.with_name("chronos.db-journal")
+    archived_shm = shm.with_name(f"chronos.db-shm.archived-{store.stamp}")
+    assert _entries(store.db.parent) == sorted(
+        [*LIVE_NAMES, archived_db.name, archived_wal.name, archived_shm.name, "wal-away"]
+    )
+    assert _is_sentinel(store.db) and _is_sentinel(journal)  # the live name the store left
+    assert _is_sentinel(archived_wal) and _is_sentinel(archived_shm)  # exchanged back / never used
+    assert {s["name"]: s["at"] for s in report["sentinels"]} == {
+        str(store.db): str(store.db),
+        str(wal): str(archived_wal),
+        str(shm): str(archived_shm),
+        str(journal): str(journal),
+    }
     assert _identity(wal.with_name("wal-away")) == admitted[0]  # the admitted sidecar, intact
-    # the runbook's rollback is exact: the one moved name renames back by name
+    # the runbook's rollback is exact: the sentinels go first (rmdir — the owner's hand, never
+    # the command's), then the one moved name renames back by name
+    for sentinel in (store.db, journal, archived_wal, archived_shm):
+        os.rmdir(sentinel)
     os.rename(archived_db, store.db)
     assert _entries(store.db.parent) == sorted(["chronos.db", *SIDECARS, "wal-away"])
 
 
-def test_9l_an_archived_report_proves_the_admitted_wal_stayed_frame_free_through_the_move(
+@RED_P1_1
+def test_9l_an_archived_report_proves_the_admitted_set_quiet_and_the_live_names_sealed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store = _store(tmp_path, binding="closed")
@@ -1719,6 +2009,298 @@ def test_9l_an_archived_report_proves_the_admitted_wal_stayed_frame_free_through
     assert exclusion["leased"] == ["chronos.db", *SIDECARS]
     assert exclusion["intact_after_move"] is True
     assert exclusion["wal_bytes_after_move"] <= cutover.WAL_HEADER_BYTES
+    # r3: the live-name proof — every name of the namespace IS this run's sentinel by identity
+    assert exclusion["live_names_sealed"] is True
+    for entry in report["sentinels"]:
+        assert entry["at"] == entry["name"]
+        assert entry["identity"] == "{}:{}".format(*_identity(Path(entry["name"])))
+        assert _is_sentinel(Path(entry["name"]))
     archived = store.db.with_name(f"chronos.db.archived-{store.stamp}")
     fd = os.open(archived, os.O_RDWR | os.O_NONBLOCK)  # every lease released on return
     os.close(fd)
+
+
+# ------------------------------------------------- (7, r3) the escrow tool deletes nothing
+
+
+@RED_P1_3
+def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothing(
+    tmp_path: Path,
+    age_keys: KeyMaterial,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Daybreak r2 P1-3, the exact probe: the identity predicate confirms the created artifact
+    and, before it returns, the created file is renamed aside and a foreign file planted at the
+    name. r2 unlinked the name after the predicate — the foreign entry. r3: after a post-create
+    failure the tool deletes nothing, so there is no interval to race — the only ``unlink`` the
+    module performs is its own scratch cleartext (recorded here: none on this path, where the
+    decrypt is forced to fail before the scratch exists), the predicate is not consulted for a
+    cleanup, the foreign entry (wherever the probe put one) survives, and the created ciphertext
+    is reported by device:inode for the owner to shred."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    aside = out.with_name("artifact-aside")
+    foreign = b"not the file this run created"
+
+    def failing_decrypt(*args: Any, **kwargs: Any) -> None:
+        raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
+
+    monkeypatch.setattr(escrow, "_decrypts_back_to", failing_decrypt)
+    real_predicate = escrow._entry_is_real_file
+    verdicts: list[bool] = []
+
+    def swapping_predicate(dfd: int, name: str, identity: tuple[int, int]) -> bool:
+        verdict = real_predicate(dfd, name, identity)
+        verdicts.append(verdict)
+        if len(verdicts) > 1 and verdict:  # a cleanup's own check, if one exists: swap after it
+            os.rename(out, aside)
+            out.write_bytes(foreign)
+        return verdict
+
+    monkeypatch.setattr(escrow, "_entry_is_real_file", swapping_predicate)
+    unlinked: list[tuple[str, int | None]] = []
+    real_unlink = os.unlink
+
+    def recording_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        unlinked.append((os.fspath(path), kwargs.get("dir_fd")))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", recording_unlink)
+    key = _hex("n3-2 r3 TEST key for the predicate race — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["code"] == "AGE_FAILED", report
+    assert unlinked == [], unlinked  # nothing was unlinked on the failure path
+    assert verdicts == [True]  # the one post-create check; no cleanup consults the name
+    created = report["created_artifact"]
+    assert created["removed"] is False and "shred" in created["note"]
+    ciphertext = aside if aside.exists() else out
+    if aside.exists():
+        assert out.read_bytes() == foreign  # the foreign entry survives
+    assert _entries(out.parent) == sorted(p.name for p in (out, aside) if p.exists())
+    assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
+    assert AGE is not None
+    decrypted = subprocess.run(
+        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
+    )
+    assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
+    assert key not in json.dumps(report)
+    # and statically: the module's only deletions are its private scratch (the cleartext the
+    # proof wrote, and the 0700 directory it made) — never the artifact, never by name
+    tree = ast.parse(ESCROW_MODULE.read_text(encoding="utf-8"))
+    deleters = sorted(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("unlink", "remove", "rmdir", "rmtree", "unlink_created")
+    )
+    assert deleters == ["os.rmdir(scratch)", "os.unlink('key', dir_fd=scratch_fd)"], deleters
+
+
+# ------------------------------------------- (10, r3) the live namespace is never vacant
+
+
+def _hook_post_move_quiet_check(monkeypatch: pytest.MonkeyPatch, action: Any) -> list[int]:
+    """Daybreak's r2 hook, exactly: the SECOND ``_not_quiet`` call — after the last rename,
+    before the report. ``action`` runs there, then the real check."""
+
+    real = cutover._not_quiet
+    calls: list[int] = []
+
+    def hooked(*args: Any, **kwargs: Any) -> Any:
+        calls.append(len(calls) + 1)
+        if len(calls) == 2:
+            action()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cutover, "_not_quiet", hooked)
+    return calls
+
+
+@RED_P1_1
+def test_10a_daybreak_s_counterexample_a_store_planted_at_the_vacated_live_name_cannot_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Daybreak r2 P1-1, the exact hook and the exact attack: after the last rename, before the
+    report, plant a valid database at the live name. r3: the live name was never vacant — the
+    final syscall EXCHANGED the store with a 0500 sentinel directory this run made — so every way
+    of creating a file there fails (rename over it: EISDIR; O_CREAT|O_EXCL: EEXIST; O_CREAT:
+    EISDIR), every writer path refuses the directory (SQLite: unable to open; the repository's
+    R-21 admission: non-regular path), the planted store stays where it was, and ARCHIVED stands
+    with the sentinel at the name."""
+
+    store = _store(tmp_path / "live", binding="closed")
+    planted = _store(tmp_path / "planted", version_offset=0)  # a valid store at the running version
+    planted_sha = _sha256(planted.db)
+
+    def plant() -> None:
+        assert _is_sentinel(store.db)  # not vacant: the exchange put the sentinel there
+        with pytest.raises(IsADirectoryError):
+            os.rename(planted.db, store.db)
+        with pytest.raises(FileExistsError):
+            os.open(store.db, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        with pytest.raises(IsADirectoryError):
+            os.open(store.db, os.O_WRONLY | os.O_CREAT)
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+            sqlite3.connect(store.db).execute("SELECT 1")
+        with pytest.raises(RuntimeError, match="non-regular"):
+            Database(f"sqlite:///{store.db}")
+
+    calls = _hook_post_move_quiet_check(monkeypatch, plant)
+    code, report = _run(store, tmp_path / "live", "--apply", capsys=capsys)
+    assert calls == [1, 2]
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    assert _is_sentinel(store.db) and _sha256(planted.db) == planted_sha
+    assert _identity(store.db.with_name(f"chronos.db.archived-{store.stamp}")) == tuple(
+        BackupManifest.from_dict(
+            json.loads((Path(report["envelope"]) / drill.MANIFEST_NAME).read_text(encoding="utf-8"))
+        ).source_identity
+    )
+
+
+@RED_P1_1
+def test_10b_an_owner_uid_actor_that_vacates_a_live_name_before_the_report_is_never_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The trust root, stated: the store owner's uid is the one actor that CAN vacate a sentinel
+    (rmdir). Should it, and plant a valid store at the name before the report-time proof, the
+    proof fails: MOVE_INCOMPLETE with ``moved_aside`` exact, never ARCHIVED; the planted store is
+    untouched (the command deletes nothing); the archive names hold the admitted set; the other
+    sentinels stand."""
+
+    store = _store(tmp_path / "live", binding="closed")
+    source_identity = _identity(store.db)
+    planted = _store(tmp_path / "planted", version_offset=0)
+    planted_sha = _sha256(planted.db)
+
+    def vacate_then_plant() -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.rmdir(store.db)
+        os.rename(planted.db, store.db)
+
+    _hook_post_move_quiet_check(monkeypatch, vacate_then_plant)
+    code, report = _run(store, tmp_path / "live", "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "MOVE_INCOMPLETE", report
+    assert report["code"] == "LIVE_NAME_OCCUPIED"
+    archived = {
+        name: store.db.with_name(f"{name}.archived-{store.stamp}")
+        for name in ("chronos.db", *SIDECARS)
+    }
+    assert report["moved_aside"] == [
+        {"from": str(store.db.with_name(name)), "to": str(path)} for name, path in archived.items()
+    ]
+    assert report["not_moved"] == []
+    assert _sha256(store.db) == planted_sha and _identity(archived["chronos.db"]) == source_identity
+    assert _entries(store.db.parent) == sorted([*LIVE_NAMES, *(p.name for p in archived.values())])
+    assert all(_is_sentinel(store.db.with_name(name)) for name in LIVE_NAMES[1:])
+    assert {s["name"]: s["at"] for s in report["sentinels"]}[str(store.db)] is None
+
+
+@RED_P1_1
+def test_10c_every_live_name_stays_a_sentinel_until_the_owner_s_rmdir_then_a_fresh_store_is_made(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After ARCHIVED, for as long as the command's process is gone and until the owner's hand:
+    each of the four names of the store's namespace is a 0500 empty directory owned by this user,
+    the report names each by device:inode, no file can be created or renamed there, SQLite
+    cannot open it, and the repository refuses to construct a Database over it — a lone
+    ``-journal`` sentinel included (R-21 checks all four names). The owner's rmdir of the four
+    (step 7) vacates the namespace; only then does the backend's construction create a fresh
+    store at the running schema."""
+
+    store = _store(tmp_path, binding="closed")
+    source_identity = _identity(store.db)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    foreign = store.db.with_name("foreign")
+    foreign.write_bytes(b"x")
+    assert [s["name"] for s in report["sentinels"]] == [
+        str(store.db.with_name(n)) for n in LIVE_NAMES
+    ]
+    for entry in report["sentinels"]:
+        path = Path(entry["name"])
+        assert _is_sentinel(path)
+        assert entry == {
+            "name": str(path),
+            "at": str(path),
+            "identity": "{}:{}".format(*_identity(path)),
+        }
+        with pytest.raises(FileExistsError):
+            os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        with pytest.raises(IsADirectoryError):
+            os.rename(foreign, path)
+        with pytest.raises(IsADirectoryError):
+            os.open(path, os.O_RDWR)
+    with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+        sqlite3.connect(store.db).execute("SELECT 1")
+    with pytest.raises(RuntimeError, match="non-regular"):
+        Database(f"sqlite:///{store.db}")
+    for name in LIVE_NAMES[:-1]:
+        os.rmdir(store.db.with_name(name))
+    with pytest.raises(RuntimeError, match="non-regular"):  # the -journal sentinel alone refuses
+        Database(f"sqlite:///{store.db}")
+    assert not store.db.exists()
+    os.rmdir(store.db.with_name(LIVE_NAMES[-1]))
+    database = Database(f"sqlite:///{store.db}")  # the owner's step 7
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+    assert store.db.is_file() and _identity(store.db) != source_identity
+    with closing(sqlite3.connect(f"{store.db.as_uri()}?mode=ro", uri=True)) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchall() == [
+            (SCHEMA_VERSION,)
+        ]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param("journal", marks=RED_P1_1_OCCUPIED),
+        pytest.param("wal-not-admitted", marks=RED_P1_1_OCCUPIED),
+        pytest.param("shm-not-admitted", marks=RED_P1_1_OCCUPIED),
+    ],
+)
+def test_10d_a_non_admitted_entry_at_a_live_name_refuses_the_move_with_nothing_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], shape: str
+) -> None:
+    """A live name of the namespace that is NOT in the admitted set must be absent at the move, so
+    that a sentinel can take it: a frame-free ``-wal``/``-shm`` that appeared after admission (a
+    rollback-journal store, whose read-only connection leaves no bookkeeping, so the admitted set
+    is the store alone) or a ``-journal`` is ``LIVE_NAME_OCCUPIED`` — nothing moved, no sentinel
+    created, the planted entry untouched (this retires r2's ``left_in_place``: an occupied name
+    is a refusal, not a report line)."""
+
+    journal_mode = "wal" if shape == "journal" else "delete"
+    store = _store(tmp_path, binding="closed", journal_mode=journal_mode)
+    before = _sha256(store.db)
+    name = {
+        "journal": "chronos.db-journal",
+        "wal-not-admitted": "chronos.db-wal",
+        "shm-not-admitted": "chronos.db-shm",
+    }[shape]
+    planted = store.db.with_name(name)
+    real_move = cutover._move_aside
+
+    def plant_then_move(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(cutover, "_move_aside", real_move)
+        assert not planted.exists()
+        planted.write_bytes(b"")  # frame-free, regular: r2 would have left it in place
+        return real_move(*args, **kwargs)
+
+    monkeypatch.setattr(cutover, "_move_aside", plant_then_move)
+    expected_before = _entries(store.db.parent)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "LIVE_NAME_OCCUPIED" and name in report["failures"][0]
+    assert report["moved_aside"] == [] and report["sentinels"] == []
+    assert store.db.is_file() and _sha256(store.db) == before
+    assert planted.read_bytes() == b""  # never touched
+    assert _entries(store.db.parent) == sorted([*expected_before, name])
+    assert Path(report["envelope"]).is_dir()
