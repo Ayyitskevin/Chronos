@@ -27,6 +27,21 @@ proves the artifact decrypts back before reporting. The gate's one directory eff
 reader bookkeeping beside a WAL-mode store) and tested without a filter; the runbook states the real lost-key
 boundary instead of promising this command. See `docs/ops/RESTORE-DRILL.md`, "Archiving a retired schema".
 
+r2 (Daybreak's r1 review): writers are EXCLUDED, not merely detected — before the gate the command takes a kernel
+read lease (`fcntl(F_SETLEASE)`) on the held, read-only store descriptor, which the kernel grants only while no
+process has the store open for writing and which blocks every writer's open until the command returns; a writer
+already holding the store is `WRITER_OPEN` before any fact is read, a lease the kernel will not grant is
+`WRITER_EXCLUSION_UNAVAILABLE`, and the lease is re-read before the drill, before the first rename and after the
+last. At the move every admitted sidecar is leased likewise and the admitted `-wal` is re-proved frame-free by
+`fstat` on its held descriptor before and after the renames (the same inode can grow in place); a foreign entry
+the final syscall moved is renamed back by name and reported in `foreign_renamed`, with `moved_aside`/`not_moved`
+exact; `ARCHIVED` reports carry the `exclusion` proof. The public `ArchiveBinding` is gone: the flatten gate, at its
+end and only then, admits the still-open `BoundSource` as the archive's source, the drill's `run_drill`/`restore`/
+`verify_restored` take the capability itself (`source=`), and a store the gate refused can never be
+`ARCHIVE_VERIFIED`. The escrow tool verifies through the descriptor it holds and, on failure, unlinks the output
+name only when it still is the file this run created, reporting `created_artifact` either way. Run the cutover
+command as the user that owns the store (the lease needs the file's owner).
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
