@@ -11,8 +11,14 @@ Numbered: (1) dry-run, (2) the flatten gate on bindings, (3) on the latest recon
 (4) on the service posture and the store's version, (5) ``--apply`` (envelope → VERIFIED →
 move-aside; a failed drill or an existing target leaves the live store untouched), (6) the
 pins (never reads ``CHRONOS_PERSISTENCE_KEY``; imports no broker/orders module itself; no
-socket is ever opened), (7) the runbook contract, (8) G1 — the drill's ``archived_schema_head``
-seam, with the control that proves the gap it closes.
+socket is ever opened), (7) the runbook contract and the escrow tool, (8) G1 — the drill's
+``ArchiveBinding`` seam (a distinct ``ARCHIVE_VERIFIED`` verdict), with the control that proves
+the gap it closes, (9) r1 — one bound source capability across gate, backup and move (Daybreak's
+A/B substitution and the independent main-file, sidecar and manifest swaps).
+
+"Zero changes" is asserted EXACTLY, never through a filter: the store's bytes are unchanged and
+the only entries a run may add beside a WAL-mode store are SQLite's reader bookkeeping — an empty
+``chronos.db-wal`` and a ``chronos.db-shm`` — which ``--apply`` moves aside with the store.
 
 The managed-position binding row is inserted with foreign-key enforcement OFF (a plain
 SQLAlchemy engine, never ``Database``): its ``order_intents``/``risk_decisions`` parents are
@@ -34,7 +40,7 @@ import subprocess
 import sys
 from collections.abc import Iterator, MutableMapping
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -381,15 +387,33 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _entries(directory: Path) -> list[str]:
-    """Directory names without sqlite's reader bookkeeping (``-wal``/``-shm`` may appear beside a
-    WAL-mode store that a read-only connection opened — a directory write, never a store write)."""
+READER_BOOKKEEPING = ("chronos.db-wal", "chronos.db-shm")
 
-    return sorted(
-        p.name
-        for p in directory.iterdir()
-        if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
-    )
+
+def _entries(directory: Path) -> list[str]:
+    """Every directory entry, unfiltered."""
+
+    return sorted(p.name for p in directory.iterdir())
+
+
+def _assert_only_reader_bookkeeping(store: Store, before: list[str], before_sha: str) -> None:
+    """The exact allowed delta of a dry-run or a refusal: the store's bytes are unchanged, no
+    entry disappeared, and the only entries that may have appeared are SQLite's reader
+    bookkeeping beside a WAL-mode store — an empty ``chronos.db-wal`` and a ``chronos.db-shm``.
+    Nothing else; no filtering."""
+
+    assert _sha256(store.db) == before_sha
+    after = _entries(store.db.parent)
+    assert set(before) <= set(after), (before, after)
+    assert set(after) - set(before) <= set(READER_BOOKKEEPING), (before, after)
+    wal = store.db.with_name("chronos.db-wal")
+    if wal.exists():
+        assert wal.stat().st_size <= cutover.WAL_HEADER_BYTES, wal.stat().st_size
+
+
+def _identity(path: Path) -> tuple[int, int]:
+    st = os.lstat(path)
+    return st.st_dev, st.st_ino
 
 
 def _run(
@@ -424,9 +448,34 @@ def test_1a_dry_run_passes_the_gate_and_creates_nothing(
     assert report["gate"]["positions_observed"] == 0
     assert report["gate"]["schema_version"] == SCHEMA_VERSION - 1
     assert report["planned"]["envelope"].endswith(f"chronos-{store.stamp}")
-    assert _sha256(store.db) == before
-    assert _entries(store.db.parent) == ["chronos.db"]
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
     assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P2-1: the claim still says the gate creates nothing")
+def test_1c_the_gate_s_only_directory_effect_is_sqlite_s_reader_bookkeeping_and_the_claim_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2-1: a read-only connection on a WAL-mode store leaves an empty ``-wal`` and a ``-shm``
+    beside it (measured on this host, SQLite 3.53); the module and the runbook say exactly that,
+    never "creates nothing" about the directory."""
+
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 0, report
+    after = _entries(store.db.parent)
+    assert after == ["chronos.db", "chronos.db-shm", "chronos.db-wal"], after
+    assert store.db.with_name("chronos.db-wal").stat().st_size == 0
+    assert _sha256(store.db) == before
+    # the refusal path leaves the same exact delta and nothing else
+    refused = _store(tmp_path / "refused", binding="open")
+    code, report = _run(refused, tmp_path / "refused", "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "OPEN_BINDING"
+    assert _entries(refused.db.parent) == ["chronos.db", "chronos.db-shm", "chronos.db-wal"]
+    for text in (MODULE.read_text(encoding="utf-8"), RUNBOOK.read_text(encoding="utf-8")):
+        assert "creates nothing" not in text
+        assert "reader bookkeeping" in text
 
 
 def test_1b_the_cli_dry_run_exits_0_with_the_json_report(tmp_path: Path) -> None:
@@ -463,8 +512,7 @@ def test_2a_an_open_binding_refuses_with_zero_changes(
     assert code == 2 and report["verdict"] == "REFUSED", report
     assert report["code"] == "OPEN_BINDING"
     assert "1 of 1" in report["failures"][0]
-    assert _sha256(store.db) == before
-    assert _entries(store.db.parent) == ["chronos.db"]
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
     assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
 
 
@@ -481,10 +529,11 @@ def test_2c_a_binding_whose_stream_is_missing_or_broken_refuses_as_unreadable(
     tmp_path: Path, shape: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store = _store(tmp_path, binding=shape)
+    before = _sha256(store.db)
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["code"] == "BINDING_UNREADABLE", report
     assert not (tmp_path / "backups").exists()
-    assert _entries(store.db.parent) == ["chronos.db"]
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
 
 
 # ------------------------------------------------------------- (3) the gate: reconciliation
@@ -603,6 +652,7 @@ class _NoSocket:
         raise AssertionError("the cutover archive opened a socket")
 
 
+@pytest.mark.xfail(strict=True, reason="r1 P1-1/P1-2: no ARCHIVE_VERIFIED, no source identity")
 def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelope_stamp(
     tmp_path: Path,
     age_keys: KeyMaterial,
@@ -611,6 +661,7 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
 ) -> None:
     store = _store(tmp_path, binding="closed")
     original = _sha256(store.db)
+    source_identity = _identity(store.db)
     with closing(sqlite3.connect(f"{store.db.as_uri()}?mode=ro", uri=True)) as connection:
         chain_before = connection.execute(
             "SELECT stream, sequence, record_hash FROM hash_chain_records ORDER BY stream, sequence"
@@ -619,7 +670,8 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 0, report
     assert report["verdict"] == "ARCHIVED" and report["dry_run"] is False
-    assert report["drill"]["verdict"] == "VERIFIED"
+    assert report["drill"]["verdict"] == "ARCHIVE_VERIFIED"  # distinct from repository VERIFIED
+    assert report["drill"]["acceptance"] == f"archive:schema_version:{SCHEMA_VERSION - 1}"
     envelope = Path(report["envelope"])
     assert envelope.name == f"chronos-{store.stamp}" and envelope.parent == tmp_path / "backups"
     manifest_path = envelope / drill.MANIFEST_NAME
@@ -629,15 +681,20 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
     assert report["cleartext_sha256"] == manifest.sha256
     assert report["ciphertext_sha256"] == manifest.ciphertext_sha256
     assert report["schema_head"] == manifest.schema_head == f"schema_version:{SCHEMA_VERSION - 1}"
+    # the manifest carries the binding: the envelope is of the gated inode, which is the moved one
+    assert tuple(manifest.source_identity) == source_identity
     # moved aside by rename, bound to the envelope's stamp; the main file's bytes are the original
     moved = {entry["from"]: entry["to"] for entry in report["moved_aside"]}
     archived = store.db.with_name(f"chronos.db.archived-{store.stamp}")
     assert moved[str(store.db)] == str(archived)
     assert not store.db.exists() and _sha256(archived) == original
-    assert all(name.endswith(f".archived-{store.stamp}") for name in _entries(store.db.parent))
-    assert not any(
-        name in ("chronos.db-wal", "chronos.db-shm") for name in os.listdir(store.db.parent)
+    assert _identity(archived) == source_identity
+    # the admitted set — the store and the reader bookkeeping the gate's own connection left —
+    # is exactly what was moved: nothing else is in the directory, nothing was left in place
+    assert _entries(store.db.parent) == sorted(
+        f"{name}.archived-{store.stamp}" for name in ("chronos.db", *READER_BOOKKEEPING)
     )
+    assert report["left_in_place"] == []
     # the original content is recoverable: by-hand age -d, then the drill's own restore
     assert AGE is not None
     by_hand = tmp_path / "by-hand"
@@ -663,8 +720,14 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
         ).fetchall()
         assert c.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION - 1,)]
     assert chain_after == chain_before and len(chain_before) == 3
-    again = drill.restore(manifest, tmp_path / "again", archived_schema_head=manifest.schema_head)
+    binding = drill.ArchiveBinding(
+        schema_head=manifest.schema_head,
+        schema_version=SCHEMA_VERSION - 1,
+        source_identity=source_identity,
+    )
+    again = drill.restore(manifest, tmp_path / "again", archive=binding)
     assert again.verified, again.failures
+    assert again.acceptance == f"archive:{manifest.schema_head}"
     assert report["restore_dir"] == str(tmp_path / "restored")
     assert any("CHRONOS_PERSISTENCE_KEY" in step for step in report["next_manual_steps"])
     assert any("token_hex(32)" in step for step in report["next_manual_steps"])
@@ -687,8 +750,8 @@ def test_5b_a_drill_that_is_not_verified_leaves_the_live_store_untouched(
     assert code == 2 and report["verdict"] == "ARCHIVE_NOT_VERIFIED", report
     assert report["drill"]["verdict"] == "FAILED"
     assert any(f.startswith("rpo: refused") for f in report["drill"]["failures"])
-    assert store.db.exists() and _sha256(store.db) == before
-    assert _entries(store.db.parent) == ["chronos.db"]
+    assert store.db.exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
     assert "moved_aside" not in report or report["moved_aside"] == []
     assert Path(report["envelope"]).is_dir()  # the envelope exists; the JSON says where
 
@@ -718,7 +781,7 @@ def test_5d_a_restore_target_that_is_not_fresh_refuses_before_any_envelope_exist
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_FRESH", report
     assert not (tmp_path / "backups").exists()  # no orphan envelope
-    assert _sha256(store.db) == before and _entries(store.db.parent) == ["chronos.db"]
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
 
 
 # ------------------------------------------------------------- (6) pins
@@ -865,6 +928,140 @@ def test_7a_the_runbook_names_the_steps_and_carries_no_example_key() -> None:
     assert "ALLOW_ORDER_TRANSMIT=true" not in text and "ALLOW_LIVE_TRADING=true" not in text
 
 
+ESCROW_MODULE = ROOT / "src" / "chronos" / "operations" / "persistence_key_escrow.py"
+
+
+def _escrow(
+    tmp_path: Path, key_text: str, *extra: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir(exist_ok=True)
+    argv = [
+        sys.executable,
+        "-m",
+        "chronos.operations.persistence_key_escrow",
+        "--out",
+        str(out),
+        "--key-from-stdin",
+        *extra,
+    ]
+    completed = subprocess.run(
+        argv,
+        cwd=ROOT,
+        env={**os.environ, **SAFE_ENV},
+        input=key_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed, out
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
+def test_7c_the_escrow_tool_encrypts_the_key_it_is_given_and_proves_it_decrypts_back(
+    tmp_path: Path, age_keys: KeyMaterial
+) -> None:
+    """P1-3: the escrow step is a pinned tool. A TEST key (derived at run time) goes in on
+    stdin, never through the environment or argv; the tool encrypts it to the drill's two
+    validated recipients, decrypts the artifact back through the host identity in a private
+    scratch, compares in process, and reports — never printing the key or a digest of it."""
+
+    key = _hex("n3-2 r1 TEST persistence key — never a real one")
+    completed, out = _escrow(tmp_path, key + "\n")
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["verdict"] == "ESCROWED" and report["verified"] is True
+    assert report["out"] == str(out) and out.is_file()
+    assert sorted(report["recipients"]) == sorted(
+        [age_keys.host_public_key, drill.KEVIN_RECOVERY_RECIPIENT]
+    )
+    assert report["ciphertext_sha256"] == _sha256(out)
+    assert oct(out.stat().st_mode & 0o777) == "0o600"
+    assert key not in completed.stdout + completed.stderr
+    without_digest = completed.stdout.replace(report["ciphertext_sha256"], "")
+    assert re.search(r"[0-9a-f]{64}", without_digest) is None  # only the ciphertext digest
+    assert AGE is not None
+    decrypted = subprocess.run(
+        [AGE, "-d", "-i", str(age_keys.identity), str(out)], check=True, capture_output=True
+    )
+    assert decrypted.stdout == (key + "\n").encode()
+    assert not list((tmp_path / "escrow").glob(".chronos-escrow-*"))  # the scratch is gone
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
+@pytest.mark.parametrize(
+    "shape", ["empty", "newline-only", "63-hex", "65-hex", "uppercase", "not-hex", "two-lines"]
+)
+def test_7d_the_escrow_tool_fails_closed_on_anything_but_one_64_lowercase_hex_line(
+    tmp_path: Path, shape: str
+) -> None:
+    """P1-3: an unset variable expands to nothing — here nothing is written and the exit is 2."""
+
+    good = _hex("n3-2 r1 TEST key for the refusals")
+    text = {
+        "empty": "",
+        "newline-only": "\n",
+        "63-hex": good[:63] + "\n",
+        "65-hex": good + "0\n",
+        "uppercase": good.upper() + "\n",
+        "not-hex": "g" + good[1:] + "\n",
+        "two-lines": good + "\n" + good + "\n",
+    }[shape]
+    completed, out = _escrow(tmp_path, text)
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["verdict"] == "REFUSED" and report["code"] == "KEY_MALFORMED"
+    assert not out.exists() and _entries(out.parent) == []
+    assert good not in completed.stdout + completed.stderr
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-3: no escrow tool exists")
+def test_7e_the_escrow_tool_never_reads_the_key_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The root cause of P1-3 was an environment expansion; the tool has no such path: its
+    source never names the variable or the environment, and a recorder proves no lookup."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    tree = ast.parse(ESCROW_MODULE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name | ast.Attribute):
+            identifier = node.id if isinstance(node, ast.Name) else node.attr
+            assert "PERSISTENCE" not in identifier.upper(), ast.unparse(node)
+        if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv", "putenv"):
+            raise AssertionError(f"the tool touches the environment: {ast.unparse(node)}")
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", "sentinel-never-read")
+    recorder = _RecordingEnviron(os.environ)
+    monkeypatch.setattr(os, "environ", recorder)
+    out = tmp_path / "chronos-persistence-key.age"
+    monkeypatch.setattr(
+        sys, "stdin", __import__("io").StringIO(_hex("n3-2 r1 TEST key, in-process") + "\n")
+    )
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    assert code == 0, capsys.readouterr()
+    assert "CHRONOS_PERSISTENCE_KEY" not in recorder.looked_up
+    assert drill.IDENTITY_ENV in recorder.looked_up
+    assert "sentinel-never-read" not in capsys.readouterr().out
+
+
+@pytest.mark.xfail(
+    strict=True, reason="r1 P2-2: the runbook promises the command as a lost-key path"
+)
+def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_command() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    rollback = text[text.index("## Rollback") :]
+    assert "runs again from step 1" not in rollback
+    assert "SCHEMA_ALREADY_CURRENT" in rollback  # the command refuses the keyed store, said plainly
+    assert "the escrow copy is the only supported recovery" in rollback
+    assert "separately reviewed" in rollback
+    # P1-3: step 6 drives the tool, never a shell expansion of the variable
+    step6 = text[text.index("6. **Escrow") : text.index("7. **Start")]
+    assert "python -m chronos.operations.persistence_key_escrow" in step6
+    assert '"$CHRONOS_PERSISTENCE_KEY"' not in step6 and "printf" not in step6
+    assert "decrypt" in step6 and "compare" in step6
+
+
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
     assert "`N3-CUTOVER.md`" in OPS_README.read_text(encoding="utf-8")
 
@@ -876,7 +1073,17 @@ def _drill_store(tmp_path: Path) -> Store:
     return _store(tmp_path, binding="closed")
 
 
-def test_8a_run_drill_with_the_archived_head_verifies_a_store_one_version_behind(
+def _binding(store: Store, *, version: int | None = None) -> Any:
+    version = SCHEMA_VERSION - 1 if version is None else version
+    return drill.ArchiveBinding(
+        schema_head=f"schema_version:{version}",
+        schema_version=version,
+        source_identity=_identity(store.db),
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-2: bare-string seam, verdict VERIFIED")
+def test_8a_run_drill_with_an_archive_binding_verifies_a_retired_store_as_an_archive(
     tmp_path: Path,
 ) -> None:
     store = _drill_store(tmp_path)
@@ -887,13 +1094,14 @@ def test_8a_run_drill_with_the_archived_head_verifies_a_store_one_version_behind
         tmp_path / "out",
         tmp_path / "restored",
         clock=_clock(store.now),
-        archived_schema_head=head,
+        archive=_binding(store),
     )
-    assert report.verdict == "VERIFIED", report.failures
+    assert report.verdict == "ARCHIVE_VERIFIED", report.failures  # never repository VERIFIED
     assert report.restore is not None
-    assert report.restore.acceptance == f"archived:{head}"
+    assert report.restore.acceptance == f"archive:{head}"
     restored = report.restore
     assert restored.schema_head_ok and restored.sha256_ok and restored.row_counts_ok
+    assert tuple(report.manifest.source_identity) == _identity(store.db)
 
 
 def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
@@ -909,21 +1117,69 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-def test_8c_an_archived_head_that_is_not_the_store_s_head_is_not_verified(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.xfail(strict=True, reason="r1 P1-2: the seam is a bare string")
+def test_8c_an_archive_head_that_is_not_the_store_s_head_is_not_verified(tmp_path: Path) -> None:
     store = _drill_store(tmp_path)
     report = run_drill(
         store.db,
         tmp_path / "out",
         tmp_path / "restored",
         clock=_clock(store.now),
-        archived_schema_head=f"schema_version:{SCHEMA_VERSION - 2}",
+        archive=_binding(store, version=SCHEMA_VERSION - 2),
     )
     assert report.verdict == "FAILED"
     assert any(f.startswith("schema_head:") for f in report.failures), report.failures
     # default reports say the repository accepted the copy; this one says what was named instead
-    assert report.restore is not None and report.restore.acceptance.startswith("archived:")
+    assert report.restore is not None and report.restore.acceptance.startswith("archive:")
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-2: Daybreak's counterexample mints VERIFIED today")
+def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
+    tmp_path: Path,
+) -> None:
+    """P1-2: a non-archive store (AT the running SCHEMA_VERSION) named as an archive by a library
+    caller must verify as nothing — not ARCHIVE_VERIFIED, not VERIFIED."""
+
+    store = _store(tmp_path, version_offset=0)
+    binding = _binding(store, version=SCHEMA_VERSION)  # the head the store really has
+    report = run_drill(
+        store.db, tmp_path / "out", tmp_path / "restored", clock=_clock(store.now), archive=binding
+    )
+    assert report.verdict == "FAILED", report.verdict
+    assert any("not a retired schema" in f for f in report.failures), report.failures
+    assert report.restore is not None and not report.restore.verified
+    # and a caller cannot lie the version down: the head on the copy must match the binding
+    lying = drill.ArchiveBinding(
+        schema_head=f"schema_version:{SCHEMA_VERSION - 1}",
+        schema_version=SCHEMA_VERSION - 1,
+        source_identity=_identity(store.db),
+    )
+    report = run_drill(
+        store.db, tmp_path / "out2", tmp_path / "restored2", clock=_clock(store.now), archive=lying
+    )
+    assert report.verdict == "FAILED"
+    assert any(f.startswith("schema_head:") for f in report.failures), report.failures
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-2: the manifest carries no source identity")
+def test_8f_an_archive_binding_for_another_object_is_not_verified(tmp_path: Path) -> None:
+    store = _drill_store(tmp_path)
+    other = _identity(store.db.parent)  # a real inode that is not the store
+    binding = replace(_binding(store), source_identity=other)
+    report = run_drill(
+        store.db, tmp_path / "out", tmp_path / "restored", clock=_clock(store.now), archive=binding
+    )
+    assert report.verdict == "FAILED"
+    assert any("source identity" in f for f in report.failures), report.failures
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-2: the bare-string keyword still exists")
+def test_8g_the_bare_string_seam_is_gone() -> None:
+    import inspect
+
+    for function in (drill.run_drill, drill.restore, drill.verify_restored):
+        assert "archived_schema_head" not in inspect.signature(function).parameters, function
+    assert "archived_schema_head" not in MODULE.read_text(encoding="utf-8")
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -932,3 +1188,157 @@ def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path)
     assert report.verdict == "VERIFIED", report.failures
     assert report.restore is not None and report.restore.acceptance == "repository"
     assert report.restore.to_dict()["acceptance"] == "repository"
+
+
+# ------------------------------------------------------------- (9) r1: one bound source capability
+
+
+def _swap_at_next_connect(monkeypatch: pytest.MonkeyPatch, victim: Path, impostor: Path) -> None:
+    """Daybreak's substitution, placed at the seam that matters: the FIRST pathname open after
+    the command has recorded the victim's inode. ``victim`` is renamed away and ``impostor`` is
+    put at its name, then the real connect runs; the hook removes itself."""
+
+    real = sqlite3.connect
+
+    def swapping(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        monkeypatch.setattr(sqlite3, "connect", real)
+        os.rename(victim, victim.with_name("victim-away"))
+        os.rename(impostor, victim)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", swapping)
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-1: the gate re-resolves the pathname after the inode")
+def test_9a_daybreak_s_a_b_substitution_is_refused_before_any_fact_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Store A cannot pass the gate (no reconciliation run); store B can. B is put at A's name
+    between the no-follow open and the read-only connect: the connection is proven NOT to be the
+    held inode and the command refuses SOURCE_SWAPPED with nothing read and nothing created."""
+
+    a = _store(tmp_path / "a", run=None)
+    b = _store(tmp_path / "b", binding="closed")
+    _swap_at_next_connect(monkeypatch, a.db, b.db)
+    code, report = _run(a, tmp_path / "a", "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "SOURCE_SWAPPED", report
+    assert report["gate"] is None  # no fact of B's was ever reported as A's
+    assert not (tmp_path / "a" / "backups").exists()
+    assert a.db.exists() and a.db.with_name("victim-away").exists()  # both stores untouched
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-1: the drill backs up whatever the name resolves to")
+def test_9b_a_main_file_swap_after_the_gate_cannot_reach_the_envelope_or_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The independent main-file swap: B is put at A's name AFTER the gate admitted A. The
+    envelope is still of A (the backup runs through the bound connection, its manifest names A's
+    identity) and the move refuses because the name no longer is A; nothing is renamed."""
+
+    a = _store(tmp_path / "a", binding="closed")
+    b = _store(tmp_path / "b", binding="closed")
+    a_identity, a_sha = _identity(a.db), _sha256(a.db)
+    real_backup = drill.backup
+
+    def swapping_backup(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(drill, "backup", real_backup)
+        os.rename(a.db, a.db.with_name("victim-away"))
+        os.rename(b.db, a.db)
+        return real_backup(*args, **kwargs)
+
+    monkeypatch.setattr(drill, "backup", swapping_backup)
+    code, report = _run(a, tmp_path / "a", "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "SOURCE_SWAPPED"
+    assert report["moved_aside"] == [] and report["not_moved"] == []
+    envelope = Path(report["envelope"])
+    manifest = BackupManifest.from_dict(
+        json.loads((envelope / drill.MANIFEST_NAME).read_text(encoding="utf-8"))
+    )
+    assert tuple(manifest.source_identity) == a_identity  # the envelope is of A, not of B
+    assert manifest.sha256 != _sha256(a.db)  # B sits at the name; its bytes are not the archive's
+    assert _sha256(a.db.with_name("victim-away")) == a_sha
+    assert not any(name.startswith("chronos.db.archived-") for name in _entries(a.db.parent))
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-1: sidecars are re-enumerated by name at the move")
+def test_9c_a_sidecar_swapped_or_planted_after_admission_stops_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two independent sidecar attacks, each with nothing renamed: (i) the admitted ``-wal`` is
+    replaced by another inode of the same name; (ii) a ``-wal`` with FRAMES is planted after
+    admission — it is never selected for rename, and with frames it refuses the move."""
+
+    real_move = cutover._move_aside
+
+    def swap_wal(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(cutover, "_move_aside", real_move)
+        wal = store.db.with_name("chronos.db-wal")
+        planted = store.db.with_name("planted")
+        planted.write_bytes(b"")
+        os.rename(planted, wal)  # same name, another inode
+        return real_move(*args, **kwargs)
+
+    store = _store(tmp_path / "swap", binding="closed")
+    before = _sha256(store.db)
+    monkeypatch.setattr(cutover, "_move_aside", swap_wal)
+    code, report = _run(store, tmp_path / "swap", "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "SOURCE_SWAPPED", report
+    assert report["moved_aside"] == [] and _sha256(store.db) == before
+    assert not any(".archived-" in name for name in _entries(store.db.parent))
+
+    def plant_frames(*args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(cutover, "_move_aside", real_move)
+        wal = planted_store.db.with_name("chronos.db-wal")
+        wal.unlink()  # the admitted empty one goes away; a foreign one with frames appears
+        wal.write_bytes(b"x" * 64)
+        return real_move(*args, **kwargs)
+
+    planted_store = _store(tmp_path / "plant", binding="closed")
+    before = _sha256(planted_store.db)
+    monkeypatch.setattr(cutover, "_move_aside", plant_frames)
+    code, report = _run(planted_store, tmp_path / "plant", "--apply", capsys=capsys)
+    assert code == 2 and report["code"] in ("SOURCE_SWAPPED", "WAL_FRAMES_PRESENT"), report
+    assert report["moved_aside"] == [] and _sha256(planted_store.db) == before
+    assert planted_store.db.with_name("chronos.db-wal").read_bytes() == b"x" * 64  # never touched
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-1: the manifest carries no binding to compare")
+def test_9d_the_move_compares_the_manifest_s_source_identity_with_the_held_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    real_run_drill = cutover.run_drill
+
+    def lying_run_drill(*args: Any, **kwargs: Any) -> Any:
+        report = real_run_drill(*args, **kwargs)
+        other = _identity(store.db.parent)
+        return replace(report, manifest=replace(report.manifest, source_identity=other))
+
+    monkeypatch.setattr(cutover, "run_drill", lying_run_drill)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "SOURCE_SWAPPED", report
+    assert "manifest" in report["failures"][0]
+    assert report["moved_aside"] == [] and _sha256(store.db) == before and store.db.exists()
+
+
+@pytest.mark.xfail(strict=True, reason="r1 P1-1: the drill's backup opens, closes, re-resolves")
+def test_9e_the_drill_s_own_backup_is_bound_to_its_no_follow_open_and_records_the_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = _store(tmp_path / "a", binding="closed")
+    b = _store(tmp_path / "b", binding="closed")
+    _swap_at_next_connect(monkeypatch, a.db, b.db)
+    with pytest.raises(drill.DrillRefused, match="swapped"):
+        drill.backup(a.db, tmp_path / "out", clock=_clock(a.now))
+    assert not (tmp_path / "out").exists() or _entries(tmp_path / "out") == []
+    # the honest path: every manifest now carries the identity of the object it backed up
+    os.rename(a.db, b.db)
+    os.rename(a.db.with_name("victim-away"), a.db)
+    manifest = drill.backup(a.db, tmp_path / "out", clock=_clock(a.now))
+    assert tuple(manifest.source_identity) == _identity(a.db)
+    assert BackupManifest.from_dict(manifest.to_dict()).source_identity == manifest.source_identity
+    legacy = BackupManifest.from_dict({**manifest.to_dict(), "source_identity": None})
+    assert legacy.source_identity is None
