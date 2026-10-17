@@ -51,6 +51,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 from collections.abc import Iterator, MutableMapping
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -103,6 +104,72 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
+_R5_P1_1 = (
+    "r5 P1-1: at d3ac84c only the final parent is checked — a writable ancestor archives, and a "
+    "data/ renamed away after its check still reports ARCHIVED at the displaced lexical path"
+)
+_R5_P1_2 = (
+    "r5 P1-2: at d3ac84c run_archive_drill defines nested verifier callables that a "
+    "caller-supplied Clock can retain by walking the frames and apply to a store mutated after "
+    "the gate"
+)
+RED_R5_P1_1 = pytest.mark.xfail(strict=True, reason=_R5_P1_1)
+RED_R5_P1_2 = pytest.mark.xfail(strict=True, reason=_R5_P1_2)
+
+
+def _chain_problem(path: Path) -> str | None:
+    """A test-side statement of the protected-path precondition (r5), independent of the module
+    under test: every directory from ``path`` up to ``/`` is a real directory (no symlink) owned
+    by root or this uid with no group or other write bit — a /tmp-style sticky world-writable
+    directory included, by the rule's own choice."""
+
+    euid = os.geteuid()
+    for ancestor in (path, *path.parents):
+        st = os.lstat(ancestor)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return f"{ancestor} is not a plain directory"
+        if st.st_uid not in (0, euid):
+            return f"{ancestor} is owned by uid {st.st_uid}"
+        if st.st_mode & 0o022:
+            return f"{ancestor} has mode {stat.S_IMODE(st.st_mode):04o}"
+    return None
+
+
+def _private_root() -> Path:
+    """Where this module keeps its stores: the first candidate whose whole ancestor chain is
+    protected. pytest's own basetemp lives under ``/tmp`` — sticky and world-writable by design
+    — which the cutover refuses (``PATH_NOT_PROTECTED``, r5), so the stores go under
+    ``$XDG_RUNTIME_DIR``, ``~/.cache`` or ``~`` instead, in a 0700 directory of their own."""
+
+    candidates = [os.environ.get("XDG_RUNTIME_DIR"), Path.home() / ".cache", Path.home()]
+    problems: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        base = Path(candidate)
+        if not base.is_dir():
+            continue
+        problem = _chain_problem(base)
+        if problem is None:
+            root = base / "chronos-n3-2-tests"
+            root.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(root, 0o700)
+            return root
+        problems.append(problem)
+    pytest.fail(f"no protected directory chain for the test stores: {problems}")
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Overrides pytest's ``tmp_path`` for this module: a 0700 directory under
+    :func:`_private_root`, removed after the test (see there for why not ``/tmp``)."""
+
+    path = Path(tempfile.mkdtemp(prefix="n3-2-", dir=_private_root()))
+    os.chmod(path, 0o700)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _hex(seed: str) -> str:
@@ -290,8 +357,10 @@ def _store(
     alone)."""
 
     data = tmp_path / "data"
+    made = [d for d in (data, *data.parents) if not d.exists()]
     data.mkdir(parents=True, exist_ok=True)
-    os.chmod(data, 0o700)  # the documented deployment's owner-private data/ (r4), umask-proof
+    for directory in (data, *made):  # the owner-private data/ (r4) and, umask-proof, every
+        os.chmod(directory, 0o700)  # directory this helper made under the fixture root (r5)
     db = data / "chronos.db"
     database = Database(f"sqlite:///{db}")
     try:
@@ -1286,6 +1355,30 @@ def _module_functions(module: Any) -> list[tuple[str, Any]]:
     )
 
 
+def _verification_offences(result: Any) -> list[str]:
+    """What, in a call's result, would amount to verifying a store as an archive: a
+    ``RestoreReport`` that is verified or carries an ``archive:`` acceptance, a ``DrillReport``
+    with ``ARCHIVE_VERIFIED``, or any ``acceptance`` value starting with ``archive:`` in a dict,
+    tuple or list — recursively."""
+
+    found: list[str] = []
+    if isinstance(result, drill.RestoreReport):
+        if result.verified or result.acceptance.startswith("archive:"):
+            found.append(f"RestoreReport verified={result.verified} {result.acceptance}")
+    elif isinstance(result, drill.DrillReport):
+        if result.verdict == drill.ARCHIVE_VERIFIED:
+            found.append("DrillReport ARCHIVE_VERIFIED")
+        found += _verification_offences(result.restore)
+    elif isinstance(result, dict):
+        acceptance = result.get("acceptance")
+        if isinstance(acceptance, str) and acceptance.startswith("archive:"):
+            found.append(f"acceptance {acceptance}")
+    elif isinstance(result, tuple | list):
+        for item in result:
+            found += _verification_offences(item)
+    return found
+
+
 def _gate_claim(source: Any, version: int) -> Any:
     """A GateReport a substituted gate could return (test-only: the real gate never lies)."""
 
@@ -1655,24 +1748,6 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
                 "flags": os.O_RDONLY,
             }
 
-        def verifies(result: Any) -> list[str]:
-            found: list[str] = []
-            if isinstance(result, drill.RestoreReport):
-                if result.verified or result.acceptance.startswith("archive:"):
-                    found.append(f"RestoreReport verified={result.verified} {result.acceptance}")
-            elif isinstance(result, drill.DrillReport):
-                if result.verdict == drill.ARCHIVE_VERIFIED:
-                    found.append("DrillReport ARCHIVE_VERIFIED")
-                found += verifies(result.restore)
-            elif isinstance(result, dict):
-                acceptance = result.get("acceptance")
-                if isinstance(acceptance, str) and acceptance.startswith("archive:"):
-                    found.append(f"acceptance {acceptance}")
-            elif isinstance(result, (tuple, list)):
-                for item in result:
-                    found += verifies(item)
-            return found
-
         attempted: list[str] = []
         unattempted: list[str] = []
         offences: list[str] = []
@@ -1702,7 +1777,7 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
                 if isinstance(error, KeyboardInterrupt):
                     raise
                 continue
-            for offence in verifies(result):
+            for offence in _verification_offences(result):
                 offences.append(f"{name}: {offence}")
         assert offences == [], offences
         for must in ("restore", "verify_restored", "run_drill", "run_archive_drill", "_verify_in"):
@@ -1714,6 +1789,127 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
             with contextlib.suppress(OSError):
                 os.close(fd)
         source.close()
+
+
+@RED_R5_P1_2
+def test_8j_a_hostile_clock_walking_the_frames_retains_no_verifier_for_a_mutated_store(
+    tmp_path: Path,
+) -> None:
+    """Daybreak r4 P1-2, the exact attack: the caller supplies the ``Clock``; every callback walks
+    ``f_back`` to ``run_archive_drill``'s frame and retains everything in its locals. One valid
+    archive drill runs. Then the store is mutated after the gate (``reconciliation_runs`` emptied)
+    so that the real gate refuses it, its envelope is made through the public ``backup`` and
+    staged with the module's repository-only staging — and every retained callable is applied to
+    it in the shapes a verifier could take. r5: nothing callable is defined inside the drill's
+    frame (no nested verifier exists to retain), so no retained object archive-verifies the
+    mutated store; what the frame holds are plain values. (Same-process code is trusted — it
+    could replace ``flatten_gate`` itself; the guarantee is only that no verifier object outlives
+    or escapes the drill.)"""
+
+    store = _drill_store(tmp_path)
+    retained: dict[str, Any] = {}
+
+    def harvest() -> None:
+        frame = sys._getframe(1)
+        while frame is not None:
+            if frame.f_code.co_name == "run_archive_drill":
+                for name, value in frame.f_locals.items():
+                    retained.setdefault(name, value)
+            frame = frame.f_back
+
+    ticks = itertools.count(0.0, 0.25)
+
+    def wall() -> datetime:
+        harvest()
+        return store.now
+
+    def monotonic() -> float:
+        harvest()
+        return next(ticks)
+
+    source = drill.open_bound_source(store.db)
+    try:
+        _gate, report = drill.run_archive_drill(
+            source,
+            tmp_path / "out",
+            tmp_path / "restored",
+            now=store.now,
+            clock=Clock(wall=wall, monotonic=monotonic),
+        )
+    finally:
+        source.close()
+    assert report.verdict == "ARCHIVE_VERIFIED" and retained, (report.verdict, retained.keys())
+    retained_callables = {name: value for name, value in retained.items() if callable(value)}
+    nested = [
+        name
+        for name, value in retained_callables.items()
+        if getattr(value, "__qualname__", "").startswith("run_archive_drill.<locals>")
+    ]
+    assert nested == [], nested  # structurally: nothing defined inside the frame was retained
+    # the store is mutated after the gate: the real gate refuses it now
+    with closing(sqlite3.connect(store.db)) as connection, connection:
+        connection.execute("DELETE FROM reconciliation_runs")
+    _checkpoint_and_drop_sidecars(store.db)
+    mutated = drill.open_bound_source(store.db)
+    try:
+        with pytest.raises(cutover.CutoverRefused) as refused:
+            cutover.flatten_gate(mutated, now=store.now)
+        assert refused.value.code == "NO_RECONCILIATION_RUN"
+        manifest = drill.backup(
+            store.db, tmp_path / "out-b", clock=_clock(store.now), source=mutated
+        )
+        later = drill.restore(manifest, tmp_path / "restored-b")
+        assert not later.verified and later.acceptance == "repository"
+        offences: list[str] = []
+        keys = drill.load_age_keys()
+        with drill._staged_restore(manifest, tmp_path / "restored-c", keys) as staged:
+            shapes: list[tuple[tuple[Any, ...], dict[str, Any]]] = [
+                ((manifest, staged.target_fd, staged.target_abs, staged.has_audit), {}),
+                ((manifest, drill.schema_head(store.db)), {}),
+                ((manifest,), {}),
+                ((mutated,), {"now": store.now}),
+                ((), {}),
+            ]
+            for name, value in retained_callables.items():
+                for args, kwargs in shapes:
+                    try:
+                        result = value(*args, **kwargs)
+                    except BaseException as error:  # a refusal or an error is not a verification
+                        if isinstance(error, KeyboardInterrupt):
+                            raise
+                        continue
+                    offences += [f"{name}: {o}" for o in _verification_offences(result)]
+        assert offences == [], offences
+    finally:
+        mutated.close()
+
+
+@RED_R5_P1_2
+def test_8k_run_archive_drill_defines_no_nested_callable() -> None:
+    """The structural half of 8j: the gate-bound archive checks and the report construction are
+    inlined in ``run_archive_drill``'s body — no function, lambda or class is defined inside it
+    (by AST, and by the compiled code object's constants), so there is no verifier object to
+    retain through any callback."""
+
+    module = ROOT / "src" / "chronos" / "operations" / "restore_drill.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_archive_drill"
+    ]
+    assert len(functions) == 1
+    nested = [
+        type(node).__name__
+        for node in ast.walk(functions[0])
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef)
+        and node is not functions[0]
+    ]
+    assert nested == [], nested
+    code_constants = [
+        c for c in drill.run_archive_drill.__code__.co_consts if isinstance(c, types.CodeType)
+    ]
+    assert code_constants == [], [c.co_name for c in code_constants]
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -2676,7 +2872,7 @@ def test_11c_a_second_uid_in_the_owner_s_group_cannot_remove_or_replace_a_sentin
             "use their capabilities under this host's LSM policy; sudo is fenced) — the parent "
             "rule is pinned by 11a/11b; see evidence/second-uid-probe-r4.txt"
         )
-    scratch = Path(tempfile.mkdtemp(prefix="n3-2-r4-second-uid-", dir="/tmp"))
+    scratch = Path(tempfile.mkdtemp(prefix="n3-2-r4-second-uid-", dir=_private_root()))
     try:
         os.chmod(scratch, 0o711)  # traversable by the second uid; nothing inside is writable to it
         store = _store(scratch, binding="closed")
@@ -2719,3 +2915,155 @@ def test_11d_the_deployment_and_the_runbook_make_the_database_parent_owner_priva
     assert "`PARENT_NOT_PRIVATE`" in table
     module = MODULE.read_text(encoding="utf-8")
     assert "owner-private" in module and "PARENT_NOT_PRIVATE" in module
+
+
+# ------------------------------------------- (12, r5) the protected path: the ancestor chain
+
+
+ANCESTOR_SHAPES = ("group-writable", "other-writable", "sticky-world-writable", "symlink")
+
+
+@RED_R5_P1_1
+@pytest.mark.parametrize("shape", ANCESTOR_SHAPES)
+def test_12a_a_writable_sticky_or_linked_ancestor_is_refused_before_anything_is_published(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str
+) -> None:
+    """Daybreak r4 P1-1: the final parent's privacy means nothing if a uid can write an ANCESTOR
+    — it renames the checked ``data/`` away and plants a replacement. r5 narrows the guarantee to
+    an explicitly protected trust root: every directory from ``/`` down to ``data/`` must be a
+    real directory owned by root or the effective uid with no group or other write bit; a
+    /tmp-style sticky world-writable directory is refused too (the sticky bit limits renaming to
+    an entry's owner, but a path through such a directory is outside the supported deployment —
+    the refusal says so); a symlink component is refused. Checked before the source is opened:
+    ``PATH_NOT_PROTECTED``, dry-run and apply alike, nothing created. Fixed, it archives, and
+    ``exclusion.protected_path`` lists the whole chain it held through the report."""
+
+    store = _store(tmp_path / "live", binding="closed")
+    ancestor = tmp_path / "live"  # the directory that contains data/
+    db_path = store.db
+    if shape == "group-writable":
+        os.chmod(ancestor, 0o775)
+    elif shape == "other-writable":
+        os.chmod(tmp_path, 0o707)  # two levels up
+    elif shape == "sticky-world-writable":
+        os.chmod(ancestor, 0o1777)
+    else:
+        os.symlink(ancestor, tmp_path / "link")
+        db_path = tmp_path / "link" / "data" / "chronos.db"
+    before, entries = _sha256(store.db), _entries(store.db.parent)
+    for args in ((), ("--apply",)):
+        argv = [
+            "--db",
+            str(db_path),
+            "--out",
+            str(tmp_path / "backups"),
+            "--restore-into",
+            str(tmp_path / "restored"),
+            *args,
+        ]
+        code = cutover.main(argv, clock=_clock(store.now))
+        report = json.loads(capsys.readouterr().out)
+        assert code == 2 and report["code"] == "PATH_NOT_PROTECTED", report
+        assert report["gate"] is None and report["envelope"] is None
+        message = report["failures"][0]
+        if shape == "sticky-world-writable":
+            assert "sticky" in message and "1777" in message
+        elif shape == "symlink":
+            assert "symlink" in message or "not a directory" in message
+        else:
+            assert "writable" in message
+    assert not (tmp_path / "backups").exists()
+    assert _sha256(store.db) == before and _entries(store.db.parent) == entries
+    os.chmod(ancestor, 0o700)
+    os.chmod(tmp_path, 0o700)
+    code, report = _run(store, tmp_path / "live", "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    protected = report["exclusion"]["protected_path"]
+    chain = protected["chain"]
+    assert chain[0]["path"] == "/" and chain[-1]["path"] == str(store.db.parent)
+    for entry in chain:
+        assert entry["owner_uid"] in (0, os.geteuid()) and not int(entry["mode"], 8) & 0o022
+    assert protected["held_through_report"] is True and protected["linked_at_report"] is True
+
+
+@RED_R5_P1_1
+@pytest.mark.parametrize("when", ["after-the-move-check", "after-the-exchanges"])
+def test_12b_daybreak_s_counterexample_the_checked_directory_displaced_after_its_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], when: str
+) -> None:
+    """Daybreak r4 P1-1, the exact injection: right after the move's parent check (or, the
+    second shape, after the exchanges), the checked ``data/`` is renamed to ``data-displaced``
+    and a replacement 0700 ``data/`` with a foreign ``chronos.db`` is planted (here by the owner —
+    the actor the precondition excludes is another uid with a writable ancestor, which 12a
+    refuses up front). r5 holds every ancestor open and re-proves, on the move path and at
+    report time, that each path component still names the held directory: ``PATH_DISPLACED``
+    — nothing moved in the first shape; ``MOVE_INCOMPLETE`` with ``moved_aside`` exact in the
+    second, the sentinels standing in the displaced directory, the foreign store untouched, and
+    never ``ARCHIVED`` at a lexical path that no longer names the checked directory."""
+
+    store = _store(tmp_path / "live", binding="closed")
+    data = store.db.parent
+    displaced = data.with_name("data-displaced")
+    source_identity, before = _identity(store.db), _sha256(store.db)
+    foreign = b"not the store the gate saw"
+
+    def displace() -> None:
+        os.rename(data, displaced)
+        data.mkdir(0o700)
+        os.chmod(data, 0o700)
+        (data / "chronos.db").write_bytes(foreign)
+
+    if when == "after-the-move-check":
+        real = cutover._private_parent_facts
+        calls: list[int] = []
+
+        def hooked(*args: Any, **kwargs: Any) -> Any:
+            facts = real(*args, **kwargs)
+            calls.append(1)
+            if len(calls) == 2:  # the move's own check, on the walked descriptor
+                displace()
+            return facts
+
+        monkeypatch.setattr(cutover, "_private_parent_facts", hooked)
+    else:
+        _hook_post_move_quiet_check(monkeypatch, displace)
+    code, report = _run(store, tmp_path / "live", "--apply", capsys=capsys)
+    assert code == 2 and report["verdict"] != "ARCHIVED", report
+    assert report["code"] == "PATH_DISPLACED", report["failures"]
+    assert (data / "chronos.db").read_bytes() == foreign  # the planted replacement, untouched
+    held = _identity(displaced)
+    assert f"{held[0]}:{held[1]}" in report["failures"][0]  # the held directory, named by inode
+    if when == "after-the-move-check":
+        assert report["verdict"] == "REFUSED" and report["moved_aside"] == []
+        assert _identity(displaced / "chronos.db") == source_identity
+        assert _sha256(displaced / "chronos.db") == before
+        assert report["sentinels"] == []
+    else:
+        assert report["verdict"] == "MOVE_INCOMPLETE"
+        archived = displaced / f"chronos.db.archived-{store.stamp}"
+        assert _identity(archived) == source_identity and _sha256(archived) == before
+        assert [m["from"] for m in report["moved_aside"]] == [
+            str(store.db),
+            *(str(store.db.with_name(n)) for n in SIDECARS),
+        ]
+        assert all(_is_sentinel(displaced / name) for name in LIVE_NAMES)
+
+
+@RED_R5_P1_1
+def test_12c_the_docs_and_the_module_state_the_protected_path_and_the_trust_root() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    before = text[text.index("## Before you start") : text.index("## Steps")]
+    assert "ls -ld" in before and "PATH_NOT_PROTECTED" in before and "ancestor" in before
+    assert "sticky" in before and "/tmp" in before
+    table = text[text.index("## What the gate's refusal codes mean") :]
+    assert "`PATH_NOT_PROTECTED`" in table and "`PATH_DISPLACED`" in table
+    deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert "ls -ld" in deployment and "ancestor" in deployment
+    module = MODULE.read_text(encoding="utf-8")
+    assert "PATH_NOT_PROTECTED" in module and "PATH_DISPLACED" in module
+    for statement in ("same Python process", "owner's uid", "ancestor"):
+        assert statement in module, statement
+    drill_source = (ROOT / "src" / "chronos" / "operations" / "restore_drill.py").read_text(
+        encoding="utf-8"
+    )
+    assert "same Python process" in drill_source and "outlives" in drill_source
