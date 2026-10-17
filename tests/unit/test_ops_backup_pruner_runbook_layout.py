@@ -259,3 +259,16 @@ def test_prune_flags_empty_is_a_dry_run_and_exactly_apply_applies(
     assert invoked == [str(envelope.parent)] and envelope.is_dir()
     _, invoked = _run_routine(host, tmp_path, flags="--apply")
     assert invoked == [str(envelope.parent)] and not envelope.exists()
+
+
+def test_the_pruner_invocation_takes_its_flags_only_from_the_quoted_validated_array() -> None:
+    """A structural pin. With the validation present, ``${PRUNE_FLAGS:-}`` or an unquoted array
+    behaves the same on every value the validation lets through, so no behavioural test can tell
+    them apart; but either one is one edit from reopening the argv injection, so the line is pinned.
+    """
+    routine = _legacy_routine()
+    invocation = [line for line in routine.splitlines() if PRUNER_CMD in line]
+    assert len(invocation) == 1, invocation
+    assert invocation[0].rstrip().endswith('--root "$d" --pretty "${prune_flags[@]}"')
+    assert "PRUNE_FLAGS" not in invocation[0]
+    assert routine.index("prune_flags=") < routine.index("for d in")
