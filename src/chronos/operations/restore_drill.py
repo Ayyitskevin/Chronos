@@ -28,7 +28,14 @@ What the drill does and does not do:
   read-only (``mode=ro``) connection under SQLite's normal locking and WAL
   semantics — never ``immutable=1``, never inferred from a sidecar precheck, so a
   WAL that appears after any check is still honoured — never a file copy of a
-  live database. The source is never opened for writing.
+  live database. The source is never opened for writing. The connection is ONE
+  :class:`BoundSource` (N3-2 r1): the source is opened no-follow and held, and the
+  connection is proven — by the descriptors this process gained when it connected —
+  to have opened that very inode (SQLite resolves even ``/proc/self/fd/<n>`` back to
+  a pathname before opening, measured on 3.53); a swap at the name between the two
+  opens is a typed refusal before any byte is read. The manifest records that inode
+  as ``source_identity`` so a later step can compare what was archived with what it
+  holds. A caller may pass its own capability so gate, backup and rename share it.
 - The backup is ONE ENVELOPE: a dot-prefixed temp DIRECTORY under ``--out``
   holding the database (written into the O_EXCL temp descriptor via
   ``/proc/self/fd/<n>``, stored in rollback-journal mode), the audit log and
@@ -52,7 +59,27 @@ What the drill does and does not do:
   ``Database.initialize()`` carries no alembic table). The head check on the
   restored copy compares that value AND runs the repository's own acceptance
   (``Database.initialize()`` on an already-versioned store verifies the version
-  and zero drift and applies no upgrade).
+  and zero drift and applies no upgrade). One DISTINCT verdict beside it, never a
+  substitute: the N3-2 cutover archive (``chronos.operations.cutover_archive``) backs
+  up a store of a RETIRED schema that the running repository refuses by design. Its
+  ``--apply`` hands the open :class:`BoundSource` to :func:`run_archive_drill`, which runs
+  the cutover's flatten gate ITSELF over that capability (r3, Daybreak P1-2) and keeps that
+  run's acceptance — the head it read, that head's numeric version, which must be BELOW the
+  running ``SCHEMA_VERSION``, and the gated inode — as a closure inside its own frame (r4):
+  the capability carries no admission, no function at module scope takes or carries one
+  (``restore``/``verify_restored`` take no capability either; ``run_drill(source=)`` binds
+  the backup's identity and yields ``VERIFIED``/``FAILED`` alone; every module-level function
+  performs the repository's acceptance only). The drill verifies by that closure: the
+  envelope's manifest must record the gated inode (the backup was of the gated object) and
+  ``restored head == manifest head == the head the gate read``;
+  sha256, row counts and the audit chain verify as always; no repository acceptance runs
+  and no T-3 name check either (the copy's bytes are the held descriptor's; head and
+  counts come through ``_readonly_fd``'s resolved-pathname open). All good: the verdict
+  is ``ARCHIVE_VERIFIED`` with ``acceptance: archive:<head>`` — ``VERIFIED`` is only ever
+  the repository's acceptance. A store the gate refuses never reaches a backup there, and
+  every public drill path over it ends in the repository's own refusal. A later
+  ``restore`` of the envelope under the running code reports every verifier and exactly
+  that refusal; the CLI never admits anything.
 - The database is encrypted at rest with ``age`` (route A: the age CLI — Muse
   ruling 2026-09-16, delegated by Kevin) to exactly TWO recipients — the host's
   operational public key and Kevin's recovery public key — inside the temp
@@ -87,6 +114,7 @@ import argparse
 import contextlib
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -99,11 +127,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Select, column, func, select, table
 from sqlalchemy.dialects import sqlite as sqlite_dialect
@@ -114,7 +142,10 @@ from chronos.auditlog.log import (
     read_audit_pair,
     verify_pair_text,
 )
-from chronos.persistence.database import Database
+from chronos.persistence.database import SCHEMA_VERSION, Database
+
+if TYPE_CHECKING:  # the module cycle is type-only here; run_archive_drill imports at call time
+    from chronos.operations.cutover_archive import GateReport
 
 #: Encryption at rest (R-2): the age CLI, X25519 recipients. ``"none"`` is what a manifest
 #: from before R-2 says; the drill no longer produces or restores such an envelope.
@@ -152,7 +183,10 @@ DB_NAME = "chronos.db"
 #: crash temp is recognised; a leading dot alone means nothing.
 TEMP_ENVELOPE_RE = re.compile(r"^\.chronos-\d{8}T\d{6}Z\.[0-9a-f]{16}\.tmp$")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+#: renameat2(2) flags: publish only where nothing is (NOREPLACE), or swap two names in one
+#: syscall (EXCHANGE — the cutover's move, so a live name is never vacant)
 _RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
 
 
 class DrillRefused(RuntimeError):
@@ -184,9 +218,15 @@ class BackupManifest:
     audit_log_path: str | None
     encryption: dict[str, object] = field(default_factory=lambda: {"scheme": "none"})
     ciphertext_sha256: str | None = None
+    #: ``(device, inode)`` of the source file the backup connection was proven to have opened
+    #: (N3-2 r1); ``None`` only in a manifest written before the field existed.
+    source_identity: tuple[int, int] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if self.source_identity is not None:
+            data["source_identity"] = list(self.source_identity)  # as manifest.json writes it
+        return data
 
     @property
     def cleartext_name(self) -> str:
@@ -213,7 +253,18 @@ class BackupManifest:
             ciphertext_sha256=None
             if data.get("ciphertext_sha256") is None
             else str(data["ciphertext_sha256"]),
+            source_identity=_identity_field(data.get("source_identity")),
         )
+
+
+def _identity_field(raw: object) -> tuple[int, int] | None:
+    """``[device, inode]`` as the manifest writes it; absent in a pre-r1 manifest."""
+
+    if raw is None:
+        return None
+    if isinstance(raw, list | tuple) and len(raw) == 2:
+        return int(raw[0]), int(raw[1])
+    raise DrillRefused(f"manifest source_identity is not [device, inode]: {raw!r}")
 
 
 def _encryption_block(raw: object) -> dict[str, object]:
@@ -236,6 +287,11 @@ class RestoreReport:
     audit_chain: str  # VALID | BROKEN | ABSENT | NOT_APPLICABLE
     failures: tuple[str, ...]
     rto_s: float
+    #: ``repository`` — the running repository accepted the copy (``Database.initialize()``,
+    #: version + zero drift); ``archive:<head>`` — the source capability carried the flatten
+    #: gate's archive admission (N3-2 cutover archive of a RETIRED schema) and the copy was
+    #: verified by exact head and gated source identity instead (see ``restore``).
+    acceptance: str = "repository"
 
     @property
     def verified(self) -> bool:
@@ -248,6 +304,11 @@ class RestoreReport:
         return data
 
 
+#: The drill's two verdicts for a verified copy — distinct on purpose (Daybreak P1-2).
+VERIFIED = "VERIFIED"
+ARCHIVE_VERIFIED = "ARCHIVE_VERIFIED"
+
+
 @dataclass(frozen=True, slots=True)
 class DrillReport:
     manifest: BackupManifest
@@ -255,7 +316,7 @@ class DrillReport:
     rpo_s: float | None
     rpo_basis: dict[str, object]
     rto_s: float | None
-    verdict: str
+    verdict: str  # VERIFIED | ARCHIVE_VERIFIED | FAILED
     failures: tuple[str, ...] = field(default=())
 
     def to_dict(self) -> dict[str, object]:
@@ -768,27 +829,191 @@ def _fresh_directory(target: Path, what: str) -> int:
 # ----------------------------------------------------------------- store inspection
 
 
-def _readonly(path: Path) -> contextlib.closing[sqlite3.Connection]:
-    """A read-only connection on the SOURCE under SQLite's normal locking and WAL semantics.
+def _descriptor_identities() -> dict[int, tuple[int, int]]:
+    """Every open descriptor of this process and the ``(device, inode)`` it refers to."""
 
-    Never ``immutable=1``: that flag makes SQLite ignore a WAL, and "no ``-wal`` right
-    now" is not a fact about the next instant (Daybreak's R-1 probe committed a row
-    between such a check and the open). A read-only reader on a WAL-mode file may
-    create empty ``-wal``/``-shm`` beside it — a directory write, never a database
-    write; the retained copies are stored in rollback-journal mode so readers leave
-    nothing beside them.
+    found: dict[int, tuple[int, int]] = {}
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            number = int(name)
+            st = os.fstat(number)
+        except (ValueError, OSError):
+            continue
+        found[number] = (st.st_dev, st.st_ino)
+    return found
+
+
+class SourceSwapped(DrillRefused):
+    """The name a read-only connection opened no longer designated the object held open."""
+
+
+class SourceBusy(DrillRefused):
+    """Another process holds the file open for writing: the read lease was refused."""
+
+
+def _lease_read(fd: int, subject: str) -> None:
+    """A kernel READ LEASE on an open read-only descriptor (Linux ``fcntl(F_SETLEASE, F_RDLCK)``;
+    N3-2 r2, Daybreak P1-1): granted only while NO process has the file open for writing
+    (:class:`SourceBusy` otherwise — a writable SQLite connection, idle or not, holds its main
+    file O_RDWR); from then on any open for writing, or a truncate, by any process blocks until
+    the lease is released or the kernel breaks it (``/proc/sys/fs/lease-break-time``, 45 s by
+    default), and :func:`_lease_intact` reports the break. Read-only opens are unaffected. The
+    lease's owner is cleared (``F_SETOWN 0``) so a break delivers no SIGIO — whose default action
+    would terminate this process — and the holder polls instead. The kernel grants a lease to the
+    file's owner (or CAP_LEASE) on a local filesystem; anything else is a typed refusal, never a
+    silent fallback. Measured on this host (tmpfs and ext4 alike, SQLite 3.53): our own ``mode=ro``
+    connection holds the main file O_RDONLY and does not conflict, but holds the ``-wal`` and
+    ``-shm`` O_RDWR, so their leases are possible only after it closes."""
+
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+    except OSError as error:
+        if error.errno == errno.EAGAIN:
+            raise SourceBusy(
+                f"{subject} is open for writing by another process (a writable SQLite "
+                "connection, idle or not, holds it open read-write): the kernel refused the "
+                "read lease, so writers cannot be excluded"
+            ) from None
+        raise DrillRefused(
+            f"the kernel refused a read lease on {subject}: [errno {error.errno}] "
+            f"{error.strerror}; writers cannot be excluded here — run as the file's owner, "
+            "on a local filesystem"
+        ) from None
+    fcntl.fcntl(fd, fcntl.F_SETOWN, 0)
+
+
+def _lease_intact(fd: int) -> bool:
+    """True while the read lease taken by :func:`_lease_read` is still whole: no process has
+    opened the file for writing since (a pending or completed break reads as F_UNLCK)."""
+
+    return fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_RDLCK
+
+
+class BoundSource:
+    """ONE capability on the source for a whole operation (N3-2 r1, Daybreak P1-1).
+
+    ``fd`` is the file opened ``O_RDONLY|O_NOFOLLOW`` and proven regular; ``identity`` is its
+    ``(device, inode)``, which cannot be recycled while the descriptor is open. ``connection``
+    is a ``mode=ro`` connection under SQLite's normal locking and WAL semantics (never
+    ``immutable=1``: "no ``-wal`` right now" is not a fact about the next instant) that was
+    PROVEN to have opened that inode: SQLite resolves a pathname — even ``/proc/self/fd/<n>``
+    — before it opens (measured, 3.53), so the proof is structural: among the descriptors
+    this process gained by connecting and reading once, one refers to ``identity``, else
+    :class:`SourceSwapped` and nothing was read. Every later read of the source goes
+    through ``connection``; a rename at the end is by name and re-proves ``identity``
+    before and after. A read-only reader leaves SQLite's bookkeeping beside a WAL-mode
+    store — an empty ``-wal`` and a ``-shm``; a directory entry, never a database write.
+
+    The capability carries NO archive admission (r3, Daybreak P1-2): a retired-schema archive is
+    verified only by :func:`run_archive_drill`, which runs the flatten gate itself over the
+    capability it is handed and verifies by that run inline in its own body — no closure, no
+    verifier object (r5).
+
+    :meth:`exclude_writers` (r2) takes the kernel read lease on ``fd`` (see :func:`_lease_read`):
+    from that instant no process can hold or obtain a write-capable open on the store, and
+    :attr:`writers_excluded` says whether that has held. The drill's own backups never call it
+    (an online backup beside a live backend stays possible); the cutover does, before its gate.
     """
 
-    # closing(): a ``with`` on a sqlite3 Connection is a transaction scope, not a closer —
-    # without it the connection (and its descriptor on the store) lingers until the garbage
-    # collector runs (T-3)
-    return contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    __slots__ = (
+        "_connection_open",
+        "_fd_open",
+        "_leased",
+        "connection",
+        "fd",
+        "identity",
+        "path",
+    )
+
+    def __init__(
+        self, path: Path, fd: int, identity: tuple[int, int], connection: sqlite3.Connection
+    ) -> None:
+        self.path = path
+        self.fd = fd
+        self.identity = identity
+        self.connection = connection
+        self._connection_open = True
+        self._fd_open = True
+        self._leased = False
+
+    def exclude_writers(self) -> None:
+        """Take the kernel read lease on the held store: refused (:class:`SourceBusy`) while any
+        process has it open for writing; afterwards every writer's open blocks and breaks the
+        lease, which :attr:`writers_excluded` reports."""
+
+        _lease_read(self.fd, f"source database {self.path}")
+        self._leased = True
+
+    @property
+    def writers_excluded(self) -> bool:
+        """True while the lease from :meth:`exclude_writers` is whole: no process opened the
+        store for writing since it was taken."""
+
+        return self._leased and self._fd_open and _lease_intact(self.fd)
+
+    def close_connection(self) -> None:
+        if self._connection_open:
+            self._connection_open = False
+            self.connection.close()
+
+    def close(self) -> None:
+        self.close_connection()
+        if self._fd_open:
+            self._fd_open = False
+            os.close(self.fd)
+
+
+def open_bound_source(
+    path: Path, subject: str = "source database", *, dir_fd: int | None = None
+) -> BoundSource:
+    """Open ``path`` no-follow (regular file required), hold it, connect read-only by name,
+    and prove the connection opened the held inode (see :class:`BoundSource`). With ``dir_fd``
+    (the N3-2 cutover's held, checked parent — r6) the file is opened by its last component
+    relative to that descriptor, never by resolving the pathname again; the connection's
+    pathname open is then proven to have reached that very inode."""
+
+    path = Path(path)
+    fd = (
+        _open_regular(path, subject)
+        if dir_fd is None
+        else _open_regular_at(dir_fd, path.name, subject)
+    )
+    try:
+        st = os.fstat(fd)
+        identity = (st.st_dev, st.st_ino)
+        absolute = path if path.is_absolute() else Path.cwd() / path
+        before = _descriptor_identities()
+        connection = sqlite3.connect(f"{absolute.as_uri()}?mode=ro", uri=True)
+        try:
+            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            gained = {
+                number: found
+                for number, found in _descriptor_identities().items()
+                if number not in before
+            }
+            if identity not in gained.values():
+                others = sorted({f"{dev}:{ino}" for dev, ino in gained.values()})
+                raise SourceSwapped(
+                    f"{subject} {path} swapped: the read-only connection opened "
+                    f"{', '.join(others) or 'no file'} (device:inode), not the object held open "
+                    f"no-follow ({identity[0]}:{identity[1]}) — the name changed between the two "
+                    "opens; nothing was read"
+                )
+        except BaseException:
+            connection.close()
+            raise
+    except BaseException:
+        os.close(fd)
+        raise
+    return BoundSource(path, fd, identity, connection)
 
 
 def _readonly_fd(fd: int) -> contextlib.closing[sqlite3.Connection]:
-    """A read-only connection on an already-open descriptor (a retained copy): sqlite
-    opens ``/proc/self/fd/<n>``, so no pathname is re-resolved. Closed on exit (see
-    :func:`_readonly`)."""
+    """A read-only connection on an already-open descriptor of a RETAINED copy. SQLite resolves
+    ``/proc/self/fd/<n>`` to the pathname before opening (measured, 3.53), so this binds by
+    name at that instant; the callers re-prove the copy's identity through ``fd`` before and
+    after (T-3). Closed on exit: a ``with`` on a Connection is a transaction scope, not a
+    closer, and an unclosed connection lingers until the garbage collector runs."""
 
     return contextlib.closing(sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro", uri=True))
 
@@ -965,14 +1190,22 @@ def _read_text_at(dfd: int, name: str, subject: str) -> str:
 
 
 def backup(
-    db_path: Path, out_dir: Path, *, clock: Clock | None = None, keys: AgeKeys | None = None
+    db_path: Path,
+    out_dir: Path,
+    *,
+    clock: Clock | None = None,
+    keys: AgeKeys | None = None,
+    source: BoundSource | None = None,
 ) -> BackupManifest:
     """A consistent online backup of ``db_path`` as ONE envelope under ``out_dir``.
 
-    The source is opened read-only (``mode=ro``, normal SQLite locking) and never
-    written. The envelope is staged as a dot-temp directory (database through the
-    O_EXCL temp descriptor, audit pair from one ``read_audit_pair`` after the backup
-    completed, ``manifest.json``), every file and the directory fsynced, then
+    The source is read through ONE :class:`BoundSource` — the caller's (``source``, so a
+    gate, this backup and a later rename share one capability) or this call's own, opened
+    before any directory is created and closed before returning — read-only (``mode=ro``,
+    normal SQLite locking), proven to be the held inode, never written; the manifest records
+    that inode as ``source_identity``. The envelope is staged as a dot-temp directory
+    (database through the O_EXCL temp descriptor, audit pair from one ``read_audit_pair``
+    after the backup completed, ``manifest.json``), every file and the directory fsynced, then
     published with ONE ``renameat2(RENAME_NOREPLACE)`` — EEXIST or any other error
     is a typed refusal and the temp is removed — then ``out_dir`` is fsynced. The
     directory capability admitted by the walk is held through every manifest read
@@ -983,8 +1216,18 @@ def backup(
     keys = keys or load_age_keys()  # every key refusal precedes the source open
     db_path = Path(db_path)
     out_dir = Path(out_dir)
-    fd = _open_regular(db_path, "source database")
-    os.close(fd)
+    owned = source is None
+    source = source or open_bound_source(db_path, "source database")
+    try:
+        return _backup_bound(source, out_dir, clock=clock, keys=keys)
+    finally:
+        if owned:
+            source.close()
+
+
+def _backup_bound(
+    source: BoundSource, out_dir: Path, *, clock: Clock, keys: AgeKeys
+) -> BackupManifest:
     out_fd, out_abs = _walk_directory(out_dir, "backup directory", create=True)
     try:
         taken_at = clock.wall()
@@ -994,7 +1237,7 @@ def backup(
         env_fd = os.open(temp_name, _DIR_FLAGS, dir_fd=out_fd)
         try:
             manifest = _stage_envelope(
-                env_fd, db_path, db_name, out_abs / final_name, taken_at, clock
+                env_fd, source, db_name, out_abs / final_name, taken_at, clock
             )
             manifest = _encrypt_staged(env_fd, db_name, manifest, keys)
             _stage_bytes_at(
@@ -1053,10 +1296,16 @@ def backup(
 
 
 def _stage_envelope(
-    env_fd: int, db_path: Path, db_name: str, final_dir: Path, taken_at: datetime, clock: Clock
+    env_fd: int,
+    source: BoundSource,
+    db_name: str,
+    final_dir: Path,
+    taken_at: datetime,
+    clock: Clock,
 ) -> BackupManifest:
-    """Fill the temp envelope: the database, the audit pair (one read, after the backup
-    completed), and the manifest facts read back through the descriptors."""
+    """Fill the temp envelope: the database (through the bound connection — no reopen), the
+    audit pair (one read, after the backup completed), and the manifest facts read back
+    through the descriptors."""
 
     tmp_fd = _create_exclusive_at(env_fd, db_name, flags=os.O_RDWR)
     try:
@@ -1066,8 +1315,7 @@ def _stage_envelope(
         destination = sqlite3.connect(f"/proc/self/fd/{tmp_fd}")
         try:
             destination.execute("PRAGMA journal_mode=OFF")
-            with _readonly(db_path) as source:
-                source.backup(destination)
+            source.connection.backup(destination)
             snapshot_completed_at = clock.wall()
             # one self-contained file: readers of the retained copy leave no sidecars
             destination.execute("PRAGMA journal_mode=DELETE")
@@ -1079,7 +1327,7 @@ def _stage_envelope(
         os.fsync(tmp_fd)
         # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
         # log, no-follow, one capability read each — the audit log's own reader)
-        audit_log = db_path.parent / AUDIT_LOG_NAME
+        audit_log = source.path.parent / AUDIT_LOG_NAME
         try:
             log_text, anchor_bytes = read_audit_pair(audit_log)
         except AuditLogCorruptionError as error:
@@ -1108,13 +1356,14 @@ def _stage_envelope(
     return BackupManifest(
         taken_at=taken_at.isoformat(),
         snapshot_completed_at=snapshot_completed_at.isoformat(),
-        source_path=str(db_path),
+        source_path=str(source.path),
         backup_path=str(final_dir / db_name),
         sha256=sha256,
         schema_head=head,
         row_counts=counts,
         audit_head=audit_head,
         audit_log_path=audit_log_path,
+        source_identity=source.identity,
     )
 
 
@@ -1164,17 +1413,18 @@ def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
 # ----------------------------------------------------------------- restore + verify
 
 
-def _verify_in(
-    manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
-) -> tuple[list[str], dict[str, bool | str]]:
-    """The four verifiers, every read through the target directory descriptor; the
-    repository's own acceptance (a pathname open) is bound by identity checks before and
-    after it."""
+def _open_copy(
+    manifest: BackupManifest, target_fd: int
+) -> tuple[int, list[str], dict[str, bool | str], str, dict[str, int]]:
+    """Open the restored copy by name against the target directory descriptor and read what
+    every verification needs: its sha256 through that descriptor, its head and row counts
+    through ``_readonly_fd`` (a resolved-pathname open; see that function). Returns the OPEN
+    descriptor — an acceptance step may bind to it; the caller closes it — with the failures
+    and facts so far, the head and the counts. No acceptance happens here."""
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
-    db_name = manifest.cleartext_name
-    fd = _open_regular_at(target_fd, db_name, "restored copy")
+    fd = _open_regular_at(target_fd, manifest.cleartext_name, "restored copy")
     try:
         actual = _sha256_fd(fd)
         facts["sha256_ok"] = actual == manifest.sha256
@@ -1185,46 +1435,70 @@ def _verify_in(
         with _readonly_fd(fd) as restored:
             head = _schema_head_on(restored)
             counts = _row_counts_on(restored)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, failures, facts, head, counts
 
-        # The copy's identity is read from THIS descriptor at every comparison, and the
-        # descriptor stays open through the repository's acceptance check: a referenced
-        # inode cannot be freed, so its number cannot be handed to a stranger planted at
-        # the name meanwhile (T-3 — the (dev, ino)-after-close class CI caught on W-1).
-        def copy_identity() -> tuple[int, int]:
-            st = os.fstat(fd)
-            return st.st_dev, st.st_ino
 
-        accepted = True
-        lexical = target_abs / db_name
-        if not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
-            target_abs
-        ) != _dir_identity(target_fd):
-            accepted = False
-            failures.append(
-                f"restore target swapped: {target_abs} no longer names the directory the walk "
-                "admitted, so the repository's acceptance check cannot be bound to the copy"
-            )
-        else:
-            try:
-                database = Database(f"sqlite:///{lexical}")
-                try:
-                    # verifies version + zero drift on a versioned store; applies no upgrade
-                    database.initialize()
-                finally:
-                    database.dispose()
-            except RuntimeError as error:
-                accepted = False
-                failures.append(f"schema_acceptance: {error}")
-            if not _entry_is_real_file(target_fd, db_name, copy_identity()):
-                accepted = False
-                failures.append(
-                    f"restore target swapped: {lexical} changed identity during the acceptance "
-                    "check"
-                )
-    finally:
-        os.close(fd)  # after the last comparison: no descriptor to the copy outlives restore()
+def _repository_acceptance(
+    manifest: BackupManifest, target_fd: int, target_abs: Path, fd: int
+) -> list[str]:
+    """The running repository's own acceptance of the copy — ``Database.initialize()`` on an
+    already-versioned store verifies the version and zero drift and applies no upgrade — a
+    pathname open bound by identity to the held descriptor before and after it (T-3: the
+    descriptor stays open through the check, so the inode cannot be freed and its number
+    handed to a stranger planted at the name meanwhile). The failures, or an empty list. This
+    is the ONLY acceptance any module-level function performs (r4, Daybreak r3 P1-2): a retired
+    schema is refused here by design, and nothing at module scope can say otherwise — the N3-2
+    archive's acceptance lives inside :func:`run_archive_drill`'s frame alone."""
 
-    facts["schema_head_ok"] = head == manifest.schema_head and accepted
+    db_name = manifest.cleartext_name
+    lexical = target_abs / db_name
+
+    def copy_identity() -> tuple[int, int]:
+        st = os.fstat(fd)
+        return st.st_dev, st.st_ino
+
+    if not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
+        target_abs
+    ) != _dir_identity(target_fd):
+        return [
+            f"restore target swapped: {target_abs} no longer names the directory the walk "
+            "admitted, so the repository's acceptance check cannot be bound to the copy"
+        ]
+    failures: list[str] = []
+    try:
+        database = Database(f"sqlite:///{lexical}")
+        try:
+            database.initialize()  # verifies version + zero drift; applies no upgrade
+        finally:
+            database.dispose()
+    except RuntimeError as error:
+        failures.append(f"schema_acceptance: {error}")
+    if not _entry_is_real_file(target_fd, db_name, copy_identity()):
+        failures.append(
+            f"restore target swapped: {lexical} changed identity during the acceptance check"
+        )
+    return failures
+
+
+def _finish_verification(
+    manifest: BackupManifest,
+    target_fd: int,
+    target_abs: Path,
+    has_audit: bool,
+    head: str,
+    counts: dict[str, int],
+    failures: list[str],
+    facts: dict[str, bool | str],
+) -> None:
+    """The verifiers after an acceptance step — the head against the manifest, the row counts,
+    the audit chain — appended to the caller's ``failures`` and ``facts``. ``schema_head_ok`` is
+    the head comparison alone here; the caller ANDs its own acceptance verdict into it. No
+    acceptance happens here."""
+
+    facts["schema_head_ok"] = head == manifest.schema_head
     if head != manifest.schema_head:
         failures.append(f"schema_head: restored {head} != manifest {manifest.schema_head}")
 
@@ -1269,14 +1543,35 @@ def _verify_in(
                     "audit_chain: the restored anchor's last hash differs from the manifest's "
                     "audit_head"
                 )
+
+
+def _verify_in(
+    manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
+) -> tuple[list[str], dict[str, bool | str]]:
+    """The four verifiers with the REPOSITORY's acceptance, every read through the target
+    directory descriptor. This function knows no other acceptance, and neither does any other
+    function at module scope (r4, Daybreak r3 P1-2)."""
+
+    fd, failures, facts, head, counts = _open_copy(manifest, target_fd)
+    try:
+        problems = _repository_acceptance(manifest, target_fd, target_abs, fd)
+    finally:
+        os.close(fd)  # after the last comparison: no descriptor to the copy outlives restore()
+    failures.extend(problems)
+    facts["acceptance"] = "repository"
+    _finish_verification(manifest, target_fd, target_abs, has_audit, head, counts, failures, facts)
+    facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
     return failures, facts
 
 
 def verify_restored(
-    manifest: BackupManifest, restored: Path, restored_audit_log: Path | None
+    manifest: BackupManifest,
+    restored: Path,
+    restored_audit_log: Path | None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers against a restored copy named by path (the directory is reached
-    by the no-follow walk and every read goes through it)."""
+    by the no-follow walk and every read goes through it), with the repository's acceptance:
+    a retired-schema copy is refused here by design (see :func:`run_archive_drill`)."""
 
     restored = Path(restored)
     target_fd, target_abs = _walk_directory(restored.parent, "restore target", create=False)
@@ -1319,6 +1614,66 @@ def _decrypt_into(
         os.close(identity_fd)
 
 
+@dataclass(frozen=True, slots=True)
+class _Staged:
+    """A restore target after the decrypt and the audit copy, held open for the caller's
+    verification (none happened here); ``decrypt_refused`` when the decrypt was refused."""
+
+    target_fd: int
+    target_abs: Path
+    has_audit: bool
+    decrypt_refused: DrillRefused | None
+
+
+@contextlib.contextmanager
+def _staged_restore(manifest: BackupManifest, target_dir: Path, keys: AgeKeys) -> Iterator[_Staged]:
+    """Decrypt the envelope's database through the host identity into the FRESH target
+    directory and copy the audit pair beside it, every write through the held descriptors;
+    yield the held target for the caller's verification — repository or, inside
+    :func:`run_archive_drill` alone, that gate run's — and close everything after. A decrypt
+    refusal is yielded, not raised (the caller's report records it)."""
+
+    _require_age_manifest(manifest)
+    target_dir = Path(target_dir)
+    target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
+    env_fd, _env_abs = _open_envelope(manifest)
+    try:
+        target_fd = _fresh_directory(target_dir, "restore target")
+        try:
+            db_name = manifest.cleartext_name
+            encrypted_name = Path(manifest.backup_path).name
+            try:
+                _decrypt_into(env_fd, encrypted_name, target_fd, db_name, keys)
+            except DrillRefused as error:
+                yield _Staged(target_fd, target_abs, False, error)
+                return
+            has_audit = manifest.audit_log_path is not None
+            if has_audit:
+                for name in (AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME):
+                    src = _open_regular_at(env_fd, name, "retained audit file")
+                    try:
+                        _copy_fd_to(src, target_fd, name)
+                    finally:
+                        os.close(src)
+            os.fsync(target_fd)
+            yield _Staged(target_fd, target_abs, has_audit, None)
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(env_fd)
+
+
+def _target_swapped_after(staged: _Staged) -> list[str]:
+    """After verification: the reported path must still name the directory the walk admitted."""
+
+    if _nofollow_identity(staged.target_abs) != _dir_identity(staged.target_fd):
+        return [
+            f"restore target swapped: {staged.target_abs} no longer names the directory the "
+            "walk admitted; the copy this drill made is not at the reported path"
+        ]
+    return []
+
+
 def restore(
     manifest: BackupManifest,
     target_dir: Path,
@@ -1329,62 +1684,45 @@ def restore(
     """Decrypt the envelope's database through the host identity into a fresh directory,
     copy the audit pair beside it, and verify them there — the target descriptor is held
     through the decrypt, the copy AND the verification; rto_s from start to verified. A
-    decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``)."""
+    decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``).
+
+    The acceptance is the repository's — here and in every function at module scope (r4,
+    Daybreak r3 P1-2): a RETIRED-schema copy, a schema the running repository refuses by
+    design, verifies as refused however it was made. The N3-2 cutover verifies its archive
+    through :func:`run_archive_drill` alone, whose acceptance is a closure in its own frame.
+    Restoring a retired copy for use needs the code that last ran that schema; nothing here
+    makes it acceptable to the running code."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
-    _require_age_manifest(manifest)
-    target_dir = Path(target_dir)
-    target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
     started = clock.monotonic()
-    env_fd, _env_abs = _open_envelope(manifest)
-    try:
-        target_fd = _fresh_directory(target_dir, "restore target")
-        try:
-            db_name = manifest.cleartext_name
-            encrypted_name = Path(manifest.backup_path).name
-            try:
-                _decrypt_into(env_fd, encrypted_name, target_fd, db_name, keys)
-            except DrillRefused as error:
-                return RestoreReport(
-                    target_dir=str(target_abs),
-                    restored_path=str(target_abs / db_name),
-                    sha256_ok=False,
-                    schema_head_ok=False,
-                    row_counts_ok=False,
-                    audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
-                    failures=(f"decrypt: refused — {error}",),
-                    rto_s=clock.monotonic() - started,
-                )
-            has_audit = manifest.audit_log_path is not None
-            if has_audit:
-                for name in (AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME):
-                    src = _open_regular_at(env_fd, name, "retained audit file")
-                    try:
-                        _copy_fd_to(src, target_fd, name)
-                    finally:
-                        os.close(src)
-            os.fsync(target_fd)
-            failures, facts = _verify_in(manifest, target_fd, target_abs, has_audit)
-            if _nofollow_identity(target_abs) != _dir_identity(target_fd):
-                failures.append(
-                    f"restore target swapped: {target_abs} no longer names the directory the "
-                    "walk admitted; the copy this drill made is not at the reported path"
-                )
-        finally:
-            os.close(target_fd)
-    finally:
-        os.close(env_fd)
-    verified_at = clock.monotonic()
+    with _staged_restore(manifest, target_dir, keys) as staged:
+        if staged.decrypt_refused is not None:
+            return RestoreReport(
+                target_dir=str(staged.target_abs),
+                restored_path=str(staged.target_abs / manifest.cleartext_name),
+                sha256_ok=False,
+                schema_head_ok=False,
+                row_counts_ok=False,
+                audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
+                failures=(f"decrypt: refused — {staged.decrypt_refused}",),
+                rto_s=clock.monotonic() - started,
+                acceptance="repository",
+            )
+        failures, facts = _verify_in(
+            manifest, staged.target_fd, staged.target_abs, staged.has_audit
+        )
+        failures.extend(_target_swapped_after(staged))
     return RestoreReport(
-        target_dir=str(target_abs),
-        restored_path=str(target_abs / manifest.cleartext_name),
+        target_dir=str(staged.target_abs),
+        restored_path=str(staged.target_abs / manifest.cleartext_name),
         sha256_ok=bool(facts["sha256_ok"]),
         schema_head_ok=bool(facts["schema_head_ok"]),
         row_counts_ok=bool(facts["row_counts_ok"]),
         audit_chain=str(facts["audit_chain"]),
         failures=tuple(failures),
-        rto_s=verified_at - started,
+        rto_s=clock.monotonic() - started,
+        acceptance="repository",
     )
 
 
@@ -1465,17 +1803,18 @@ def run_drill(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
+    source: BoundSource | None = None,
 ) -> DrillReport:
+    """Backup → rpo → restore + verify, one report. ``source`` is the caller's bound
+    capability (the backup then reads through it and its manifest records that inode; left to
+    the backup otherwise). The acceptance is the repository's and a clean result is
+    ``VERIFIED`` — never ``ARCHIVE_VERIFIED``, which only :func:`run_archive_drill` yields. The
+    CLI never passes a capability."""
+
     clock = clock or system_clock()
     keys = keys or load_age_keys()
-    manifest = backup(db_path, out_dir, clock=clock, keys=keys)
-    failures: list[str] = []
-    rpo: float | None
-    try:
-        rpo, basis = rpo_seconds(manifest, keys=keys)
-    except DrillRefused as error:
-        rpo, basis = None, {"source": None, "refused": str(error)}
-        failures.append(f"rpo: refused — {error}")
+    manifest = backup(db_path, out_dir, clock=clock, keys=keys, source=source)
+    failures, rpo, basis = _rpo_or_refusal(manifest, keys)
     report = restore(manifest, restore_into, clock=clock, keys=keys)
     failures.extend(report.failures)
     return DrillReport(
@@ -1484,7 +1823,148 @@ def run_drill(
         rpo_s=rpo,
         rpo_basis=basis,
         rto_s=report.rto_s,
-        verdict="VERIFIED" if not failures else "FAILED",
+        verdict=VERIFIED if not failures else "FAILED",
+        failures=tuple(failures),
+    )
+
+
+def _rpo_or_refusal(
+    manifest: BackupManifest, keys: AgeKeys
+) -> tuple[list[str], float | None, dict[str, object]]:
+    try:
+        rpo, basis = rpo_seconds(manifest, keys=keys)
+    except DrillRefused as error:
+        return [f"rpo: refused — {error}"], None, {"source": None, "refused": str(error)}
+    return [], rpo, basis
+
+
+def _require_retired(schema_head: str, schema_version: int) -> None:
+    """A flatten-gate run's head must name a RETIRED schema: ``schema_version`` BELOW the
+    running ``SCHEMA_VERSION`` (a current-or-newer store is never an archive), ``schema_head``
+    in that version's form. A validator that returns nothing and confers nothing."""
+
+    if schema_version >= SCHEMA_VERSION:
+        raise DrillRefused(
+            f"archive: schema_version {schema_version} is not a retired schema (the running "
+            f"SCHEMA_VERSION is {SCHEMA_VERSION}); a current or newer store is never an archive"
+        )
+    if schema_head != f"schema_version:{schema_version}":
+        raise DrillRefused(
+            f"archive: head {schema_head} is not the form schema_version:{schema_version}; an "
+            "archive is bound to one numeric retired version"
+        )
+
+
+def run_archive_drill(
+    source: BoundSource,
+    out_dir: Path,
+    restore_into: Path,
+    *,
+    now: datetime,
+    clock: Clock | None = None,
+    keys: AgeKeys | None = None,
+) -> tuple[GateReport, DrillReport]:
+    """The N3-2 cutover's drill over an OPEN bound source — the only producer of
+    ``ARCHIVE_VERIFIED`` (r3). It runs the REAL flatten gate (``cutover_archive.flatten_gate``)
+    over ``source`` here: a store the gate refuses raises the gate's own refusal and nothing is
+    created. The acceptance of that run — the envelope must record the gated inode, the restored
+    copy must carry exactly the head the gate read, a retired one — and the report are INLINED
+    in this body (r5, Daybreak r4 P1-2): no function, lambda or class is defined here, so nothing
+    callable closes over the run's values, and nothing a caller-supplied ``Clock`` can retain by
+    walking the frames outlives or escapes this call — the frame's locals are plain values.
+    ``_verify_in``, ``restore`` and every other module-level function perform the repository's
+    acceptance only. Trust root, stated: code running in the same Python process is trusted (it
+    could replace ``flatten_gate`` itself); the guarantee against it is only that no verifier
+    object outlives or escapes the drill. Then backup → rpo → restore, verified by this run.
+    Returns the gate's report with the drill's."""
+
+    from chronos.operations.cutover_archive import flatten_gate  # the cycle is function-local
+
+    clock = clock or system_clock()
+    keys = keys or load_age_keys()
+    gate = flatten_gate(source, now=now)
+    if gate.source_identity != source.identity:
+        raise DrillRefused(
+            "archive: the gate report names another source than the capability handed in"
+        )
+    _require_retired(gate.schema_head, gate.schema_version)
+    admitted_head = gate.schema_head
+    admitted_identity = source.identity
+    acceptance = f"archive:{admitted_head}"
+    manifest = backup(source.path, out_dir, clock=clock, keys=keys, source=source)
+    failures, rpo, basis = _rpo_or_refusal(manifest, keys)
+    # the restore, verified by THIS gate run — inline, nothing callable holds the run's values
+    started = clock.monotonic()
+    restore_failures: list[str]
+    facts: dict[str, bool | str]
+    with _staged_restore(manifest, restore_into, keys) as staged:
+        if staged.decrypt_refused is not None:
+            restore_failures = [f"decrypt: refused — {staged.decrypt_refused}"]
+            facts = {
+                "sha256_ok": False,
+                "schema_head_ok": False,
+                "row_counts_ok": False,
+                "audit_chain": "NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
+            }
+        else:
+            # an archive of a RETIRED schema: the running repository refuses that version by
+            # design, so this run's acceptance replaces it — nothing is opened by pathname and
+            # nothing is initialized on the copy (the copy's bytes are the held descriptor's;
+            # head and counts came through _readonly_fd)
+            fd, restore_failures, facts, head, counts = _open_copy(manifest, staged.target_fd)
+            os.close(fd)
+            problems: list[str] = []
+            if manifest.source_identity is None or (
+                tuple(manifest.source_identity) != tuple(admitted_identity)
+            ):
+                recorded = (
+                    "none"
+                    if manifest.source_identity is None
+                    else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
+                )
+                problems.append(
+                    f"archive: the envelope's source identity {recorded} is not the gated "
+                    f"source {admitted_identity[0]}:{admitted_identity[1]} (device:inode); the "
+                    "backup was not of the gated object"
+                )
+            if head != admitted_head:
+                problems.append(
+                    f"schema_head: restored {head} != archive head {admitted_head}; a "
+                    "retired-schema archive is verified by exact head"
+                )
+            restore_failures.extend(problems)
+            facts["acceptance"] = acceptance
+            _finish_verification(
+                manifest,
+                staged.target_fd,
+                staged.target_abs,
+                staged.has_audit,
+                head,
+                counts,
+                restore_failures,
+                facts,
+            )
+            facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
+            restore_failures.extend(_target_swapped_after(staged))
+    report = RestoreReport(
+        target_dir=str(staged.target_abs),
+        restored_path=str(staged.target_abs / manifest.cleartext_name),
+        sha256_ok=bool(facts["sha256_ok"]),
+        schema_head_ok=bool(facts["schema_head_ok"]),
+        row_counts_ok=bool(facts["row_counts_ok"]),
+        audit_chain=str(facts["audit_chain"]),
+        failures=tuple(restore_failures),
+        rto_s=clock.monotonic() - started,
+        acceptance=acceptance,
+    )
+    failures.extend(report.failures)
+    return gate, DrillReport(
+        manifest=manifest,
+        restore=report,
+        rpo_s=rpo,
+        rpo_basis=basis,
+        rto_s=report.rto_s,
+        verdict=ARCHIVE_VERIFIED if not failures else "FAILED",
         failures=tuple(failures),
     )
 

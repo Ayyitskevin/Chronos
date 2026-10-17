@@ -226,6 +226,44 @@ exactly this) or the official release; the harness refuses without it with the s
 docs/ops/RESTORE-DRILL.md, section 'Encryption at rest'*, and the test file skips with the
 same sentence on a host without it.
 
+## Archiving a retired schema — the N3 cutover (a distinct verdict, never a substitute)
+
+The N3 cutover archive (`python -m chronos.operations.cutover_archive`,
+[`N3-CUTOVER.md`](N3-CUTOVER.md)) runs this harness over the **pre-cutover** store — a schema
+the running repository refuses by design (`database.py`: "Unsupported Chronos schema
+version"). Step 5's repository acceptance can therefore never pass for that archive. The
+archive command's `--apply` hands its open bound source capability to the drill's
+`run_archive_drill`, which runs the archive command's **flatten gate itself** over that
+capability, inside its own frame — a store the gate refuses raises the gate's own refusal and
+no envelope is made — and keeps that run's acceptance (the head it read, `schema_version:17`;
+that head's numeric version, which must be BELOW the running `SCHEMA_VERSION` — a current or
+newer store is never an archive; and the inode of the store it gated) as a closure inside
+that frame: not a value, not a type, not a parameter. There is no other way to it: the
+capability carries no admission state or method; `run_drill` / `restore` / `verify_restored`
+and every other function the module defines at its top level — underscore-prefixed ones
+included — perform the repository's acceptance only (`restore` and `verify_restored` take no
+capability either; `run_drill(source=)` binds the backup's identity and yields `VERIFIED` or
+`FAILED` alone), and no function at module scope has a parameter that selects or carries an
+archive acceptance — a caller cannot reach `ARCHIVE_VERIFIED`, or any `archive:` acceptance,
+without the real gate passing over the very capability it hands in. The drill then verifies by
+that closure — the envelope's manifest must record the gated inode (`source_identity`: the
+backup was of the gated object, through the one bound connection), and `restored head ==
+manifest head == the head the gate read`; sha256, row counts and the audit chain verify
+exactly as before. On that branch nothing is opened by pathname and no T-3 name check runs: the copy's
+bytes are the held descriptor's (sha256), while its head and row counts come through
+`_readonly_fd`, a resolved-pathname open. All good, the verdict is `ARCHIVE_VERIFIED` with
+`"acceptance": "archive:<head>"` — **not** `VERIFIED`, which is only ever the repository's
+acceptance (`"acceptance": "repository"`, every ordinary drill). Every public drill path over a
+retired store ends in the repository's own refusal of the retired version; a later `restore` of
+the envelope under the running code reports every verifier and exactly that refusal
+(`verified: false`, one `schema_acceptance:` failure) — the copy is there, usable only under
+the code that last ran it. The CLI never admits anything: to USE a restored copy of a retired
+schema, check out the code that last ran it (the pre-cutover sha the cutover runbook records).
+
+Every manifest now records `source_identity` (`[device, inode]`) of the file the backup
+connection was proven to have opened; a manifest written before this field exists reads as
+`null` and restores as before.
+
 ## Owner asks (Kevin) — the seams, not implemented here
 
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same

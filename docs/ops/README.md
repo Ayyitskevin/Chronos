@@ -61,3 +61,4 @@ Do not `systemctl --user enable` either unit until `docs/SHADOW_CAMPAIGN.md` §5
 check runs clean by hand at least once.
 
 - **Restore drill** — measured RPO/RTO for the sqlite database, isolated restore + verification, the owner asks (encryption, off-host copy): [`RESTORE-DRILL.md`](RESTORE-DRILL.md)
+- **N3 cutover** — the owner's one-time cutover from the unkeyed to the keyed account fingerprint (strategy (iii)): the flatten gate, the encrypted archive of the pre-cutover store with a verified restore, the move-aside by rename, the key step (his keystrokes only), rollback: [`N3-CUTOVER.md`](N3-CUTOVER.md)
