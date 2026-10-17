@@ -336,8 +336,9 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
       done
     )
     ```
-    The exit status of this block is only the LAST pruner run's (`10`, `11` and `2` are all
-    normal there): it is NOT an aggregate result. Read every report.
+    The exit status of this block is not reliable evidence about any pruner invocation: it can
+    be `0` after an earlier refusal (`2`), find (`10`) or delete (`11`) when a later candidate
+    is skipped. Do not use `$?` as the result; read every report.
     When the reports are what you expect, run it again with `export PRUNE_FLAGS=--apply` first. A directory
     that does not match (`20261017-restore`, `7-unrelated`, anything else) is never entered;
     if you keep older envelopes anywhere else, give that directory its own deliberate
