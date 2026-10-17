@@ -104,6 +104,14 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
+RED_R6 = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "r6: at 7c27c4f ProtectedPath normalises the path before the no-follow walk — a "
+        "symlink/.. alias proves a decoy chain: the dry-run accepts, the apply publishes an "
+        "envelope and then raises an untyped DrillRefused from the move's re-walk by name"
+    ),
+)
 
 
 def _chain_problem(path: Path) -> str | None:
@@ -3052,3 +3060,64 @@ def test_12c_the_docs_and_the_module_state_the_protected_path_and_the_trust_root
     assert "PATH_NOT_PROTECTED" in module and "PATH_DISPLACED" in module
     for statement in ("same Python process", "owner's uid", "ancestor"):
         assert statement in module, statement
+
+
+@RED_R6
+@pytest.mark.parametrize("alias", ["symlink-dotdot", "plain-dotdot"])
+def test_12d_daybreak_s_counterexample_a_dotdot_alias_is_refused_before_anything_is_published(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], alias: str
+) -> None:
+    """Daybreak r5 P1-1, the exact counterexample: POSIX resolves ``safe/link/../data/chronos.db``
+    THROUGH the link (``safe/link -> unsafe/child``, then ``..`` is ``unsafe``), reaching the
+    real retired store under a world-writable ``unsafe/``, while a lexical ``normpath`` collapses
+    the string to ``safe/data/chronos.db`` — an owner-private decoy chain. r6: nothing is
+    normalised away; a ``..`` component is refused outright (``PATH_NOT_PROTECTED``, naming it),
+    before the source is opened — dry-run and apply alike: no gate, no envelope, no output or
+    restore directory, not even reader bookkeeping beside either store, and no exception out of
+    the command (the plain ``..`` alias, harmless in itself, is refused the same way: give the
+    real path)."""
+
+    unsafe = _store(tmp_path / "unsafe", binding="closed")  # the real store, under a 0777 dir
+    os.chmod(tmp_path / "unsafe", 0o777)
+    (tmp_path / "unsafe" / "child").mkdir(0o700)
+    decoy = _store(tmp_path / "safe", binding="closed")  # an owner-private chain with a store
+    if alias == "symlink-dotdot":
+        os.symlink(tmp_path / "unsafe" / "child", tmp_path / "safe" / "link")
+        db_path = tmp_path / "safe" / "link" / ".." / "data" / "chronos.db"
+        assert os.path.realpath(db_path) == str(unsafe.db)  # the kernel's view: the unsafe store
+    else:
+        (tmp_path / "safe" / "x").mkdir(0o700)
+        db_path = tmp_path / "safe" / "x" / ".." / "data" / "chronos.db"
+        assert os.path.realpath(db_path) == str(decoy.db)
+    assert ".." in db_path.parts
+    before = (_sha256(unsafe.db), _sha256(decoy.db))
+    for args in ((), ("--apply",)):
+        argv = [
+            "--db",
+            str(db_path),
+            "--out",
+            str(tmp_path / "backups"),
+            "--restore-into",
+            str(tmp_path / "restored"),
+            *args,
+        ]
+        code = cutover.main(argv, clock=_clock(unsafe.now))  # returns; never raises
+        report = json.loads(capsys.readouterr().out)
+        assert code == 2 and report["code"] == "PATH_NOT_PROTECTED", report
+        assert report["gate"] is None and report["envelope"] is None
+        assert ".." in report["failures"][0]
+    assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
+    assert (_sha256(unsafe.db), _sha256(decoy.db)) == before
+    assert _entries(unsafe.db.parent) == ["chronos.db"]  # not even reader bookkeeping
+    assert _entries(decoy.db.parent) == ["chronos.db"]
+
+
+@RED_R6
+def test_12e_the_move_never_re_walks_the_path_by_name() -> None:
+    """The held chain is the one descriptor set the command uses: the source is opened relative
+    to its leaf and the move works through that same leaf, so no re-walk by name exists in the
+    module — and no late, untyped refusal can arise from one."""
+
+    source = MODULE.read_text(encoding="utf-8")
+    assert "_walk_directory" not in source
+    assert "dir_fd=protected.leaf_fd" in source  # the source open, relative to the held leaf
