@@ -103,7 +103,7 @@ sys.exit(backup_pruner.main(args, clock=lambda: datetime({y}, {m}, {d}, 12, tzin
 
 
 def _run_routine(
-    host: Path, tmp_path: Path, *, apply: bool
+    host: Path, tmp_path: Path, *, apply: bool = False, flags: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the documented shell routine under bash, hermetically.
 
@@ -124,7 +124,7 @@ def _run_routine(
         "PATH": os.environ["PATH"],
         "PYTHONPATH": str(ROOT / "src"),
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PRUNE_FLAGS": "--apply" if apply else "",
+        "PRUNE_FLAGS": flags if flags is not None else ("--apply" if apply else ""),
     }
     done = subprocess.run(
         ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=False
@@ -217,3 +217,44 @@ def test_restore_targets_stay_unclassified_at_the_default_root(host: Path) -> No
     assert code == 0
     reasons = {item["name"]: item["why"] for item in report["unclassified"]}  # type: ignore[union-attr, index]
     assert reasons and set(reasons.values()) == {"not a published envelope name"}
+
+
+OUTSIDE_MARK = "@OUTSIDE@"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        f"--apply --root {OUTSIDE_MARK}",
+        "--apply --apply",
+        "-a",
+        "--apply;",
+        "*",
+        "--apply ",
+        " --apply",
+        "--pretty",
+    ],
+)
+def test_a_hostile_prune_flags_value_is_refused_before_any_pruner_runs(
+    host: Path, tmp_path: Path, hostile: str
+) -> None:
+    inside = make_envelope(host / NOW.strftime("%Y%m%d"), 150)
+    outside = make_envelope(tmp_path / "injected-outside", 150)
+    before = [_digest(host), _digest(outside.parent)]
+    done, invoked = _run_routine(
+        host, tmp_path, flags=hostile.replace(OUTSIDE_MARK, str(outside.parent))
+    )
+    assert done.returncode == 2, (done.returncode, done.stderr)
+    assert invoked == [], "the pruner was invoked despite a non-canonical PRUNE_FLAGS"
+    assert [_digest(host), _digest(outside.parent)] == before
+    assert inside.is_dir() and outside.is_dir()
+
+
+def test_prune_flags_empty_is_a_dry_run_and_exactly_apply_applies(
+    host: Path, tmp_path: Path
+) -> None:
+    envelope = make_envelope(host / NOW.strftime("%Y%m%d"), 150)
+    _, invoked = _run_routine(host, tmp_path, flags="")
+    assert invoked == [str(envelope.parent)] and envelope.is_dir()
+    _, invoked = _run_routine(host, tmp_path, flags="--apply")
+    assert invoked == [str(envelope.parent)] and not envelope.exists()
