@@ -963,12 +963,21 @@ class BoundSource:
             os.close(self.fd)
 
 
-def open_bound_source(path: Path, subject: str = "source database") -> BoundSource:
+def open_bound_source(
+    path: Path, subject: str = "source database", *, dir_fd: int | None = None
+) -> BoundSource:
     """Open ``path`` no-follow (regular file required), hold it, connect read-only by name,
-    and prove the connection opened the held inode (see :class:`BoundSource`)."""
+    and prove the connection opened the held inode (see :class:`BoundSource`). With ``dir_fd``
+    (the N3-2 cutover's held, checked parent — r6) the file is opened by its last component
+    relative to that descriptor, never by resolving the pathname again; the connection's
+    pathname open is then proven to have reached that very inode."""
 
     path = Path(path)
-    fd = _open_regular(path, subject)
+    fd = (
+        _open_regular(path, subject)
+        if dir_fd is None
+        else _open_regular_at(dir_fd, path.name, subject)
+    )
     try:
         st = os.fstat(fd)
         identity = (st.st_dev, st.st_ino)

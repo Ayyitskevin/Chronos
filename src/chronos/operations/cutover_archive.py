@@ -117,7 +117,10 @@ itself — and the drill's guarantee against it is only that no verifier object 
 directory from ``/`` down to ``data/`` is a real directory owned by root or the effective uid
 with no group or other write bit (a ``/tmp``-style sticky world-writable directory is outside
 it), proved before the source is opened, held open through the last report, and re-proved on the
-move path and at report time (``PATH_NOT_PROTECTED``, ``PATH_DISPLACED``). Within it, the
+move path and at report time (``PATH_NOT_PROTECTED``, ``PATH_DISPLACED``) — the raw path's own
+components, never normalised: a ``..`` is refused outright (a ``..`` after a symlink resolves
+through the link in the kernel; r6), and the same held chain opens the source and runs the
+move. Within it, the
 sentinels are the owner's uid's alone to remove.
 """
 
@@ -162,7 +165,6 @@ from chronos.operations.restore_drill import (
     _renameat2,
     _schema_head_on,
     _sha256_of,
-    _walk_directory,
     load_age_keys,
     open_bound_source,
     run_archive_drill,
@@ -700,14 +702,29 @@ class ProtectedPath:
     uid), each HELD open through the last report, so that the move path and the report can
     re-prove by identity that every path component still names the directory that was checked
     — a ``data/`` renamed away and replaced under the same lexical path is ``PATH_DISPLACED``,
-    never ``ARCHIVED``. The chain is walked by name without following links; a symlink
-    component is ``PATH_NOT_PROTECTED``."""
+    never ``ARCHIVED``. The chain is walked by name without following links — the RAW
+    components, never normalised (r6: a ``..`` component is refused outright, since the kernel
+    resolves ``link/..`` through the link) — and the same held chain opens the source and runs
+    the move; a symlink component is ``PATH_NOT_PROTECTED``."""
 
     __slots__ = ("abs_path", "components", "facts", "fds", "identities")
 
     def __init__(self, parent: Path, when: str) -> None:
         absolute = parent if parent.is_absolute() else Path.cwd() / parent
-        self.abs_path = Path(os.path.normpath(absolute))
+        # r6 (Daybreak r5 P1-1): NO lexical normalisation — POSIX resolves ``link/..`` THROUGH
+        # the link, so collapsing ``..`` before the walk would prove a chain the kernel never
+        # uses. A ``..`` component is refused outright; the raw components are walked
+        # descriptor-relatively without following links, and the same held chain opens the
+        # source and runs the move.
+        if any(component == ".." for component in absolute.parts):
+            raise CutoverRefused(
+                "PATH_NOT_PROTECTED",
+                f"{absolute} carries a '..' component; give the store's real path (no '..', no "
+                "symlink in it): a '..' after a symlink is resolved through the link by the "
+                f"kernel, which no lexical walk can follow; nothing {when} ({RUNBOOK}, Before you "
+                "start)",
+            )
+        self.abs_path = absolute
         self.components: list[str] = ["/"]
         self.fds: list[int] = []
         self.identities: list[tuple[int, int]] = []
@@ -763,6 +780,13 @@ class ProtectedPath:
         self.facts.append(
             {"path": str(walked), "owner_uid": st.st_uid, "mode": f"{stat.S_IMODE(st.st_mode):04o}"}
         )
+
+    @property
+    def leaf_fd(self) -> int:
+        """The held ``O_PATH`` descriptor of ``data/`` itself: the source is opened relative to it
+        and the move works through it (r6) — the same chain for check, open, move and report."""
+
+        return self.fds[-1]
 
     @property
     def leaf_identity(self) -> tuple[int, int]:
@@ -1059,7 +1083,10 @@ def _move_aside(
             f"gated store's {source.identity[0]}:{source.identity[1]}: the archive is not of this "
             "store; nothing moved — inspect by hand",
         )
-    dfd, parent_abs = _walk_directory(source.path.parent, "database directory", create=False)
+    # r6: the move works through the held chain's leaf — opened for reading via "." relative to
+    # the held O_PATH descriptor, never re-walked by name, so no late, untyped refusal can arise
+    dfd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=protected.leaf_fd)
+    parent_abs = protected.abs_path
     namespace = [source.path.name, *(source.path.name + suffix for suffix in LIVE_NAME_SUFFIXES)]
     sentinels: list[Sentinel] = []
     try:
@@ -1410,7 +1437,7 @@ def archive(
     # proved before the source is opened, every directory held open through the last report
     protected = ProtectedPath(db_path.parent, "was opened")
     try:
-        source = open_bound_source(db_path, "source database")
+        source = open_bound_source(db_path, "source database", dir_fd=protected.leaf_fd)
     except SourceSwapped as error:
         protected.close()
         raise CutoverRefused("SOURCE_SWAPPED", str(error)) from None

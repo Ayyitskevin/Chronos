@@ -104,14 +104,6 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-RED_R6 = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "r6: at 7c27c4f ProtectedPath normalises the path before the no-follow walk — a "
-        "symlink/.. alias proves a decoy chain: the dry-run accepts, the apply publishes an "
-        "envelope and then raises an untyped DrillRefused from the move's re-walk by name"
-    ),
-)
 
 
 def _chain_problem(path: Path) -> str | None:
@@ -3062,7 +3054,6 @@ def test_12c_the_docs_and_the_module_state_the_protected_path_and_the_trust_root
         assert statement in module, statement
 
 
-@RED_R6
 @pytest.mark.parametrize("alias", ["symlink-dotdot", "plain-dotdot"])
 def test_12d_daybreak_s_counterexample_a_dotdot_alias_is_refused_before_anything_is_published(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], alias: str
@@ -3112,7 +3103,6 @@ def test_12d_daybreak_s_counterexample_a_dotdot_alias_is_refused_before_anything
     assert _entries(decoy.db.parent) == ["chronos.db"]
 
 
-@RED_R6
 def test_12e_the_move_never_re_walks_the_path_by_name() -> None:
     """The held chain is the one descriptor set the command uses: the source is opened relative
     to its leaf and the move works through that same leaf, so no re-walk by name exists in the

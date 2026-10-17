@@ -46,7 +46,9 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
   it opens anything, holds every ancestor open through its last report, and re-proves at the
   move and at report time that each path component still names the directory it checked;
   `PATH_DISPLACED` means it did not (the message names the held directory by inode: the
-  sentinels and the archived store stand in the renamed-away directory, never in a replacement).
+  sentinels and the archived store stand in the renamed-away directory, never in a replacement). Give the command the store's **real path** — no `..`, no symlink in it: a `..` after a
+  symlink is resolved through the link by the kernel, so the command refuses any `..` component
+  outright (`PATH_NOT_PROTECTED`) rather than guess which directory you meant.
 - Every Chronos process on this host must be stopped (step 1). The command proves what it can
   from the store (no live writer lease, no uncheckpointed write-ahead frames) and refuses
   otherwise; a read-only backend holds no lease, so **your** `is-active` check is part of the
@@ -273,7 +275,7 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 |---|---|---|
 | `SOURCE_NOT_REGULAR` | `--db`, or a `-wal`/`-shm` beside it, is a symlink, directory or FIFO | name the real file; never a link |
 | `PARENT_NOT_PRIVATE` | `data/` (the store's parent) is owned by another uid, or writable by its group or by others — the sentinels would be removable by another uid | as the owner: `chmod 0700 data` (Before you start); re-run |
-| `PATH_NOT_PROTECTED` | a directory above `data/` is not part of the protected chain: owned by neither root nor you, writable by its group or by others (a sticky `/tmp`-style one included), or a symlink | move the deployment under a protected chain, or fix the named directory as its owner (Before you start, `ls -ld`); re-run |
+| `PATH_NOT_PROTECTED` | a directory above `data/` is not part of the protected chain: owned by neither root nor you, writable by its group or by others (a sticky `/tmp`-style one included), or a symlink — or the path you gave carries a `..` component | move the deployment under a protected chain, or fix the named directory as its owner (Before you start, `ls -ld`); re-run |
 | `PATH_DISPLACED` | after the check, a path component stopped naming the directory the command holds open (renamed away or replaced) | nothing moved, or `moved_aside` is exact inside the held directory (named by inode); find out who wrote under a stopped service before anything starts |
 | `KEYS_REFUSED` | the drill's age keys (identity 0600, exactly the two recipients) | the drill runbook, "Encryption at rest" |
 | `SCHEMA_UNREADABLE` / `STORE_UNREADABLE` | the store could not be read as a Chronos store | stop; do not guess — inspect by hand, read-only |
