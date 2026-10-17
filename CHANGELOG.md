@@ -92,6 +92,15 @@ receipt:** (a) the adversary lacks the store owner's uid and root; (b) code in t
 it could replace `flatten_gate` itself — and the guarantee against it is only that no verifier object outlives or
 escapes the drill; (c) the database path's ancestor chain is the protected trust root above.
 
+r6 (Daybreak's r5 review): **no normalisation before the no-follow walk.** POSIX resolves `safe/link/../data` THROUGH
+the link (to `unsafe/data`), while `os.path.normpath` collapsed it to `safe/data` — so a `symlink/..` alias proved an
+owner-private decoy chain, the dry-run accepted it and the apply published an envelope before the move's re-walk by
+name raised an untyped refusal. Now the raw path's components are walked as given: any `..` component is refused
+outright (`PATH_NOT_PROTECTED`, naming it — give the store's real path) before the source is opened, dry-run and
+apply alike; the source is opened by its last component relative to the held `data/` descriptor
+(`open_bound_source(..., dir_fd=)`), and the move works through that same held leaf (`openat(".")` on it) instead of
+re-walking the path by name, so no late, untyped refusal can arise. The runbook's pre-step says to give the real path.
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
