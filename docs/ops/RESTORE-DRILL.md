@@ -319,15 +319,26 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
     visits ONLY directories named exactly eight digits, plus `n3`; it skips a name that does
     not exist (an unmatched glob stays literal, so without that check it would be passed to
     the pruner as a root) and skips a symlink before the pruner is invoked. It is a dry run
-    until you set `PRUNE_FLAGS=--apply`:
+    until you set `PRUNE_FLAGS=--apply`. `PRUNE_FLAGS` must be empty, unset, or exactly
+    `--apply`; anything else is refused (exit 2) before the pruner runs, so it cannot add or
+    replace a `--root`. The block is a subshell, so a refusal does not close your terminal:
     ```bash
-    for d in /var/backups/chronos/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] /var/backups/chronos/n3; do
-      [ -d "$d" ] || continue
-      [ -L "$d" ] && { echo "skipping symlink: $d" >&2; continue; }
-      python -m chronos.operations.backup_pruner --root "$d" --pretty ${PRUNE_FLAGS:-}
-    done
+    (
+      case "${PRUNE_FLAGS:-}" in
+        "")      prune_flags=() ;;
+        --apply) prune_flags=(--apply) ;;
+        *)       echo "PRUNE_FLAGS must be empty or exactly --apply" >&2; exit 2 ;;
+      esac
+      for d in /var/backups/chronos/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] /var/backups/chronos/n3; do
+        [ -d "$d" ] || continue
+        [ -L "$d" ] && { echo "skipping symlink: $d" >&2; continue; }
+        python -m chronos.operations.backup_pruner --root "$d" --pretty "${prune_flags[@]}"
+      done
+    )
     ```
-    Read every report, then run it again with `export PRUNE_FLAGS=--apply` first. A directory
+    The exit status of this block is only the LAST pruner run's (`10`, `11` and `2` are all
+    normal there): it is NOT an aggregate result. Read every report.
+    When the reports are what you expect, run it again with `export PRUNE_FLAGS=--apply` first. A directory
     that does not match (`20261017-restore`, `7-unrelated`, anything else) is never entered;
     if you keep older envelopes anywhere else, give that directory its own deliberate
     `--root` run by hand. The pruner reads only the direct children of the root you give it

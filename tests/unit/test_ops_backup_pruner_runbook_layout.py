@@ -126,6 +126,7 @@ def _run_routine(
         "PYTHONDONTWRITEBYTECODE": "1",
         "PRUNE_FLAGS": flags if flags is not None else ("--apply" if apply else ""),
     }
+    Path(str(shim) + ".log").unlink(missing_ok=True)
     done = subprocess.run(
         ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=False
     )
