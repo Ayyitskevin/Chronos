@@ -356,9 +356,12 @@ class AgeKeys:
         return {"scheme": AGE_SCHEME, "recipients": list(self.recipients), "tool": self.tool}
 
 
-def _run_age(argv: list[str], *, what: str, pass_fds: tuple[int, ...] = ()) -> bytes:
+def _run_age(
+    argv: list[str], *, what: str, pass_fds: tuple[int, ...] = (), umask: int = -1
+) -> bytes:
     """Run one age binary with an argv list (no shell), stdin closed; a non-zero exit is a
-    typed refusal carrying age's stderr; returns stdout."""
+    typed refusal carrying age's stderr; returns stdout. ``umask`` (when not -1) is set in the
+    CHILD only, between fork and exec — never this process's umask."""
 
     try:
         completed = subprocess.run(  # argv list, no shell; the binary was resolved by which()
@@ -367,6 +370,7 @@ def _run_age(argv: list[str], *, what: str, pass_fds: tuple[int, ...] = ()) -> b
             check=False,
             stdin=subprocess.DEVNULL,
             pass_fds=pass_fds,
+            umask=umask,
         )
     except OSError as error:
         raise DrillRefused(f"{what}: could not run {argv[0]}: {error.strerror}") from None
@@ -795,9 +799,46 @@ def _remove_temp_envelope(out_fd: int, temp_name: str) -> None:
         os.rmdir(temp_name, dir_fd=out_fd)
 
 
+#: the restored cleartext store's one mode (FIX-RT): the age child creates it under this
+#: umask, so ``0666 & ~0077`` makes it exactly 0600 at creation, whatever the caller's umask
+_DECRYPT_UMASK = 0o077
+
+
+def _require_owner_only(fd: int, what: str, absolute: Path) -> None:
+    """FIX-RT (Daybreak §7, LINE STOP #6): the restore target, judged by ``fstat`` on the
+    descriptor this process holds — never by its path — must be owned by the effective uid and
+    carry NO group or other permission bit. A target another uid can reach lets that uid read
+    the decrypted cleartext store, or replace it and the audit copies, while the drill runs."""
+
+    st = os.fstat(fd)
+    euid = os.geteuid()
+    if st.st_uid != euid:
+        raise DrillRefused(
+            f"{what} {absolute} is owned by uid {st.st_uid}, not this process's effective uid "
+            f"{euid}: its owner could read or replace the restored cleartext store; name an "
+            "absent path under a directory only you control (the drill creates it 0700)"
+        )
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        raise DrillRefused(
+            f"{what} {absolute} has mode {mode:04o}, which grants group or other access: another "
+            "uid could read or replace the restored cleartext store; name an absent path (the "
+            f"drill creates it 0700), or, if it is yours and empty, chmod 700 {absolute}"
+        )
+
+
 def _fresh_directory(target: Path, what: str) -> int:
     """The target must be absent or an empty directory, reached by the no-follow walk (a
-    symlinked ancestor or leaf is refused); created 0700 when absent. Returns its fd."""
+    symlinked ancestor or leaf is refused); created 0700 when absent. Either way it must then
+    be owned by the effective uid with no group or other bit (FIX-RT: by ``fstat`` on the held
+    descriptor; a directory that appears between the absence check and the ``mkdir`` is judged
+    like any pre-existing one). Returns its fd.
+
+    Ancestors are not judged here (FIX-RT's stated choice): every write into the target goes
+    through this held, owner-only descriptor, so an ancestor another uid can write lets it
+    rename the target away but not read or alter what is inside; the restore then reports
+    ``restore target swapped``. The N3-2 cutover, whose runbook names a fixed path, also
+    requires the leaf absent under a protected ancestor chain (``cutover_archive``)."""
 
     absolute = target if target.is_absolute() else Path.cwd() / target
     parent_fd, _parent = _walk_directory(absolute.parent, what, create=True)
@@ -806,8 +847,22 @@ def _fresh_directory(target: Path, what: str) -> int:
         try:
             fd = os.open(leaf, _DIR_FLAGS, dir_fd=parent_fd)
         except FileNotFoundError:
-            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
-            fd = os.open(leaf, _DIR_FLAGS, dir_fd=parent_fd)
+            try:
+                os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass  # it appeared after the open: judged below as a pre-existing directory
+            except OSError as error:
+                raise DrillRefused(
+                    f"{what} {absolute}: component {leaf!r} "
+                    f"{_component_problem(parent_fd, leaf, error)}"
+                ) from None
+            try:
+                fd = os.open(leaf, _DIR_FLAGS, dir_fd=parent_fd)
+            except OSError as error:
+                raise DrillRefused(
+                    f"{what} {absolute}: component {leaf!r} "
+                    f"{_component_problem(parent_fd, leaf, error)}"
+                ) from None
         except OSError as error:
             raise DrillRefused(
                 f"{what} {absolute}: component {leaf!r} "
@@ -818,6 +873,7 @@ def _fresh_directory(target: Path, what: str) -> int:
                 raise DrillRefused(
                     f"{what} {absolute} is not empty; the drill never restores over existing files"
                 )
+            _require_owner_only(fd, what, absolute)  # created 0700: a umask only narrows it
         except BaseException:
             os.close(fd)
             raise
@@ -1586,7 +1642,13 @@ def _decrypt_into(
 ) -> None:
     """``age -d -i <identity> -o <target>/chronos.db <envelope>/chronos.db.age`` through the
     two directory descriptors and the identity's descriptor (re-proved 0600, this uid). A
-    non-zero exit is a typed refusal and any partial output at the target is removed first."""
+    non-zero exit is a typed refusal and any partial output at the target is removed first.
+
+    FIX-RT: the age child runs under umask 0077 (set in the child alone), so the cleartext
+    file is created exactly 0600 — never wider at any instant, whatever this process's umask —
+    and is then proved by ``fstat`` (this uid, exactly 0600) before anything reads it; a
+    wider or foreign file is a typed refusal and is removed. The audit copies are created
+    0600 by ``_create_exclusive_at`` (a umask can only narrow them)."""
 
     identity_fd = _open_identity(keys.identity_path)
     try:
@@ -1604,7 +1666,9 @@ def _decrypt_into(
                 argv,
                 what=f"decryption of {encrypted_name}",
                 pass_fds=(identity_fd, target_fd, env_fd),
+                umask=_DECRYPT_UMASK,
             )
+            _require_private_output(target_fd, db_name)
         except DrillRefused:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(db_name, dir_fd=target_fd)  # nothing partial stays in the target
@@ -1612,6 +1676,24 @@ def _decrypt_into(
             raise
     finally:
         os.close(identity_fd)
+
+
+def _require_private_output(target_fd: int, db_name: str) -> None:
+    """The decrypted store, opened no-follow under the held target: a regular file owned by the
+    effective uid with mode exactly 0600 (FIX-RT), judged by ``fstat`` on that descriptor."""
+
+    fd = _open_regular_at(target_fd, db_name, "restored store")
+    try:
+        st = os.fstat(fd)
+        mode = stat.S_IMODE(st.st_mode)
+        if st.st_uid != os.geteuid() or mode != 0o600:
+            raise DrillRefused(
+                f"restored store {db_name} has mode {mode:04o} and owner uid {st.st_uid}; the "
+                f"decrypted cleartext must be exactly 0600 and this process's (effective uid "
+                f"{os.geteuid()}) — removed"
+            )
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True, slots=True)
