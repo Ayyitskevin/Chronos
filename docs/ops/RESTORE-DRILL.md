@@ -19,7 +19,7 @@ WAL-backed stores, which proves integrity and the fail-closed posture, not RPO/R
 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
 python -m chronos.operations.restore_drill \
   --db data/chronos.db \
-  --out /var/backups/chronos/$(date -u +%Y%m%d) \
+  --out /var/backups/chronos \
   --restore-into /var/backups/chronos/restore-$(date -u +%Y%m%dT%H%M%SZ) \
   --pretty
 ```
@@ -33,6 +33,12 @@ python -m chronos.operations.restore_drill \
   was written to the source in either case.
 
 The manifest is inside the envelope as `<stem>-<stamp>/manifest.json`.
+
+**`--out` is the pruner's root (N3-3 r6).** The envelope `chronos-<stamp>/` is published directly
+under `--out`, and the pruner (below) reads only the direct children of its `--root`. Publish
+under `/var/backups/chronos` and prune `/var/backups/chronos`, so the two commands meet. Older
+runs of this page used a dated `--out /var/backups/chronos/<YYYYMMDD>`; see the pruner section
+for how those are pruned.
 
 ## What the two numbers are — and are not
 
@@ -301,6 +307,23 @@ connection was proven to have opened; a manifest written before this field exist
 
 `python -m chronos.operations.backup_pruner --root /var/backups/chronos --pretty` lists what
 it WOULD delete and deletes nothing. Add `--apply` to delete.
+
+- **Which `--root`:** the directory the envelopes were published into (their `--out`), because
+  only its direct children are read; the pruner never descends into other directories.
+  - Backups made with the commands on this page and in [`N3-CUTOVER.md`](N3-CUTOVER.md) sit
+    directly under `/var/backups/chronos`: one run, the command above.
+  - Backups made earlier under a dated `--out` (`/var/backups/chronos/<YYYYMMDD>/chronos-<stamp>/`)
+    are pre-cutover backups too and fall under the same 90 days. They are not reached by the
+    run above (it lists each dated directory as `unclassified`). Prune each one with its own
+    run, dry run first:
+    ```bash
+    for d in /var/backups/chronos/[0-9]*/; do
+      python -m chronos.operations.backup_pruner --root "$d" --pretty
+    done
+    ```
+    Read every report, then repeat with `--apply` for the ones you accept. The cutover command
+    of an earlier page version used `--out /var/backups/chronos/n3`; if you ran that, add
+    `--root /var/backups/chronos/n3` to the same routine.
 
 - **What it deletes:** a published envelope `chronos-<stamp>/` whose own `manifest.json`
   records a pre-cutover schema (`schema_head` of `schema_version:N`, N below 18 — the archive
