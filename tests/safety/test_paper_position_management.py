@@ -952,10 +952,17 @@ def test_module_is_not_wired_into_the_production_runtime() -> None:
             )
             if imports_module or imports_module_directly:
                 importers.append(str(path.relative_to(source_root)))
-    # The default-off authenticated admission module is now the sole importer:
-    # it can register proven fills but is itself structurally absent from every
-    # runtime path (pinned in test_managed_position_admission.py).
-    assert importers == ["supervisor/position_admission.py"]
+    # Two importers, by name. The default-off authenticated admission module can
+    # register proven fills but is itself structurally absent from every runtime
+    # path (pinned in test_managed_position_admission.py). The N3 cutover archive
+    # (an owner-run operations CLI, never a runtime path) only REPLAYS every
+    # binding's stream through rehydrate_position to prove the position closed
+    # before the store is archived; it imports nothing that writes (pinned in
+    # tests/unit/test_ops_cutover_archive.py::test_6c_…).
+    assert sorted(importers) == [
+        "operations/cutover_archive.py",
+        "supervisor/position_admission.py",
+    ]
 
 
 def test_module_defines_no_parallel_authority_grant() -> None:

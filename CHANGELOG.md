@@ -1,5 +1,106 @@
 # CHANGELOG
 
+## [Unreleased] — the N3 cutover archive: flatten gate, encrypted archive, move-aside, runbook (N3-2, 2026-10-15)
+
+A new owner-run command, `python -m chronos.operations.cutover_archive --db … --out … --restore-into … [--apply]`,
+performs the (iii) cutover's archive step: it proves from the pre-cutover store alone — never the broker — that no
+managed position is open (every binding replays to a closed position), that the latest reconciliation run is
+`RECONCILED`, fresh (one hour) and recorded no broker position, that no writer lease is live and no write-ahead frames
+sit beside the store, and that the store is below the running `SCHEMA_VERSION`; then it runs the restore drill's
+encrypted envelope, requires `VERIFIED`, and ONLY THEN moves `chronos.db` (and present `-wal`/`-shm`) aside by
+`renameat2(RENAME_NOREPLACE)` to `<name>.archived-<envelope stamp>`. Dry-run by default; `--apply` moves. It never
+reads or prints `CHRONOS_PERSISTENCE_KEY`, never starts the service, never initializes the fresh database, never
+deletes. Runbook: `docs/ops/N3-CUTOVER.md` (the page migration 0017 names).
+
+r1 (Daybreak's review): ONE source capability spans gate, backup and move — the restore drill's new `BoundSource`
+holds the store open no-follow and proves its one `mode=ro` connection opened that very inode (by the descriptors
+the process gained; SQLite resolves even `/proc/self/fd/<n>` to a pathname before opening), the drill backs up
+through that connection, every manifest records the inode as `source_identity`, the sidecars present at the end of
+the gate are admitted and held, and the move re-proves every name against the held identities before and after
+each rename (a sidecar that appears later is never renamed: `left_in_place`). A retired-schema archive is verified
+through an `ArchiveBinding` the drill checks itself (version below the running `SCHEMA_VERSION`, the envelope's
+source identity, exact head) and reported as the distinct verdict `ARCHIVE_VERIFIED` with `acceptance:
+archive:<head>` — `VERIFIED` is only ever the repository's; the bare `archived_schema_head` string is gone. A new
+tool, `python -m chronos.operations.persistence_key_escrow`, reads the key from a non-echoing prompt (never the
+environment or argv), refuses anything but one 64-lowercase-hex line, encrypts to the backups' two recipients and
+proves the artifact decrypts back before reporting. The gate's one directory effect is named exactly (SQLite's
+reader bookkeeping beside a WAL-mode store) and tested without a filter; the runbook states the real lost-key
+boundary instead of promising this command. See `docs/ops/RESTORE-DRILL.md`, "Archiving a retired schema".
+
+r2 (Daybreak's r1 review): writers are EXCLUDED, not merely detected — before the gate the command takes a kernel
+read lease (`fcntl(F_SETLEASE)`) on the held, read-only store descriptor, which the kernel grants only while no
+process has the store open for writing and which blocks every writer's open until the command returns; a writer
+already holding the store is `WRITER_OPEN` before any fact is read, a lease the kernel will not grant is
+`WRITER_EXCLUSION_UNAVAILABLE`, and the lease is re-read before the drill, before the first rename and after the
+last. At the move every admitted sidecar is leased likewise and the admitted `-wal` is re-proved frame-free by
+`fstat` on its held descriptor before and after the renames (the same inode can grow in place); a foreign entry
+the final syscall moved is renamed back by name and reported in `foreign_renamed`, with `moved_aside`/`not_moved`
+exact; `ARCHIVED` reports carry the `exclusion` proof. The public `ArchiveBinding` is gone: the flatten gate, at its
+end and only then, admits the still-open `BoundSource` as the archive's source, the drill's `run_drill`/`restore`/
+`verify_restored` take the capability itself (`source=`), and a store the gate refused can never be
+`ARCHIVE_VERIFIED`. The escrow tool verifies through the descriptor it holds and, on failure, unlinks the output
+name only when it still is the file this run created, reporting `created_artifact` either way. Run the cutover
+command as the user that owns the store (the lease needs the file's owner).
+
+r3 (Daybreak's r2 review): **the live namespace is never vacant** — the move no longer renames the store away
+from its name; it EXCHANGES it (`renameat2(RENAME_EXCHANGE)`, one syscall per admitted file, store first) with a
+0500 sentinel directory the command makes at the archive name, so `data/chronos.db` is at no instant absent and,
+after the command exits, `chronos.db`, `-wal`, `-shm` and `-journal` are all sentinel directories until the
+owner's own `rmdir` (runbook step 7): every Chronos writer refuses a non-regular path and makes no file, a
+sqlite3 shell cannot open a directory, a rename cannot replace one with a file — a store the gate never saw
+cannot appear at the live name. A live name the gate did not admit (a `-wal`/`-shm` that appeared after
+admission, a `-journal` — also refused at the gate) is `LIVE_NAME_OCCUPIED` with nothing moved (`left_in_place`
+is retired); every exchange is re-proved on both names and reversed by exchanging back on a mismatch; after the
+last exchange the report proves `live_names_sealed` beside the lease/WAL proof and lists `sentinels` with where
+each is now — the command removes none. **The archive admission is minted nowhere a caller can reach**: the
+capability carries no admission state or method; `restore`/`verify_restored` take no capability and no
+admission; `run_drill(source=)` yields `VERIFIED`/`FAILED` alone; the new `run_archive_drill(source, …, now=)`
+runs the flatten gate ITSELF over the capability it is handed, builds the admission from that run inside its
+own frame, and is the only producer of `ARCHIVE_VERIFIED` (the cutover's `--apply` calls it). **The escrow tool
+deletes nothing after a post-create failure** (Linux has no unlink-by-descriptor): `created_artifact` names
+the ciphertext this run created by path and device:inode, `removed` is always `false`, and the owner shreds it.
+Trust root stated for review: the adversary does not hold the store owner's uid or root.
+
+r4 (Daybreak's r3 review): **the sentinels' parent must be owner-private.** Removing an empty directory is
+authorized by write permission on its PARENT, not by its own mode, so a 0500 sentinel inside the documented
+`mkdir -p data` under umask 002 (0775, group-writable) could be removed by any uid in the group. The command now
+refuses — `PARENT_NOT_PRIVATE` — unless `data/` is a directory owned by the effective uid with no group or other
+write bit, before the source is even opened (dry-run and apply alike: no envelope, no reader bookkeeping) and again
+on the descriptor the exchanges use; `exclusion.parent` / `planned.parent` record it; the sticky bit is not
+consulted. `docs/DEPLOYMENT.md` creates `data/` 0700 (`chmod 0700 data` after `mkdir -p`) and the cutover runbook
+gains the owner pre-step. **No module-level archive-acceptance authority remains.** The `_ArchiveAdmission` value
+and the admission-taking `_verify_in`/`_restore_verified` are gone: every function the drill defines at module
+scope performs the repository's acceptance only, and the N3-2 archive's acceptance — the gated inode, the exact
+head the gate read — is a closure inside `run_archive_drill`'s own frame, the only producer of `ARCHIVE_VERIFIED`.
+A plain-import pin drives every module-level function, underscore names included, on a gate-refused store and
+proves none returns a verified report or an `archive:` acceptance.
+
+r5 (Daybreak's r4 review): **the protected path.** The sentinels' guarantee is narrowed to an explicitly protected
+trust root: every directory from `/` down to `data/` must be a real directory (no symlink) owned by root or the
+effective uid with no group or other write bit — a `/tmp`-style sticky world-writable directory is refused too (other
+uids can still create entries there; outside the supported deployment). The chain is walked by name without
+following links before the source is opened (`PATH_NOT_PROTECTED`, dry-run and apply, nothing created), every
+ancestor is held open (`O_PATH|O_NOFOLLOW|O_DIRECTORY`) through the last report, and the chain is re-proved on the
+move path and at report time: a `data/` renamed away and replaced under the same path is `PATH_DISPLACED` — nothing
+moved, or `MOVE_INCOMPLETE` with `moved_aside` exact inside the held directory, named by inode — never `ARCHIVED`.
+`exclusion.protected_path` / `planned.protected_path` carry the chain; the runbook's pre-step asks for `ls -ld` of
+each ancestor and `DEPLOYMENT.md` says where the checkout may live. **No verifier object exists.** The archive
+acceptance and the report are inlined in `run_archive_drill`'s body — no function, lambda or class is defined there
+— so nothing callable closes over the gate run's values and a caller-supplied `Clock` that walks the frames retains
+nothing that can archive-verify a store mutated after the gate (pinned). **Trust root, stated in code, docs and
+receipt:** (a) the adversary lacks the store owner's uid and root; (b) code in the same Python process is trusted —
+it could replace `flatten_gate` itself — and the guarantee against it is only that no verifier object outlives or
+escapes the drill; (c) the database path's ancestor chain is the protected trust root above.
+
+r6 (Daybreak's r5 review): **no normalisation before the no-follow walk.** POSIX resolves `safe/link/../data` THROUGH
+the link (to `unsafe/data`), while `os.path.normpath` collapsed it to `safe/data` — so a `symlink/..` alias proved an
+owner-private decoy chain, the dry-run accepted it and the apply published an envelope before the move's re-walk by
+name raised an untyped refusal. Now the raw path's components are walked as given: any `..` component is refused
+outright (`PATH_NOT_PROTECTED`, naming it — give the store's real path) before the source is opened, dry-run and
+apply alike; the source is opened by its last component relative to the held `data/` descriptor
+(`open_bound_source(..., dir_fd=)`), and the move works through that same held leaf (`openat(".")` on it) instead of
+re-walking the path by name, so no late, untyped refusal can arise. The runbook's pre-step says to give the real path.
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
