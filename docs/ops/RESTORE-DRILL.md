@@ -341,8 +341,13 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
 - **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
   `--now`. Output is JSON of counts, names and fixed reasons only — no manifest value and no
   file name from inside an envelope is ever echoed.
-- **Not covered:** the cleartext copies `--restore-into` writes are wherever you pointed them,
-  outside the backup root; remove those by hand when the drill is done. Off-host copies of an
+- **Restore copies:** under the default targets above (`/var/backups/chronos/restore-<stamp>`,
+  `/var/backups/chronos/n3-verify`) the cleartext copies `--restore-into` writes sit INSIDE the
+  backup root. The pruner reports each as `unclassified` ("not a published envelope name") and
+  never deletes it (measured: a dry run and an `--apply` left such a directory byte-identical).
+  Removing them is a by-hand owner step; their lifetime is the open decision stated under
+  "The isolation rule". A target pointed elsewhere is outside the root and equally yours to
+  remove. **Not covered:** off-host copies of an
   envelope are yours to prune too.
 
 ## What a FAILED verdict means
