@@ -1,4 +1,4 @@
-"""N3-3 r6 (Daybreak P2-1): the pruner invocations the runbooks document must reach the
+"""N3-3 r6/r7 (Daybreak): the pruner invocations the runbooks document must reach the
 envelopes the runbooks' backup commands publish.
 
 The layout is not hand-built: every ``--out``, ``--restore-into`` and ``--root`` value below is
@@ -10,10 +10,12 @@ prunes keeps every envelope forever, which is what 21f021c documented.
 
 from __future__ import annotations
 
-import glob
 import hashlib
 import os
 import re
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -46,12 +48,23 @@ def _flag(document: str, command: str, flag: str) -> str:
     raise AssertionError(f"no fenced command running {command!r} with {flag}")
 
 
-def _pruner_roots() -> list[str]:
-    """Every ``--root`` the RESTORE-DRILL pruner section documents (quotes stripped)."""
-    section = RESTORE_DRILL.split("## Pruning old backups", 1)[1]
-    return [
-        value.strip('"') for value in re.findall(rf"{re.escape(PRUNER_CMD)} --root (\S+)", section)
-    ]
+def _pruner_section() -> str:
+    return RESTORE_DRILL.split("## Pruning old backups", 1)[1]
+
+
+def _default_root() -> str:
+    """The ``--root`` of the one-line default pruner command."""
+    found = re.search(rf"{re.escape(PRUNER_CMD)} --root (\S+)", _pruner_section())
+    assert found, "the pruner section documents no default --root"
+    return found.group(1)
+
+
+def _legacy_routine() -> str:
+    """The fenced shell block that prunes pre-r6 layouts, exactly as the owner would run it."""
+    for block in re.findall(r"```bash\n(.*?)```", _pruner_section(), flags=re.S):
+        if "for d in" in block:
+            return textwrap.dedent(block)
+    raise AssertionError("the pruner section documents no per-directory routine")
 
 
 def _digest(directory: Path) -> list[tuple[str, str]]:
@@ -77,63 +90,119 @@ def _on_host(host: Path, documented: str) -> Path:
     return host / documented[len(BACKUP_ROOT) :].lstrip("/")
 
 
-def test_the_documented_pruner_runs_reach_every_documented_backup_out_directory(host: Path) -> None:
-    ordinary_out = _flag(RESTORE_DRILL, "operations.restore_drill", "--out")
-    cutover_out = _flag(CUTOVER, "operations.cutover_archive", "--out")
-    restore_targets = [
-        _flag(RESTORE_DRILL, "operations.restore_drill", "--restore-into"),
-        _flag(CUTOVER, "operations.cutover_archive", "--restore-into"),
-    ]
-    out_dirs = {"ordinary": _on_host(host, ordinary_out), "cutover": _on_host(host, cutover_out)}
+SHIM = """\
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from chronos.operations import backup_pruner
+args = sys.argv[1:]
+with open(sys.argv[0] + ".log", "a", encoding="utf-8") as log:
+    log.write(args[args.index("--root") + 1] + "\\n")
+sys.exit(backup_pruner.main(args, clock=lambda: datetime({y}, {m}, {d}, 12, tzinfo=UTC)))
+"""
 
+
+def _run_routine(
+    host: Path, tmp_path: Path, *, apply: bool
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the documented shell routine under bash, hermetically.
+
+    Only two substitutions: the backup root maps onto the test host, and the pruner module
+    invocation maps onto a shim that pins the clock (the module itself is the real one).
+    """
+    shim = tmp_path / "prune_shim.py"
+    shim.write_text(SHIM.format(y=NOW.year, m=NOW.month, d=NOW.day), encoding="utf-8")
+    script = (
+        _legacy_routine()
+        .replace(BACKUP_ROOT, str(host))
+        .replace(PRUNER_CMD, f"{sys.executable} {shim}")
+    )
+    assert str(host) in script and str(shim) in script, (
+        "the routine no longer names the backup root / pruner"
+    )
+    env = {
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": str(ROOT / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PRUNE_FLAGS": "--apply" if apply else "",
+    }
+    done = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+    log = Path(str(shim) + ".log")
+    return done, (log.read_text(encoding="utf-8").split() if log.exists() else [])
+
+
+def _restore_dir(path: Path) -> Path:
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    (path / "chronos.db").write_bytes(b"CLEARTEXT-STORE-" + path.name.encode())
+    os.chmod(path / "chronos.db", 0o600)
+    return path
+
+
+def test_the_documented_runs_reach_every_documented_backup_out_directory(
+    host: Path, tmp_path: Path
+) -> None:
+    ordinary = _on_host(host, _flag(RESTORE_DRILL, "operations.restore_drill", "--out"))
+    cutover = _on_host(host, _flag(CUTOVER, "operations.cutover_archive", "--out"))
+    restores = [
+        _restore_dir(
+            _on_host(host, _flag(RESTORE_DRILL, "operations.restore_drill", "--restore-into"))
+        ),
+        _restore_dir(
+            _on_host(host, _flag(CUTOVER, "operations.cutover_archive", "--restore-into"))
+        ),
+    ]
     old: list[Path] = []
     young: list[Path] = []
-    for age_old, age_young, out in (
-        (120, 30, out_dirs["ordinary"]),
-        (200, 45, out_dirs["cutover"]),
-    ):
+    for out, age_old, age_young in ((ordinary, 120, 30), (cutover, 200, 45)):
         old.append(make_envelope(out, age_old))
         young.append(make_envelope(out, age_young))
 
-    # A real host may also hold the older dated layout (the 21f021c runbook's --out).
-    legacy = host / NOW.strftime("%Y%m%d")
-    legacy_old = make_envelope(legacy, 150)
-    legacy_young = make_envelope(legacy, 20)
-    if legacy not in out_dirs.values():
-        old.append(legacy_old)
-        young.append(legacy_young)
+    # Layouts older page versions produced: a dated --out and the earlier cutover /n3.
+    for legacy in (host / NOW.strftime("%Y%m%d"), host / "n3"):
+        if legacy not in (ordinary, cutover):
+            old.append(make_envelope(legacy, 150))
+            young.append(make_envelope(legacy, 20))
 
-    restores = [_on_host(host, target) for target in restore_targets]
-    for target in restores:
-        target.mkdir(parents=True, mode=0o700, exist_ok=True)
-        (target / "chronos.db").write_bytes(b"CLEARTEXT-STORE-" + target.name.encode())
-        os.chmod(target / "chronos.db", 0o600)
-    restore_before = [_digest(target) for target in restores]
+    # Things the routine must never enter: a digit-prefixed restore copy, an unrelated
+    # digit-prefixed directory holding a VALID old envelope, and a symlink root.
+    keep_digest = [_digest(_restore_dir(host / (NOW.strftime("%Y%m%d") + "-restore")))]
+    unrelated = make_envelope(host / "7-unrelated", 300)
+    elsewhere = tmp_path / "elsewhere"
+    linked = make_envelope(elsewhere, 300)
+    keep_digest += [_digest(r) for r in restores]
+    untouched = [unrelated, linked]
 
-    roots = _pruner_roots()
-    assert roots, "the pruner section documents no --root"
-    invoked: list[Path] = []
-    for documented in roots:
-        if any(ch in documented for ch in "$*["):
-            # The documented per-directory loop: expand its glob exactly as the shell would.
-            glob_text = re.search(
-                rf"for \w+ in ({re.escape(BACKUP_ROOT)}/\[0-9\]\*/); do", RESTORE_DRILL
-            )
-            assert glob_text, "a per-directory --root is documented without its loop"
-            pattern = str(_on_host(host, glob_text.group(1).rstrip("/"))) + "/"
-            invoked += [Path(p.rstrip("/")) for p in sorted(glob.glob(pattern))]
-        else:
-            invoked.append(_on_host(host, documented))
-    assert invoked, "the documented --root values reach no directory on the test host"
+    # The default one-line run first: a symlink anywhere under its root would refuse it.
+    assert _default_root() == BACKUP_ROOT
+    code, report, _ = run_cli(host, "--apply")
+    assert code in (pruner.EXIT_PRUNED, 0), report
+    (host / "8-link").symlink_to(elsewhere)
+    done, invoked = _run_routine(host, tmp_path, apply=True)
+    assert "Traceback" not in done.stderr, done.stderr
 
-    for directory in invoked:
-        code, report, _ = run_cli(directory, "--apply")
-        assert code in (pruner.EXIT_PRUNED, 0), (directory, report)
+    assert not any(path.exists() for path in old), "an envelope older than 90 days survived"
+    assert all(path.exists() for path in young + untouched), "a young or out-of-scope envelope went"
+    assert str(host / "8-link") not in invoked, "the routine invoked the pruner on a symlink root"
+    assert str(host / "7-unrelated") not in invoked
+    assert all(Path(root).name in {NOW.strftime("%Y%m%d"), "n3"} for root in invoked), invoked
+    assert [_digest(host / (NOW.strftime("%Y%m%d") + "-restore"))] + [
+        _digest(r) for r in restores
+    ] == keep_digest
+    assert (host / "8-link").is_symlink()
 
-    survivors = {path for path in host.rglob("chronos-*") if path.is_dir()}
-    assert survivors == set(young), "an envelope older than 90 days survived, or a young one went"
-    assert not any(path.exists() for path in old)
-    assert [_digest(target) for target in restores] == restore_before
+
+def test_the_routine_is_dry_run_first_and_a_host_with_no_legacy_directory_is_a_no_op(
+    host: Path, tmp_path: Path
+) -> None:
+    done, invoked = _run_routine(host, tmp_path, apply=False)
+    assert "Traceback" not in done.stderr, done.stderr
+    assert invoked == [], "the routine invoked the pruner on a literal, unmatched glob"
+    legacy = make_envelope(host / NOW.strftime("%Y%m%d"), 400)
+    done, invoked = _run_routine(host, tmp_path, apply=False)
+    assert invoked == [str(legacy.parent)]
+    assert legacy.is_dir(), "the dry run deleted"
 
 
 def test_restore_targets_stay_unclassified_at_the_default_root(host: Path) -> None:
@@ -141,9 +210,7 @@ def test_restore_targets_stay_unclassified_at_the_default_root(host: Path) -> No
         _flag(RESTORE_DRILL, "operations.restore_drill", "--restore-into"),
         _flag(CUTOVER, "operations.cutover_archive", "--restore-into"),
     ):
-        target = _on_host(host, documented)
-        target.mkdir(parents=True, mode=0o700, exist_ok=True)
-        (target / "chronos.db").write_bytes(b"x")
+        _restore_dir(_on_host(host, documented))
     code, report, _ = run_cli(host, "--apply")
     assert code == 0
     reasons = {item["name"]: item["why"] for item in report["unclassified"]}  # type: ignore[union-attr, index]
