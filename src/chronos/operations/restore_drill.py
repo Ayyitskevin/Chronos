@@ -906,7 +906,8 @@ class BoundSource:
 
     The capability carries NO archive admission (r3, Daybreak P1-2): a retired-schema archive is
     verified only by :func:`run_archive_drill`, which runs the flatten gate itself over the
-    capability it is handed and keeps that run's acceptance as a closure in its own frame (r4).
+    capability it is handed and verifies by that run inline in its own body — no closure, no
+    verifier object (r5).
 
     :meth:`exclude_writers` (r2) takes the kernel read lease on ``fd`` (see :func:`_lease_read`):
     from that instant no process can hold or obtain a write-capable open on the store, and
@@ -1855,16 +1856,18 @@ def run_archive_drill(
     keys: AgeKeys | None = None,
 ) -> tuple[GateReport, DrillReport]:
     """The N3-2 cutover's drill over an OPEN bound source — the only producer of
-    ``ARCHIVE_VERIFIED`` (r3), with the archive acceptance held in THIS frame's lexical closure
-    (r4, Daybreak r3 P1-2). It runs the REAL flatten gate (``cutover_archive.flatten_gate``)
+    ``ARCHIVE_VERIFIED`` (r3). It runs the REAL flatten gate (``cutover_archive.flatten_gate``)
     over ``source`` here: a store the gate refuses raises the gate's own refusal and nothing is
-    created. The acceptance of that run — the envelope must record the gated inode, the
-    restored copy must carry exactly the head the gate read, a retired one — is a nested
-    function closing over the run's values: it is not a value, not a type, and not a parameter
-    of any function at module scope; ``_verify_in``, ``restore`` and every other module-level
-    function perform the repository's acceptance only, so no caller can verify an ungated store
-    as an archive through anything this module exports or defines. Then backup → rpo →
-    restore, verified by that closure. Returns the gate's report with the drill's."""
+    created. The acceptance of that run — the envelope must record the gated inode, the restored
+    copy must carry exactly the head the gate read, a retired one — and the report are INLINED
+    in this body (r5, Daybreak r4 P1-2): no function, lambda or class is defined here, so nothing
+    callable closes over the run's values, and nothing a caller-supplied ``Clock`` can retain by
+    walking the frames outlives or escapes this call — the frame's locals are plain values.
+    ``_verify_in``, ``restore`` and every other module-level function perform the repository's
+    acceptance only. Trust root, stated: code running in the same Python process is trusted (it
+    could replace ``flatten_gate`` itself); the guarantee against it is only that no verifier
+    object outlives or escapes the drill. Then backup → rpo → restore, verified by this run.
+    Returns the gate's report with the drill's."""
 
     from chronos.operations.cutover_archive import flatten_gate  # the cycle is function-local
 
@@ -1879,83 +1882,72 @@ def run_archive_drill(
     admitted_head = gate.schema_head
     admitted_identity = source.identity
     acceptance = f"archive:{admitted_head}"
-
-    def archive_problems(manifest: BackupManifest, restored_head: str) -> list[str]:
-        """Every way the envelope and the restored copy fail to be THIS gate run's archive."""
-
-        problems: list[str] = []
-        if manifest.source_identity is None or (
-            tuple(manifest.source_identity) != tuple(admitted_identity)
-        ):
-            recorded = (
-                "none"
-                if manifest.source_identity is None
-                else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
-            )
-            problems.append(
-                f"archive: the envelope's source identity {recorded} is not the gated source "
-                f"{admitted_identity[0]}:{admitted_identity[1]} (device:inode); the backup was "
-                "not of the gated object"
-            )
-        if restored_head != admitted_head:
-            problems.append(
-                f"schema_head: restored {restored_head} != archive head {admitted_head}; a "
-                "retired-schema archive is verified by exact head"
-            )
-        return problems
-
-    def verify_archive(
-        manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
-    ) -> tuple[list[str], dict[str, bool | str]]:
-        # an archive of a RETIRED schema: the running repository refuses that version by
-        # design, so this frame's acceptance replaces it — nothing is opened by pathname and
-        # nothing is initialized on the copy (no T-3 name check is needed: the copy's bytes are
-        # the held descriptor's; head and counts came through _readonly_fd)
-        fd, failures, facts, head, counts = _open_copy(manifest, target_fd)
-        os.close(fd)
-        problems = archive_problems(manifest, head)
-        failures.extend(problems)
-        facts["acceptance"] = acceptance
-        _finish_verification(
-            manifest, target_fd, target_abs, has_audit, head, counts, failures, facts
-        )
-        facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
-        return failures, facts
-
-    def restore_archive(manifest: BackupManifest) -> RestoreReport:
-        started = clock.monotonic()
-        with _staged_restore(manifest, restore_into, keys) as staged:
-            if staged.decrypt_refused is not None:
-                return RestoreReport(
-                    target_dir=str(staged.target_abs),
-                    restored_path=str(staged.target_abs / manifest.cleartext_name),
-                    sha256_ok=False,
-                    schema_head_ok=False,
-                    row_counts_ok=False,
-                    audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
-                    failures=(f"decrypt: refused — {staged.decrypt_refused}",),
-                    rto_s=clock.monotonic() - started,
-                    acceptance=acceptance,
-                )
-            failures, facts = verify_archive(
-                manifest, staged.target_fd, staged.target_abs, staged.has_audit
-            )
-            failures.extend(_target_swapped_after(staged))
-        return RestoreReport(
-            target_dir=str(staged.target_abs),
-            restored_path=str(staged.target_abs / manifest.cleartext_name),
-            sha256_ok=bool(facts["sha256_ok"]),
-            schema_head_ok=bool(facts["schema_head_ok"]),
-            row_counts_ok=bool(facts["row_counts_ok"]),
-            audit_chain=str(facts["audit_chain"]),
-            failures=tuple(failures),
-            rto_s=clock.monotonic() - started,
-            acceptance=acceptance,
-        )
-
     manifest = backup(source.path, out_dir, clock=clock, keys=keys, source=source)
     failures, rpo, basis = _rpo_or_refusal(manifest, keys)
-    report = restore_archive(manifest)
+    # the restore, verified by THIS gate run — inline, nothing callable holds the run's values
+    started = clock.monotonic()
+    restore_failures: list[str]
+    facts: dict[str, bool | str]
+    with _staged_restore(manifest, restore_into, keys) as staged:
+        if staged.decrypt_refused is not None:
+            restore_failures = [f"decrypt: refused — {staged.decrypt_refused}"]
+            facts = {
+                "sha256_ok": False,
+                "schema_head_ok": False,
+                "row_counts_ok": False,
+                "audit_chain": "NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
+            }
+        else:
+            # an archive of a RETIRED schema: the running repository refuses that version by
+            # design, so this run's acceptance replaces it — nothing is opened by pathname and
+            # nothing is initialized on the copy (the copy's bytes are the held descriptor's;
+            # head and counts came through _readonly_fd)
+            fd, restore_failures, facts, head, counts = _open_copy(manifest, staged.target_fd)
+            os.close(fd)
+            problems: list[str] = []
+            if manifest.source_identity is None or (
+                tuple(manifest.source_identity) != tuple(admitted_identity)
+            ):
+                recorded = (
+                    "none"
+                    if manifest.source_identity is None
+                    else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
+                )
+                problems.append(
+                    f"archive: the envelope's source identity {recorded} is not the gated "
+                    f"source {admitted_identity[0]}:{admitted_identity[1]} (device:inode); the "
+                    "backup was not of the gated object"
+                )
+            if head != admitted_head:
+                problems.append(
+                    f"schema_head: restored {head} != archive head {admitted_head}; a "
+                    "retired-schema archive is verified by exact head"
+                )
+            restore_failures.extend(problems)
+            facts["acceptance"] = acceptance
+            _finish_verification(
+                manifest,
+                staged.target_fd,
+                staged.target_abs,
+                staged.has_audit,
+                head,
+                counts,
+                restore_failures,
+                facts,
+            )
+            facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
+            restore_failures.extend(_target_swapped_after(staged))
+    report = RestoreReport(
+        target_dir=str(staged.target_abs),
+        restored_path=str(staged.target_abs / manifest.cleartext_name),
+        sha256_ok=bool(facts["sha256_ok"]),
+        schema_head_ok=bool(facts["schema_head_ok"]),
+        row_counts_ok=bool(facts["row_counts_ok"]),
+        audit_chain=str(facts["audit_chain"]),
+        failures=tuple(restore_failures),
+        rto_s=clock.monotonic() - started,
+        acceptance=acceptance,
+    )
     failures.extend(report.failures)
     return gate, DrillReport(
         manifest=manifest,

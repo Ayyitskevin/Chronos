@@ -104,12 +104,6 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R5_P1_2 = (
-    "r5 P1-2: at d3ac84c run_archive_drill defines nested verifier callables that a "
-    "caller-supplied Clock can retain by walking the frames and apply to a store mutated after "
-    "the gate"
-)
-RED_R5_P1_2 = pytest.mark.xfail(strict=True, reason=_R5_P1_2)
 
 
 def _chain_problem(path: Path) -> str | None:
@@ -1786,7 +1780,6 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
         source.close()
 
 
-@RED_R5_P1_2
 def test_8j_a_hostile_clock_walking_the_frames_retains_no_verifier_for_a_mutated_store(
     tmp_path: Path,
 ) -> None:
@@ -1879,7 +1872,6 @@ def test_8j_a_hostile_clock_walking_the_frames_retains_no_verifier_for_a_mutated
         mutated.close()
 
 
-@RED_R5_P1_2
 def test_8k_run_archive_drill_defines_no_nested_callable() -> None:
     """The structural half of 8j: the gate-bound archive checks and the report construction are
     inlined in ``run_archive_drill``'s body — no function, lambda or class is defined inside it
