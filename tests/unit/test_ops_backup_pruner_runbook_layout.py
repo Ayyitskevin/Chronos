@@ -11,6 +11,7 @@ prunes keeps every envelope forever, which is what 21f021c documented.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -272,3 +273,27 @@ def test_the_pruner_invocation_takes_its_flags_only_from_the_quoted_validated_ar
     assert invocation[0].rstrip().endswith('--root "$d" --pretty "${prune_flags[@]}"')
     assert "PRUNE_FLAGS" not in invocation[0]
     assert routine.index("prune_flags=") < routine.index("for d in")
+
+
+def test_the_block_status_can_be_zero_after_a_refusal_and_the_runbook_says_so(
+    host: Path, tmp_path: Path
+) -> None:
+    """r9 (Daybreak r8 P2-1): an exact-date root whose pruner REFUSES, with ``n3`` missing.
+
+    The refusal is in the pruner's own report; the block's status is whatever bash leaves after
+    the skipped ``n3`` iteration, which is observed here, not assumed. The runbook must not
+    describe that status as the last pruner's.
+    """
+    legacy = host / NOW.strftime("%Y%m%d")
+    envelope = make_envelope(legacy, 150)
+    (envelope / "linked").symlink_to(tmp_path)  # a symlink inside an envelope refuses the run
+    assert not (host / "n3").exists()
+    done, invoked = _run_routine(host, tmp_path, flags="--apply")
+    assert invoked == [str(legacy)]
+    report = json.loads(done.stdout)
+    assert report["exit"] == pruner.EXIT_REFUSED == 2, report
+    assert envelope.is_dir(), "a refused run deleted"
+    assert done.returncode == 0, "the observed block status after a refusal and a skipped n3"
+    section = _pruner_section()
+    assert "only the LAST pruner" not in section
+    assert "not reliable evidence about any pruner" in section
