@@ -75,6 +75,23 @@ head the gate read — is a closure inside `run_archive_drill`'s own frame, the 
 A plain-import pin drives every module-level function, underscore names included, on a gate-refused store and
 proves none returns a verified report or an `archive:` acceptance.
 
+r5 (Daybreak's r4 review): **the protected path.** The sentinels' guarantee is narrowed to an explicitly protected
+trust root: every directory from `/` down to `data/` must be a real directory (no symlink) owned by root or the
+effective uid with no group or other write bit — a `/tmp`-style sticky world-writable directory is refused too (other
+uids can still create entries there; outside the supported deployment). The chain is walked by name without
+following links before the source is opened (`PATH_NOT_PROTECTED`, dry-run and apply, nothing created), every
+ancestor is held open (`O_PATH|O_NOFOLLOW|O_DIRECTORY`) through the last report, and the chain is re-proved on the
+move path and at report time: a `data/` renamed away and replaced under the same path is `PATH_DISPLACED` — nothing
+moved, or `MOVE_INCOMPLETE` with `moved_aside` exact inside the held directory, named by inode — never `ARCHIVED`.
+`exclusion.protected_path` / `planned.protected_path` carry the chain; the runbook's pre-step asks for `ls -ld` of
+each ancestor and `DEPLOYMENT.md` says where the checkout may live. **No verifier object exists.** The archive
+acceptance and the report are inlined in `run_archive_drill`'s body — no function, lambda or class is defined there
+— so nothing callable closes over the gate run's values and a caller-supplied `Clock` that walks the frames retains
+nothing that can archive-verify a store mutated after the gate (pinned). **Trust root, stated in code, docs and
+receipt:** (a) the adversary lacks the store owner's uid and root; (b) code in the same Python process is trusted —
+it could replace `flatten_gate` itself — and the guarantee against it is only that no verifier object outlives or
+escapes the drill; (c) the database path's ancestor chain is the protected trust root above.
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
