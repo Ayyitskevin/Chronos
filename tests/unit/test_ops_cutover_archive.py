@@ -988,6 +988,15 @@ def test_5g_fix_rt_the_runbook_target_is_out_of_tmp_and_the_stop_is_in_the_docum
     assert "/tmp/chronos-n3-verify" not in text
     assert "--restore-into /var/backups/chronos/n3-verify" in text
     assert "`RESTORE_TARGET_NOT_PROTECTED`" in text and "`RESTORE_TARGET_NOT_FRESH`" in text
+    # r1 (Daybreak P2-1): the check must be TIP-sensitive — a historical `git log -- <path>` still
+    # prints after the path is removed from main, so it could false-pass after a revert of N3-3
+    pruner_check = (
+        "git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py"
+    )
+    assert f"`{pruner_check}`" in text
+    assert "`git fetch origin main`" in text and "exit zero" in flat
+    assert flat.index("`git fetch origin main`") < flat.index(pruner_check)
+    assert not re.search(r"git log[^`\n]*backup_pruner\.py", text), "historical check form"
     module = MODULE.read_text(encoding="utf-8")
     assert "/tmp/chronos-n3-verify" not in module
     assert "--restore-into /var/backups/chronos/n3-verify" in module
