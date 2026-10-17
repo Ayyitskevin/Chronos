@@ -179,18 +179,20 @@ def test_the_documented_runs_reach_every_documented_backup_out_directory(
     code, report, _ = run_cli(host, "--apply")
     assert code in (pruner.EXIT_PRUNED, 0), report
     (host / "8-link").symlink_to(elsewhere)
+    (host / "20261016").symlink_to(elsewhere)  # an exact-date NAME that is a symlink
     done, invoked = _run_routine(host, tmp_path, apply=True)
     assert "Traceback" not in done.stderr, done.stderr
 
     assert not any(path.exists() for path in old), "an envelope older than 90 days survived"
     assert all(path.exists() for path in young + untouched), "a young or out-of-scope envelope went"
-    assert str(host / "8-link") not in invoked, "the routine invoked the pruner on a symlink root"
+    for link in ("8-link", "20261016"):
+        assert str(host / link) not in invoked, f"the routine invoked the pruner on symlink {link}"
     assert str(host / "7-unrelated") not in invoked
     assert all(Path(root).name in {NOW.strftime("%Y%m%d"), "n3"} for root in invoked), invoked
     assert [_digest(host / (NOW.strftime("%Y%m%d") + "-restore"))] + [
         _digest(r) for r in restores
     ] == keep_digest
-    assert (host / "8-link").is_symlink()
+    assert (host / "8-link").is_symlink() and (host / "20261016").is_symlink()
 
 
 def test_the_routine_is_dry_run_first_and_a_host_with_no_legacy_directory_is_a_no_op(
