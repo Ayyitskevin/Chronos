@@ -99,6 +99,15 @@ lives there, including the sentinel directories the N3 cutover relies on
 ([`docs/ops/N3-CUTOVER.md`](ops/N3-CUTOVER.md), which refuses a `data/` that is not 0700-class:
 `PARENT_NOT_PRIVATE`). The files inside are 0600 regardless; the directory needs the same care.
 
+So does every directory above it. A path is only as safe as its weakest ancestor: a uid that can
+write any directory between `/` and `data/` can rename `data/` away and plant a replacement under
+the same path. Put the checkout under a chain of real directories (no symlinks) each owned by root
+or by the service user with no group or other write bit — `/srv/chronos`-style, never under
+`/tmp` or another sticky world-writable directory — and check it once with `ls -ld` on each
+ancestor (`ls -ld / /srv /srv/chronos /srv/chronos/data`: no `w` in the group or other columns).
+The N3 cutover refuses any other chain (`PATH_NOT_PROTECTED`) and holds every ancestor open
+while it works.
+
 A fresh deployment reports `TRADING HALTED | reason: NEVER_ARMED`. That is correct: a new
 deployment starts halted until the operator arms it once
 (`src/chronos/control/halt.py`). Note the CLI's default paths (`data/platform_halt.json`,

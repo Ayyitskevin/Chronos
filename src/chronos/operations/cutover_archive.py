@@ -109,11 +109,23 @@ module does not touch the environment or ``Settings`` — the drill reads its ow
 variables); never starts the service; never initializes the fresh database; never opens the
 old store for writing; never deletes anything — the sentinel directories it leaves at the four
 live names included: the owner's ``rmdir`` vacates them. Runbook: ``docs/ops/N3-CUTOVER.md``.
+
+Trust root (r5, stated for review): (a) the adversary does not hold the store owner's uid or
+root; (b) code running in the same Python process is trusted — it could replace ``flatten_gate``
+itself — and the drill's guarantee against it is only that no verifier object outlives or escapes
+``run_archive_drill``; (c) the database path's ancestor chain is the protected trust root: every
+directory from ``/`` down to ``data/`` is a real directory owned by root or the effective uid
+with no group or other write bit (a ``/tmp``-style sticky world-writable directory is outside
+it), proved before the source is opened, held open through the last report, and re-proved on the
+move path and at report time (``PATH_NOT_PROTECTED``, ``PATH_DISPLACED``). Within it, the
+sentinels are the owner's uid's alone to remove.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import json
 import os
 import sqlite3
@@ -644,20 +656,178 @@ def _private_parent_facts(st: os.stat_result, parent_abs: Path, when: str) -> di
     }
 
 
-def _require_private_parent(parent: Path, when: str) -> dict[str, object]:
-    """The database parent, reached by the no-follow walk, must be owner-private BEFORE the
-    source is opened — before any envelope, exchange or move (r4): the sentinels' whole
-    guarantee rests on it."""
+#: an ancestor is held O_PATH|O_NOFOLLOW|O_DIRECTORY: no read permission on it is needed, a
+#: symlink component is refused, and the *at calls can re-prove the chain through it (r5)
+_PATH_FLAGS = os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
 
-    try:
-        dfd, parent_abs = _walk_directory(parent, "database directory", create=False)
-    except DrillRefused as error:
-        raise CutoverRefused("PARENT_NOT_PRIVATE", f"{error}; nothing {when}") from None
-    try:
-        st = os.fstat(dfd)
-    finally:
-        os.close(dfd)
-    return _private_parent_facts(st, parent_abs, when)
+
+def _ancestor_problem(st: os.stat_result, euid: int) -> str | None:
+    """Why a directory on the way to the store is NOT part of the protected trust root (r5,
+    Daybreak r4 P1-1), or ``None``: it must be a directory owned by root or the effective uid
+    with no group or other write bit — a uid that can write an ancestor can rename the checked
+    ``data/`` away and plant a replacement under the same lexical path. A sticky, group/other-
+    writable directory (``/tmp``-style) is refused too: the sticky bit lets only an entry's
+    owner rename or remove it, but other uids can still create entries there, and a store under
+    such a directory is outside the supported deployment."""
+
+    if not stat.S_ISDIR(st.st_mode):
+        return "is not a directory"
+    mode = stat.S_IMODE(st.st_mode)
+    if st.st_uid not in (0, euid):
+        return (
+            f"is owned by uid {st.st_uid}, neither root nor this process's effective uid {euid} "
+            f"(mode {mode:04o})"
+        )
+    if mode & 0o022:
+        if mode & 0o1000:
+            return (
+                f"is a sticky, group/other-writable directory (mode {mode:04o}, /tmp-style): "
+                "other uids can create entries in it, and although the sticky bit lets only an "
+                "entry's owner rename or remove it, a store under such a directory is outside "
+                "the supported deployment"
+            )
+        return (
+            f"is writable by its group or by others (mode {mode:04o}): another uid could rename "
+            "the checked directory below it away and plant a replacement at the same path"
+        )
+    return None
+
+
+class ProtectedPath:
+    """The database parent's whole no-follow ancestor chain, from ``/`` down to ``data/`` (r5,
+    Daybreak r4 P1-1): every directory proved part of the protected trust root
+    (:func:`_ancestor_problem`; the leaf also :func:`_parent_problem` — owned by the effective
+    uid), each HELD open through the last report, so that the move path and the report can
+    re-prove by identity that every path component still names the directory that was checked
+    — a ``data/`` renamed away and replaced under the same lexical path is ``PATH_DISPLACED``,
+    never ``ARCHIVED``. The chain is walked by name without following links; a symlink
+    component is ``PATH_NOT_PROTECTED``."""
+
+    __slots__ = ("abs_path", "components", "facts", "fds", "identities")
+
+    def __init__(self, parent: Path, when: str) -> None:
+        absolute = parent if parent.is_absolute() else Path.cwd() / parent
+        self.abs_path = Path(os.path.normpath(absolute))
+        self.components: list[str] = ["/"]
+        self.fds: list[int] = []
+        self.identities: list[tuple[int, int]] = []
+        self.facts: list[dict[str, object]] = []
+        euid = os.geteuid()
+        try:
+            self._admit(os.open("/", _PATH_FLAGS), Path("/"), euid, when, leaf=False)
+            parts = self.abs_path.parts[1:]
+            walked = Path("/")
+            for index, component in enumerate(parts):
+                walked = walked / component
+                try:
+                    fd = os.open(component, _PATH_FLAGS, dir_fd=self.fds[-1])
+                except OSError as error:
+                    kind = (
+                        "is a symlink or not a directory (the chain is walked without "
+                        "following links)"
+                        if error.errno in (errno.ELOOP, errno.ENOTDIR)
+                        else f"could not be opened: [errno {error.errno}] {error.strerror}"
+                    )
+                    raise CutoverRefused(
+                        "PATH_NOT_PROTECTED",
+                        f"{walked} {kind}; nothing {when}. Every directory from / down to "
+                        f"{self.abs_path} must be a real directory owned by root or by you with "
+                        f"no group or other write bit — check each with ls -ld ({RUNBOOK}, "
+                        "Before you start)",
+                    ) from None
+                self.components.append(component)
+                self._admit(fd, walked, euid, when, leaf=index == len(parts) - 1)
+        except BaseException:
+            self.close()
+            raise
+
+    def _admit(self, fd: int, walked: Path, euid: int, when: str, *, leaf: bool) -> None:
+        try:
+            st = os.fstat(fd)
+            if leaf:
+                _private_parent_facts(st, walked, when)  # PARENT_NOT_PRIVATE: owned by this uid
+            problem = _ancestor_problem(st, euid)
+            if problem is not None:
+                raise CutoverRefused(
+                    "PATH_NOT_PROTECTED",
+                    f"{walked} {problem}; nothing {when}. Every directory from / down to "
+                    f"{self.abs_path} must be a real directory owned by root or by you with no "
+                    f"group or other write bit — check each with ls -ld ({RUNBOOK}, Before you "
+                    "start)",
+                )
+        except BaseException:
+            os.close(fd)
+            raise
+        self.fds.append(fd)
+        self.identities.append((st.st_dev, st.st_ino))
+        self.facts.append(
+            {"path": str(walked), "owner_uid": st.st_uid, "mode": f"{stat.S_IMODE(st.st_mode):04o}"}
+        )
+
+    @property
+    def leaf_identity(self) -> tuple[int, int]:
+        return self.identities[-1]
+
+    @property
+    def leaf_facts(self) -> dict[str, object]:
+        """The r4 parent facts, as the report has carried them since r4."""
+
+        return _private_parent_facts(os.fstat(self.fds[-1]), self.abs_path, "reported")
+
+    def problem(self, when: str) -> tuple[str, str] | None:
+        """Re-prove the chain on the held descriptors: every directory still protected (by
+        ``fstat``), and every component name, resolved without following links under the held
+        directory above it, still IS the held directory — ``PATH_DISPLACED`` otherwise."""
+
+        euid = os.geteuid()
+        for index, fd in enumerate(self.fds):
+            st = os.fstat(fd)
+            walked = Path(str(self.facts[index]["path"]))
+            problem = _ancestor_problem(st, euid)
+            if problem is None and index == len(self.fds) - 1:
+                problem = _parent_problem(st, euid)
+            if problem is not None:
+                return ("PATH_NOT_PROTECTED", f"{walked} {problem} (changed after the check)")
+            if index == 0:
+                continue
+            found: tuple[int, int] | None
+            try:
+                by_name = os.stat(
+                    self.components[index], dir_fd=self.fds[index - 1], follow_symlinks=False
+                )
+                found = (by_name.st_dev, by_name.st_ino) if stat.S_ISDIR(by_name.st_mode) else None
+            except FileNotFoundError:
+                found = None
+            if found != self.identities[index]:
+                held = self.identities[index]
+                return (
+                    "PATH_DISPLACED",
+                    f"{walked} no longer names the directory that was checked (device:inode "
+                    f"{held[0]}:{held[1]}, still held open by this process): it was renamed away "
+                    "or replaced after the check, so whatever is at that path now is not what "
+                    "the command inspected — find the checked directory by inode (find "
+                    f"{walked.parent} -inum {held[1]}) before anything starts",
+                )
+        return None
+
+    def verify(self, when: str) -> None:
+        problem = self.problem(when)
+        if problem is not None:
+            raise CutoverRefused(problem[0], f"{problem[1]}; nothing {when}")
+
+    def report(self, *, linked: bool) -> dict[str, object]:
+        return {
+            "path": str(self.abs_path),
+            "chain": [dict(fact) for fact in self.facts],
+            "held_through_report": True,
+            "linked_at_report": linked,
+        }
+
+    def close(self) -> None:
+        for fd in self.fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        self.fds.clear()
 
 
 def _require_excluded(source: BoundSource, when: str) -> None:
@@ -845,6 +1015,7 @@ def _move_aside(
     sidecars: tuple[AdmittedSidecar, ...],
     manifest_identity: tuple[int, int] | None,
     stamp: str,
+    protected: ProtectedPath,
 ) -> tuple[tuple[dict[str, str], ...], dict[str, object], tuple[dict[str, str | None], ...]]:
     """Exchange the store and its ADMITTED sidecars with sentinel directories at
     ``<name>.archived-<stamp>`` in their own directory, with the admitted set proven quiet
@@ -894,6 +1065,19 @@ def _move_aside(
     try:
         # r4: re-proved on the very descriptor the exchanges will use — owner-private, or nothing
         parent = _private_parent_facts(os.fstat(dfd), parent_abs, "moved")
+        # r5: that descriptor must BE the directory the held chain checked, and every component of
+        # the chain must still name its held directory — a displaced data/ moves nothing
+        walked = os.fstat(dfd)
+        if (walked.st_dev, walked.st_ino) != protected.leaf_identity:
+            held = protected.leaf_identity
+            raise CutoverRefused(
+                "PATH_DISPLACED",
+                f"{parent_abs} is not the directory checked before the source was opened "
+                f"(device:inode {held[0]}:{held[1]}, still held open by this process) but "
+                f"{walked.st_dev}:{walked.st_ino}: the path was displaced; nothing moved — find "
+                f"the checked directory by inode (find {parent_abs.parent} -inum {held[1]})",
+            )
+        protected.verify("moved")
         for sidecar in sidecars:
             try:
                 _lease_read(sidecar.fd, f"sidecar {parent_abs / sidecar.name}")
@@ -1075,6 +1259,17 @@ def _move_aside(
                 moved=tuple(moved),
                 not_moved=(),
             )
+        problem = protected.problem("reported")
+        if problem is not None:
+            raise MoveIncomplete(
+                problem[0],
+                f"{problem[1]} — every exchange succeeded inside the held directory and the "
+                "admitted set is at the archive names there (moved_aside), but the path no "
+                "longer names it; nothing was deleted: investigate before anything starts "
+                f"({RUNBOOK}, Before you start)",
+                moved=tuple(moved),
+                not_moved=(),
+            )
         wal = _wal_of(sidecars)
         exclusion: dict[str, object] = {
             "mechanism": "kernel read lease (fcntl F_SETLEASE) on the held store and every "
@@ -1086,6 +1281,7 @@ def _move_aside(
             "live_names_sealed": True,
             "sentinel_mode": f"{SENTINEL_MODE:04o}",
             "parent": parent,
+            "protected_path": protected.report(linked=True),
         }
         report = _sentinels_report(dfd, parent_abs, sentinels, namespace)
     except CutoverRefused as error:
@@ -1210,13 +1406,16 @@ def archive(
         keys = keys or load_age_keys()  # every key refusal precedes the source open
     except DrillRefused as error:
         raise CutoverRefused("KEYS_REFUSED", str(error)) from None
-    # r4: the parent's privacy is the sentinels' guarantee — proved before the source is opened
-    parent = _require_private_parent(db_path.parent, "was opened")
+    # r4/r5: the parent's privacy — and its whole ancestor chain's — is the sentinels' guarantee:
+    # proved before the source is opened, every directory held open through the last report
+    protected = ProtectedPath(db_path.parent, "was opened")
     try:
         source = open_bound_source(db_path, "source database")
     except SourceSwapped as error:
+        protected.close()
         raise CutoverRefused("SOURCE_SWAPPED", str(error)) from None
     except DrillRefused as error:
+        protected.close()
         raise CutoverRefused("SOURCE_NOT_REGULAR", str(error)) from None
     try:
         try:
@@ -1242,13 +1441,14 @@ def archive(
                 now=now,
                 clock=clock,
                 keys=keys,
-                parent=parent,
+                protected=protected,
             )
         finally:
             for sidecar in sidecars:
                 os.close(sidecar.fd)
     finally:
         source.close()
+        protected.close()  # after the report: the chain was held through it
 
 
 def _archive_admitted(
@@ -1262,7 +1462,7 @@ def _archive_admitted(
     now: datetime,
     clock: Clock,
     keys: AgeKeys,
-    parent: dict[str, object],
+    protected: ProtectedPath,
 ) -> ArchiveReport:
     db_path = source.path
     _require_excluded(source, "after the gate")
@@ -1277,7 +1477,8 @@ def _archive_admitted(
                 for suffix in ("", *SIDECAR_SUFFIXES)
             ],
             "sentinels": list(_live_names_of(db_abs)),
-            "parent": dict(parent),
+            "parent": protected.leaf_facts,
+            "protected_path": protected.report(linked=protected.problem("planned") is None),
             "note": "the stamp is the envelope's; --apply takes it from the backup's taken_at, "
             "moves a sidecar only when it is present, and leaves a sentinel directory at every "
             "live name until your rmdir — in an owner-private parent, proved before anything",
@@ -1349,7 +1550,7 @@ def _archive_admitted(
     source.close_connection()  # the move needs the held descriptor only, never the connection
     try:
         moved, exclusion, sentinels = _move_aside(
-            source, sidecars, report.manifest.source_identity, stamp
+            source, sidecars, report.manifest.source_identity, stamp, protected
         )
     except MoveIncomplete as error:
         return ArchiveReport(

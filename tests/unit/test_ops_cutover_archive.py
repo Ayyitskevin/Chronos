@@ -104,16 +104,11 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R5_P1_1 = (
-    "r5 P1-1: at d3ac84c only the final parent is checked — a writable ancestor archives, and a "
-    "data/ renamed away after its check still reports ARCHIVED at the displaced lexical path"
-)
 _R5_P1_2 = (
     "r5 P1-2: at d3ac84c run_archive_drill defines nested verifier callables that a "
     "caller-supplied Clock can retain by walking the frames and apply to a store mutated after "
     "the gate"
 )
-RED_R5_P1_1 = pytest.mark.xfail(strict=True, reason=_R5_P1_1)
 RED_R5_P1_2 = pytest.mark.xfail(strict=True, reason=_R5_P1_2)
 
 
@@ -1910,6 +1905,8 @@ def test_8k_run_archive_drill_defines_no_nested_callable() -> None:
         c for c in drill.run_archive_drill.__code__.co_consts if isinstance(c, types.CodeType)
     ]
     assert code_constants == [], [c.co_name for c in code_constants]
+    source = module.read_text(encoding="utf-8")
+    assert "same Python process" in source and "outlives" in source  # the trust root, stated
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -2736,7 +2733,10 @@ def test_11a_a_group_or_other_writable_database_parent_is_refused_before_anythin
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "geteuid", lambda: OWNER + 1 if os.getuid() != OWNER + 1 else OWNER)
         code, report = _run(store, tmp_path, "--apply", capsys=capsys)
-    assert code == 2 and report["code"] == "PARENT_NOT_PRIVATE", report
+    # r5: the ancestor chain is walked top-down with the substituted uid, so the first directory
+    # owned by neither root nor it (here: the home directory) refuses as PATH_NOT_PROTECTED
+    # before data/ is reached; under a root-owned chain the leaf's PARENT_NOT_PRIVATE would
+    assert code == 2 and report["code"] in ("PARENT_NOT_PRIVATE", "PATH_NOT_PROTECTED"), report
     assert "owned by" in report["failures"][0]
     assert _entries(store.db.parent) == entries
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
@@ -2923,7 +2923,6 @@ def test_11d_the_deployment_and_the_runbook_make_the_database_parent_owner_priva
 ANCESTOR_SHAPES = ("group-writable", "other-writable", "sticky-world-writable", "symlink")
 
 
-@RED_R5_P1_1
 @pytest.mark.parametrize("shape", ANCESTOR_SHAPES)
 def test_12a_a_writable_sticky_or_linked_ancestor_is_refused_before_anything_is_published(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str
@@ -2986,7 +2985,6 @@ def test_12a_a_writable_sticky_or_linked_ancestor_is_refused_before_anything_is_
     assert protected["held_through_report"] is True and protected["linked_at_report"] is True
 
 
-@RED_R5_P1_1
 @pytest.mark.parametrize("when", ["after-the-move-check", "after-the-exchanges"])
 def test_12b_daybreak_s_counterexample_the_checked_directory_displaced_after_its_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], when: str
@@ -3049,7 +3047,6 @@ def test_12b_daybreak_s_counterexample_the_checked_directory_displaced_after_its
         assert all(_is_sentinel(displaced / name) for name in LIVE_NAMES)
 
 
-@RED_R5_P1_1
 def test_12c_the_docs_and_the_module_state_the_protected_path_and_the_trust_root() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     before = text[text.index("## Before you start") : text.index("## Steps")]
@@ -3063,7 +3060,3 @@ def test_12c_the_docs_and_the_module_state_the_protected_path_and_the_trust_root
     assert "PATH_NOT_PROTECTED" in module and "PATH_DISPLACED" in module
     for statement in ("same Python process", "owner's uid", "ancestor"):
         assert statement in module, statement
-    drill_source = (ROOT / "src" / "chronos" / "operations" / "restore_drill.py").read_text(
-        encoding="utf-8"
-    )
-    assert "same Python process" in drill_source and "outlives" in drill_source

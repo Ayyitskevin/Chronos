@@ -34,6 +34,19 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
   proves it again on the directory descriptor the renames use. `DEPLOYMENT.md` creates `data/`
   0700 from now on; an older deployment's `mkdir -p data` under umask 002 left it 0775
   (group-writable): fix that here, once. The sticky bit is no substitute and is not consulted.
+- **Every directory above `data/` must be protected too — the path is only as safe as its
+  weakest ancestor.** A uid that can write an ancestor can rename the checked `data/` away and
+  plant a replacement under the same path, sentinels and all. From `/` down to `data/`, each
+  directory must be a real directory (never a symlink) owned by root or by you, with no group
+  or other write bit; a `/tmp`-style sticky world-writable directory is outside the supported
+  deployment even though the sticky bit limits renaming to an entry's owner (other uids can
+  still create entries there). Check your own chain, once: `ls -ld / /srv /srv/chronos
+  /srv/chronos/data` (substitute the real path) — every line must be `root` or you, with no `w`
+  in the group or other columns. The command refuses otherwise — `PATH_NOT_PROTECTED` — before
+  it opens anything, holds every ancestor open through its last report, and re-proves at the
+  move and at report time that each path component still names the directory it checked;
+  `PATH_DISPLACED` means it did not (the message names the held directory by inode: the
+  sentinels and the archived store stand in the renamed-away directory, never in a replacement).
 - Every Chronos process on this host must be stopped (step 1). The command proves what it can
   from the store (no live writer lease, no uncheckpointed write-ahead frames) and refuses
   otherwise; a read-only backend holds no lease, so **your** `is-active` check is part of the
@@ -260,6 +273,8 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 |---|---|---|
 | `SOURCE_NOT_REGULAR` | `--db`, or a `-wal`/`-shm` beside it, is a symlink, directory or FIFO | name the real file; never a link |
 | `PARENT_NOT_PRIVATE` | `data/` (the store's parent) is owned by another uid, or writable by its group or by others — the sentinels would be removable by another uid | as the owner: `chmod 0700 data` (Before you start); re-run |
+| `PATH_NOT_PROTECTED` | a directory above `data/` is not part of the protected chain: owned by neither root nor you, writable by its group or by others (a sticky `/tmp`-style one included), or a symlink | move the deployment under a protected chain, or fix the named directory as its owner (Before you start, `ls -ld`); re-run |
+| `PATH_DISPLACED` | after the check, a path component stopped naming the directory the command holds open (renamed away or replaced) | nothing moved, or `moved_aside` is exact inside the held directory (named by inode); find out who wrote under a stopped service before anything starts |
 | `KEYS_REFUSED` | the drill's age keys (identity 0600, exactly the two recipients) | the drill runbook, "Encryption at rest" |
 | `SCHEMA_UNREADABLE` / `STORE_UNREADABLE` | the store could not be read as a Chronos store | stop; do not guess — inspect by hand, read-only |
 | `SCHEMA_ALREADY_CURRENT` | the store is already at the running `SCHEMA_VERSION` | this is not a pre-cutover store; nothing to do |
