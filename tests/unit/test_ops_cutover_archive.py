@@ -912,6 +912,87 @@ def test_5d_a_restore_target_that_is_not_fresh_refuses_before_any_envelope_exist
     _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
 
 
+@pytest.mark.parametrize("mode", [0o700, 0o777], ids=["own-0700", "0777"])
+def test_5e_fix_rt_a_pre_existing_empty_restore_target_refuses_before_any_envelope_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: int
+) -> None:
+    """FIX-RT (Daybreak §7 (ii)): the cutover's target leaf must be ABSENT — even an empty, owner-
+    only one refuses; the command creates it 0700 itself. A hostile pre-created 0777 one refuses
+    the same way."""
+
+    store = _store(tmp_path, binding="closed")
+    target = tmp_path / "restored"
+    target.mkdir()
+    os.chmod(target, mode)
+    before = _sha256(store.db)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_FRESH", report
+    assert "must not exist" in report["failures"][0], report
+    assert not (tmp_path / "backups").exists()  # no envelope
+    assert list(target.iterdir()) == []
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+
+
+@pytest.mark.parametrize("where", ["tmp-child", "tmp-grandchild"])
+def test_5f_fix_rt_a_restore_target_under_tmp_refuses_before_any_envelope_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], where: str
+) -> None:
+    """A different predictable /tmp name is insufficient (Daybreak): /tmp is sticky and world-
+    writable, so it is not part of a protected chain, whether the target is its child or sits in
+    a private directory inside it."""
+
+    store = _store(tmp_path, binding="closed")
+    scratch = Path(tempfile.mkdtemp(prefix="chronos-fix-rt-", dir="/tmp"))  # 0700, this uid
+    target = (
+        scratch / "verify"
+        if where == "tmp-grandchild"
+        else Path("/tmp") / f"{scratch.name}-verify"  # absent; /tmp itself is its parent
+    )
+    before = _sha256(store.db)
+    try:
+        argv = [
+            "--db",
+            str(store.db),
+            "--out",
+            str(tmp_path / "backups"),
+            "--restore-into",
+            str(target),
+            "--apply",
+        ]
+        code = cutover.main(argv, clock=_clock(store.now))
+        report = json.loads(capsys.readouterr().out)
+        assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_PROTECTED", report
+        assert "/tmp" in report["failures"][0], report
+        assert not target.exists() and not (tmp_path / "backups").exists()
+        _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_5g_fix_rt_the_runbook_target_is_out_of_tmp_and_the_stop_is_in_the_document() -> None:
+    """Muse's condition 3: a reader of N3-CUTOVER months from now meets the stop in the document —
+    near the top (before the steps) AND at step 1, where the cutover is scheduled and begun."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    stop = (
+        "Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 "
+        "(`chronos.operations.backup_pruner`) have both merged to main."
+    )
+    steps = flat.index("## Steps")
+    step1, step2 = flat.index("1. **", steps), flat.index("2. **", steps)
+    assert stop in flat[:steps], "the stop must stand before the steps"
+    assert stop in flat[step1:step2], "the stop must stand at step 1, where the cutover is begun"
+    assert flat.index(stop) < flat.index("## Before you start")
+    assert "/tmp/chronos-n3-verify" not in text
+    assert "--restore-into /var/backups/chronos/n3-verify" in text
+    assert "`RESTORE_TARGET_NOT_PROTECTED`" in text and "`RESTORE_TARGET_NOT_FRESH`" in text
+    module = MODULE.read_text(encoding="utf-8")
+    assert "/tmp/chronos-n3-verify" not in module
+    assert "--restore-into /var/backups/chronos/n3-verify" in module
+
+
 # ------------------------------------------------------------- (6) pins
 
 
