@@ -5,12 +5,15 @@
 >   name under `/tmp`. Another local uid could create it first and read or replace the
 >   cleartext copy of the whole pre-cutover store. FIX-RT closes that in code. N3-3 ships
 >   the pruner that step 10's 90-day retention relies on.
-> - **How to check, on the host's checkout:** both of these must print something.
->   - `git log --oneline origin/main -- src/chronos/operations/backup_pruner.py` (N3-3)
+> - **How to check, on the host's checkout:** first refresh `origin/main`, then both
+>   `git grep` commands must print something and exit zero. They read the current tip, so a later
+>   removal or revert shows as a failure; a `git log -- <path>` would still print history.
+>   - `git fetch origin main`
+>   - `git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py` (N3-3)
 >   - `git grep -n RESTORE_TARGET_NOT_PROTECTED origin/main -- src/chronos/operations/cutover_archive.py`
 >     (FIX-RT)
-> - **If either prints nothing,** stop here. This notice is removed only by a reviewed change,
->   once both have merged.
+> - **If either prints nothing or exits non-zero,** stop here. This notice is removed only by a
+>   reviewed change, once both have merged.
 
 Kevin's physical steps, in order, for the one-time cutover from the unkeyed account
 fingerprint (schema 17) to the keyed one (schema 18, `CHRONOS_PERSISTENCE_KEY`). The rulings

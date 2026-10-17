@@ -24,6 +24,10 @@ so another local uid could pre-create the target 0777 and read or replace the wh
   by-hand `mkdir -m 700` / `umask 077` steps. `N3-CUTOVER.md` carries, at the top, in its prerequisites and at
   step 1: "Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3
   (`chronos.operations.backup_pruner`) have both merged to main."
+- r1 (Daybreak P2-1): the banner's check reads the current tip. It is `git fetch origin main`, then
+  `git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py` and the
+  `RESTORE_TARGET_NOT_PROTECTED` grep, both of which must print and exit zero. The historical
+  `git log -- <path>` form, which still prints after a revert, is gone.
 - Not in this slice: the restore copy's lifetime (P2-4, Kevin's open decision).
 
 ## [Unreleased] — the N3 cutover archive: flatten gate, encrypted archive, move-aside, runbook (N3-2, 2026-10-15)
