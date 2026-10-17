@@ -312,18 +312,26 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
   only its direct children are read; the pruner never descends into other directories.
   - Backups made with the commands on this page and in [`N3-CUTOVER.md`](N3-CUTOVER.md) sit
     directly under `/var/backups/chronos`: one run, the command above.
-  - Backups made earlier under a dated `--out` (`/var/backups/chronos/<YYYYMMDD>/chronos-<stamp>/`)
-    are pre-cutover backups too and fall under the same 90 days. They are not reached by the
-    run above (it lists each dated directory as `unclassified`). Prune each one with its own
-    run, dry run first:
+  - Backups made earlier under a dated `--out` (`/var/backups/chronos/<YYYYMMDD>/chronos-<stamp>/`),
+    or under the earlier cutover page's `--out /var/backups/chronos/n3`, are pre-cutover
+    backups too and fall under the same 90 days. The run above does not reach them (it lists
+    each such directory as `unclassified`). Prune each with its own run. The routine below
+    visits ONLY directories named exactly eight digits, plus `n3`; it skips a name that does
+    not exist (an unmatched glob stays literal, so without that check it would be passed to
+    the pruner as a root) and skips a symlink before the pruner is invoked. It is a dry run
+    until you set `PRUNE_FLAGS=--apply`:
     ```bash
-    for d in /var/backups/chronos/[0-9]*/; do
-      python -m chronos.operations.backup_pruner --root "$d" --pretty
+    for d in /var/backups/chronos/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] /var/backups/chronos/n3; do
+      [ -d "$d" ] || continue
+      [ -L "$d" ] && { echo "skipping symlink: $d" >&2; continue; }
+      python -m chronos.operations.backup_pruner --root "$d" --pretty ${PRUNE_FLAGS:-}
     done
     ```
-    Read every report, then repeat with `--apply` for the ones you accept. The cutover command
-    of an earlier page version used `--out /var/backups/chronos/n3`; if you ran that, add
-    `--root /var/backups/chronos/n3` to the same routine.
+    Read every report, then run it again with `export PRUNE_FLAGS=--apply` first. A directory
+    that does not match (`20261017-restore`, `7-unrelated`, anything else) is never entered;
+    if you keep older envelopes anywhere else, give that directory its own deliberate
+    `--root` run by hand. The pruner reads only the direct children of the root you give it
+    and is unchanged.
 
 - **What it deletes:** a published envelope `chronos-<stamp>/` whose own `manifest.json`
   records a pre-cutover schema (`schema_head` of `schema_version:N`, N below 18 — the archive
