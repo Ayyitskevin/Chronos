@@ -1,5 +1,20 @@
 # N3 cutover — archive the unkeyed store, start the keyed one (strategy (iii))
 
+> **STOP: read this before you pick a date.** **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.**
+> - **Why (LINE STOP #6, 2026-10-17):** this page's original restore target was a fixed
+>   name under `/tmp`. Another local uid could create it first and read or replace the
+>   cleartext copy of the whole pre-cutover store. FIX-RT closes that in code. N3-3 ships
+>   the pruner that step 10's 90-day retention relies on.
+> - **How to check, on the host's checkout:** first refresh `origin/main`, then both
+>   `git grep` commands must print something and exit zero. They read the current tip, so a later
+>   removal or revert shows as a failure; a `git log -- <path>` would still print history.
+>   - `git fetch origin main`
+>   - `git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py` (N3-3)
+>   - `git grep -n RESTORE_TARGET_NOT_PROTECTED origin/main -- src/chronos/operations/cutover_archive.py`
+>     (FIX-RT)
+> - **If either prints nothing or exits non-zero,** stop here. This notice is removed only by a
+>   reviewed change, once both have merged.
+
 Kevin's physical steps, in order, for the one-time cutover from the unkeyed account
 fingerprint (schema 17) to the keyed one (schema 18, `CHRONOS_PERSISTENCE_KEY`). The rulings
 this follows, verbatim: *"archive the old DB with the restore-drill envelope, verify the
@@ -25,6 +40,23 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 
 ## Before you start
 
+- **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** The STOP at the top of this page says how to check. If either is
+  missing, nothing below applies yet.
+- **The restore target lives under a directory only you control, never under `/tmp`
+  (FIX-RT).**
+  - The command restores the archive into `--restore-into` to verify it. That copy is the
+    whole pre-cutover store in the clear.
+  - Use `--restore-into /var/backups/chronos/n3-verify`: beside `--out`, under the backup root.
+  - The leaf (`n3-verify`) must **not exist**. The command creates it, mode `0700`, and the
+    drill verifies its uid and mode by `fstat`.
+  - Its parent must be owned by you, and every directory from `/` down to it must be owned by
+    root or by you, with no group or other write bit. This is the same rule as for `data/`
+    below, and the same check. Use `ls -ld / /var /var/backups /var/backups/chronos`.
+  - The command refuses otherwise, before any envelope exists:
+    - `RESTORE_TARGET_NOT_PROTECTED`: the chain, `/tmp` included;
+    - `RESTORE_TARGET_NOT_FRESH`: the leaf already exists, empty or not.
+  - A different name under `/tmp` is not a fix: any predictable name there can be prepared
+    by another uid first.
 - **`data/` must be owner-private — `chmod 0700 data`**, as the owner. Removing an empty
   directory is authorized by write permission on **its parent**, not by the directory's own
   mode, so a group- or other-writable `data/` would let another uid remove one of step 3's
@@ -75,7 +107,8 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 
 ## Steps
 
-1. **Stop the service and prove it.**
+1. **Stop the service and prove it.** Before you schedule this step, or start it:
+   **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** (the STOP at the top of this page says how to check).
    ```bash
    systemctl --user stop chronos-worker chronos-backend
    systemctl --user is-active chronos-backend chronos-worker   # both lines: inactive
@@ -91,7 +124,7 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    python -m chronos.operations.cutover_archive \
      --db data/chronos.db \
      --out /var/backups/chronos/n3 \
-     --restore-into /tmp/chronos-n3-verify \
+     --restore-into /var/backups/chronos/n3-verify \
      --pretty
    ```
    Expect exit `0` and `"verdict": "DRY_RUN"`; read `gate` — `bindings` (all closed),
@@ -159,9 +192,9 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    - `code: WRITER_OPEN` after the gate (exit 2): a process opened the store (or a sidecar) for
      writing while the command ran; nothing moved. Step 1 again — then re-run.
 
-4. **Remove the restore copy.** `/tmp/chronos-n3-verify` holds a CLEARTEXT copy of the
-   archived store (the drill verified it there): `rm -r /tmp/chronos-n3-verify`. Your `rm` —
-   the command never deletes.
+4. **Remove the restore copy.** `/var/backups/chronos/n3-verify` holds a CLEARTEXT copy of the
+   archived store (the drill verified it there; `0700`, its `chronos.db` `0600`):
+   `rm -r /var/backups/chronos/n3-verify`. Your `rm` — the command never deletes.
 
 5. **Generate the key yourself, into the 0600 `.env`.** On the host, in a shell whose history is
    off for this line (`set +o history` in bash; or `HISTFILE=` for the session):
@@ -286,6 +319,8 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 | `OPEN_BINDING` / `BINDING_UNREADABLE` | a managed position is open, or its ledger cannot be replayed | flatten at the broker, reconcile, re-run / inspect the stream by hand |
 | `NO_RECONCILIATION_RUN` / `RECONCILIATION_STALE` / `RECONCILIATION_NOT_CLEAN` / `RECONCILIATION_UNREADABLE` | the latest run is missing, older than one hour, not `RECONCILED`, or unreadable | start → reconcile → stop → re-run within the hour |
 | `POSITION_OBSERVED` / `PROVENANCE_MISSING` | the latest run recorded a broker position (the message breaks it down by origin class) | flatten at the broker, reconcile, re-run |
+| `RESTORE_TARGET_NOT_PROTECTED` | `--restore-into`'s parent chain is not protected: a directory from `/` to its parent is owned by neither root nor you, writable by its group or by others (`/tmp` included), or a symlink; or the parent is not yours | use `/var/backups/chronos/n3-verify` under a chain you own (Before you start); re-run — nothing was backed up |
+| `RESTORE_TARGET_NOT_FRESH` | `--restore-into` already exists (empty or not), or could not be created `0700` and yours | name a path that does not exist; never reuse or pre-create it — the command creates it; re-run |
 | `DRILL_REFUSED` | the drill refused before verifying (an envelope name collision, a rename error) | the drill runbook's `refused:` row; nothing moved |
 | `TARGET_EXISTS` / `SOURCE_SWAPPED` / `MOVE_FAILED` | the move-aside could not start, or the source changed under the command | step 3's bullets |
 | `LIVE_NAME_OCCUPIED` | a live name of the store's namespace (`-wal`/`-shm` not admitted by the gate, `-journal`) holds an entry, so no sentinel can take it; or, after the renames, a live name no longer holds this run's sentinel | step 3's bullet: nothing moved in the first case; find what wrote it, move it by hand, re-run |

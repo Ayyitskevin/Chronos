@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## [Unreleased] — FIX-RT: the restore target is the owner's alone, and the restored store is 0600 (LINE STOP #6, 2026-10-17)
+
+Daybreak's P1 (`REVIEW-daybreak-trial-on-N3-2.md` §7), on main since R-1. The restore drill accepted any pre-existing,
+empty, non-symlink `--restore-into` directory with no owner or mode check, and `age -d -o` wrote the cleartext store
+at `0666 & ~umask` (measured 0664). Both runbook defaults were predictable `/tmp` names (the cutover's a fixed one),
+so another local uid could pre-create the target 0777 and read or replace the whole restored store.
+
+- `restore_drill._fresh_directory` now refuses a target not owned by the effective uid or carrying any group/other
+  bit, judged by `fstat` on the held descriptor (never by path), after the existing no-follow walk and emptiness
+  check. A created target (mkdir 0700; a umask only narrows it) is verified the same way, and a directory that appears
+  between the absence check and the `mkdir` is judged like any pre-existing one (it was an untyped
+  `FileExistsError`). Ancestors are not judged by the drill: its writes go through the held owner-only descriptor,
+  and a displaced target is already `restore target swapped`.
+- The decrypt runs `age` under umask 0077 in the child alone (`subprocess` `umask=`), so `chronos.db` is created
+  exactly 0600 at every instant whatever the caller's umask. It is then proved this uid's and exactly 0600 by
+  `fstat`, or removed and refused. The audit copies were already created 0600.
+- `cutover_archive --apply` requires `--restore-into`'s parent chain to be protected (the store's own `ProtectedPath`
+  walk; `/tmp` refuses) and the leaf to be absent, before any envelope exists. The new codes are
+  `RESTORE_TARGET_NOT_PROTECTED` and `RESTORE_TARGET_NOT_FRESH` (now also for an empty pre-existing leaf).
+- Runbooks: the defaults move out of `/tmp`. They are `/var/backups/chronos/restore-<stamp>` and
+  `/var/backups/chronos/n3-verify`, the latter beside `--out`. `RESTORE-DRILL.md` states the owner/mode rule and the
+  by-hand `mkdir -m 700` / `umask 077` steps. `N3-CUTOVER.md` carries, at the top, in its prerequisites and at
+  step 1: "Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3
+  (`chronos.operations.backup_pruner`) have both merged to main."
+- r1 (Daybreak P2-1): the banner's check reads the current tip. It is `git fetch origin main`, then
+  `git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py` and the
+  `RESTORE_TARGET_NOT_PROTECTED` grep, both of which must print and exit zero. The historical
+  `git log -- <path>` form, which still prints after a revert, is gone.
+- Not in this slice: the restore copy's lifetime (P2-4, Kevin's open decision).
+
 ## [Unreleased] — the N3 cutover archive: flatten gate, encrypted archive, move-aside, runbook (N3-2, 2026-10-15)
 
 A new owner-run command, `python -m chronos.operations.cutover_archive --db … --out … --restore-into … [--apply]`,

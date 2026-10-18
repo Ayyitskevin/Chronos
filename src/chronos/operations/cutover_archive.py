@@ -3,7 +3,8 @@
 One command, owner-run, with every Chronos process stopped::
 
     python -m chronos.operations.cutover_archive --db data/chronos.db \\
-        --out /var/backups/chronos/n3 --restore-into /tmp/chronos-n3-verify [--apply] [--pretty]
+        --out /var/backups/chronos/n3 \\
+        --restore-into /var/backups/chronos/n3-verify [--apply] [--pretty]
 
 Dry-run (the default) runs the gate below, prints what ``--apply`` would do, writes nothing
 to the store and creates no envelope. One directory effect is SQLite's, not the command's: a
@@ -854,6 +855,41 @@ class ProtectedPath:
         self.fds.clear()
 
 
+def _require_protected_absent_target(restore_into: Path) -> None:
+    """FIX-RT (Daybreak §7 (ii), LINE STOP #6): the cutover's ``--restore-into`` must sit under a
+    protected ancestor chain — every directory from ``/`` to its parent a real directory owned
+    by root or the effective uid with no group or other write bit, the parent owned by the
+    effective uid (the same :class:`ProtectedPath` walk the store's own path gets; ``/tmp`` and
+    anything under it is refused) — and the leaf must be ABSENT: the command creates it 0700
+    itself and the drill verifies uid and mode. Either failure stops the run before any
+    envelope exists. The chain is closed after the check: only root or this uid can change a
+    protected chain, so the drill's own no-follow walk meets the same directories."""
+
+    absolute = restore_into if restore_into.is_absolute() else Path.cwd() / restore_into
+    try:
+        chain = ProtectedPath(absolute.parent, "was backed up or restored")
+    except CutoverRefused as error:
+        raise CutoverRefused(
+            "RESTORE_TARGET_NOT_PROTECTED",
+            f"--restore-into {absolute}: {error}. The restore copy is the CLEARTEXT store, so its "
+            "parent must be a directory only you control under a protected chain — a /tmp path "
+            f"never is ({RUNBOOK}, step 2)",
+        ) from None
+    try:
+        try:
+            os.stat(absolute.name, dir_fd=chain.leaf_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise CutoverRefused(
+            "RESTORE_TARGET_NOT_FRESH",
+            f"--restore-into {absolute} already exists; it must not exist: the command creates the "
+            "restore target itself (0700, this uid) so no one else can have prepared it — name a "
+            f"new path and re-run; nothing was backed up or restored ({RUNBOOK}, step 2)",
+        )
+    finally:
+        chain.close()
+
+
 def _require_excluded(source: BoundSource, when: str) -> None:
     """The store's read lease must still be whole: a process that opened the store for writing
     since the lease was taken broke it, and nothing read or written after that is trusted."""
@@ -1523,7 +1559,10 @@ def _archive_admitted(
         )
     try:
         # the drill's own rule, applied BEFORE the envelope exists: a reused --restore-into
-        # would otherwise publish an envelope and then refuse the restore, leaving an orphan
+        # would otherwise publish an envelope and then refuse the restore, leaving an orphan.
+        # FIX-RT: first a protected chain with the leaf absent; then the drill creates it 0700
+        # and verifies uid and mode by fstat
+        _require_protected_absent_target(restore_into)
         os.close(_fresh_directory(restore_into, "restore target"))
     except DrillRefused as error:
         raise CutoverRefused("RESTORE_TARGET_NOT_FRESH", str(error)) from None

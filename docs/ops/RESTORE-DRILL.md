@@ -20,7 +20,7 @@ BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
 python -m chronos.operations.restore_drill \
   --db data/chronos.db \
   --out /var/backups/chronos/$(date -u +%Y%m%d) \
-  --restore-into /tmp/chronos-restore-$(date -u +%Y%m%dT%H%M%SZ) \
+  --restore-into /var/backups/chronos/restore-$(date -u +%Y%m%dT%H%M%SZ) \
   --pretty
 ```
 
@@ -59,7 +59,29 @@ recovery objective would later be set against.
 ## The isolation rule
 
 **Never restore over the live path.** `--restore-into` must be a directory that does not
-exist or is empty; the harness refuses anything else and refuses a symlink. The restored
+exist or is empty; the harness refuses anything else and refuses a symlink.
+
+**The restore target is yours alone (FIX-RT, 2026-10-17).** The restored `chronos.db` is the
+whole store in the clear, so:
+- `--restore-into` must be **absent**, in which case the drill creates it mode `0700`, or an
+  empty directory **owned by your effective uid with no group or other permission bit**.
+- The drill judges that by `fstat` on the directory descriptor it holds, never by the path.
+  It refuses anything else before a byte is decrypted: `… is owned by uid …`, or `… has mode …,
+  which grants group or other access`. A directory that appears between the drill's absence
+  check and its `mkdir` is judged the same way.
+- To prepare one by hand, run `mkdir -m 700 <path>` as yourself. Never reuse a directory
+  someone else could have made.
+- Put the target under a directory only you control, such as the backup root
+  `/var/backups/chronos` (yours, 0700), **never under `/tmp`**. A predictable name in a
+  world-writable directory lets another uid create it first, mode 0777, and read or replace
+  the cleartext store.
+- The decrypted `chronos.db` is created **exactly `0600`** whatever your umask, because `age`
+  runs under umask `0077`, set in its own process only. It is proved `0600` and yours by
+  `fstat` before anything reads it, and a wider or foreign file is removed and refused. The
+  audit copies are created `0600` too, and SQLite gives any journal it opens beside the copy
+  the copy's own mode.
+- The lifetime of the restore copy (who removes it, and when) is a separate, open decision;
+  nothing here deletes it. The restored
 copy is for verification and for a deliberate, separate cut-over decision — not for the
 running backend. The source database is opened read-only (`mode=ro`, SQLite's normal
 locking — never `immutable=1`, which would ignore a WAL that appears after any check) and
@@ -160,10 +182,12 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    and reports success, so it is never the by-hand step — use the command above, or run the
    harness for a real drill. From this point the backup is the directory `chronos-<stamp>/`
    and nothing else.
-4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>` (it must not exist or be
-   empty), then decrypt the backup into it through the host identity —
-   `age -d -i data/keys/backup-host.age -o <fresh>/chronos.db <envelope>/chronos.db.age`
-   — and copy the audit pair beside it if present. A non-zero exit (a corrupted `.age`,
+4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>`, as yourself, under a
+   directory only you control (it must not exist; never under `/tmp`). Then decrypt the backup
+   into it through the host identity, under a private umask, so the cleartext file is `0600`
+   from its first byte:
+   `(umask 077 && age -d -i data/keys/backup-host.age -o <fresh>/chronos.db <envelope>/chronos.db.age)`.
+   Then copy the audit pair beside it if present. A non-zero exit (a corrupted `.age`,
    an identity that is not a recipient) is a stop: the harness records it as
    `decrypt: refused — …`, `verified: false`, and leaves nothing partial in the target.
 5. **Verify.** `sha256sum` of the decrypted copy equals the manifest's `sha256`; the schema head query on the

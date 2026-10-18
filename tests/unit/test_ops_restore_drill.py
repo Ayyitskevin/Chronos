@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2112,3 +2113,183 @@ def test_t3_1c_an_unlink_and_recreate_cannot_reuse_the_pinned_inode(
     for identity, recreated, held in observed:
         assert held == 1, "the copied inode must be referenced by exactly one descriptor"
         assert identity != recreated, "a referenced inode was renumbered"
+
+
+# --------------------------------------------- FIX-RT: the restore target and the output mode
+# LINE STOP #6 (Daybreak, REVIEW-daybreak-trial-on-N3-2.md §7): a pre-created target another uid can
+# reach must be refused, and the decrypted store must never be wider than 0600. The expected modes
+# below are POSIX facts written here, not read back from the module.
+
+
+def _no_group_or_other(directory: Path) -> list[str]:
+    """Every entry the restore left in ``directory`` (and the directory itself): owned by this euid
+    with no group or other permission bit. Returns the offenders."""
+
+    euid = os.geteuid()
+    bad = []
+    for path in (directory, *directory.iterdir()):
+        st = os.lstat(path)
+        if st.st_uid != euid or stat.S_IMODE(st.st_mode) & 0o077:
+            bad.append(f"{path.name} uid={st.st_uid} mode={stat.S_IMODE(st.st_mode):04o}")
+    return bad
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o750, 0o705], ids=["0777", "0750", "0705"])
+def test_rt_1_a_pre_created_target_with_group_or_other_bits_is_refused_and_nothing_is_decrypted(
+    tmp_path: Path, mode: int
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "hostile"
+    target.mkdir()
+    os.chmod(target, mode)  # empty, owned by this uid, reachable by its group or by others
+    with pytest.raises(DrillRefused, match="group or other"):
+        restore(manifest, target)
+    assert list(target.iterdir()) == [], "nothing may be decrypted into a target others can reach"
+    assert stat.S_IMODE(os.lstat(target).st_mode) == mode  # refused, never silently re-moded
+
+
+def test_rt_2_a_pre_created_target_owned_by_another_uid_is_refused_by_fstat_on_the_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This host cannot make a directory owned by a second uid without privilege (no sudo;
+    Daybreak's probe hit the same limit), so the descriptor's ``fstat`` is the seam: the module
+    sees the real 0700, empty target reported as another uid's. A check made by path (``lstat``)
+    would not see it."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "foreign"
+    target.mkdir()
+    os.chmod(target, 0o700)
+    held = os.lstat(target)
+    real_fstat = os.fstat
+
+    def foreign_fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (held.st_dev, held.st_ino):
+            return st
+        fields = list(st[:10])
+        fields[4] = os.geteuid() + 1  # st_uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(drill.os, "fstat", foreign_fstat)
+    with pytest.raises(DrillRefused, match="owned by uid"):
+        restore(manifest, target)
+    monkeypatch.undo()
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("umask", [0o002, 0o000], ids=["umask-002", "umask-000"])
+def test_rt_3_the_decrypted_store_and_everything_beside_it_is_owner_only_whatever_the_umask(
+    tmp_path: Path, umask: int
+) -> None:
+    """Measured at the decrypt (``_staged_restore``: before any acceptance could repair it, which
+    is where the archive path stays) and after a whole ``restore()``."""
+
+    db = _store_with_audit(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    keys = drill.load_age_keys()
+    previous = os.umask(umask)
+    try:
+        with drill._staged_restore(manifest, tmp_path / "staged", keys) as staged:
+            assert staged.decrypt_refused is None, staged.decrypt_refused
+            names = sorted(os.listdir(staged.target_fd))
+            modes = {
+                name: stat.S_IMODE(
+                    os.stat(name, dir_fd=staged.target_fd, follow_symlinks=False).st_mode
+                )
+                for name in names
+            }
+        assert modes[manifest.cleartext_name] == 0o600, modes
+        assert modes[drill.AUDIT_LOG_NAME] == 0o600 and modes[drill.AUDIT_ANCHOR_NAME] == 0o600, (
+            modes
+        )
+        report = restore(manifest, tmp_path / "restored")
+        assert report.verified, report.failures
+        assert _no_group_or_other(tmp_path / "restored") == []
+        assert stat.S_IMODE(os.lstat(tmp_path / "restored").st_mode) == 0o700
+    finally:
+        os.umask(previous)
+
+
+def test_rt_4_a_decrypt_that_lands_wider_than_0600_is_refused_and_nothing_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth: if the decrypted file ever lands wider than 0600 (here a wrapper overrides
+    the child umask the module gives age, under a 000 umask), the fstat post-check refuses and
+    removes it."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    real_run = drill.subprocess.run
+
+    def wide_open(argv: list[str], **kwargs: object) -> object:
+        if argv[0] == AGE and "-d" in argv:
+            kwargs["umask"] = 0
+        return real_run(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(drill.subprocess, "run", wide_open)
+    previous = os.umask(0)
+    try:
+        report = restore(manifest, tmp_path / "restored")
+    finally:
+        os.umask(previous)
+    assert report.verified is False
+    assert report.failures[0].startswith("decrypt: refused"), report.failures
+    assert "0600" in report.failures[0], report.failures
+    assert list((tmp_path / "restored").iterdir()) == []
+
+
+def test_rt_5_a_target_that_appears_between_the_absence_check_and_the_mkdir_is_judged_not_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(path: str, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        if path == "raced":  # another uid wins the race: its directory, group/other reachable
+            real_mkdir(path, 0o777, dir_fd=dir_fd)
+            os.chmod(path, 0o777, dir_fd=dir_fd)
+        real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(drill.os, "mkdir", racing_mkdir)
+    with pytest.raises(DrillRefused, match="group or other"):
+        restore(manifest, tmp_path / "raced")
+    monkeypatch.undo()
+    assert list((tmp_path / "raced").iterdir()) == []
+
+
+def test_rt_6a_an_absent_target_is_created_0700_by_this_uid_and_verifies(tmp_path: Path) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    previous = os.umask(0)
+    try:
+        report = restore(manifest, tmp_path / "fresh")
+    finally:
+        os.umask(previous)
+    assert report.verified, report.failures
+    st = os.lstat(tmp_path / "fresh")
+    assert stat.S_IMODE(st.st_mode) == 0o700 and st.st_uid == os.geteuid()
+
+
+def test_rt_6b_an_existing_empty_target_of_this_uid_at_0700_still_restores(tmp_path: Path) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "mine"
+    target.mkdir()
+    os.chmod(target, 0o700)
+    report = restore(manifest, target)
+    assert report.verified, report.failures
+
+
+def test_rt_7_the_runbook_default_target_is_out_of_tmp_and_the_rule_is_in_the_document() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    one_command = text.split("## The one command", 1)[1].split("\n## ", 1)[0]
+    assert "/tmp" not in one_command, one_command
+    assert "--restore-into /var/backups/chronos/restore-" in one_command
+    prose = " ".join(text.split())
+    assert "mkdir -m 700" in prose
+    assert "group or other" in prose and "effective uid" in prose
+    assert "0600" in prose
