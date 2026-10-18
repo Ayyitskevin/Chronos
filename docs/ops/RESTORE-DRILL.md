@@ -19,7 +19,7 @@ WAL-backed stores, which proves integrity and the fail-closed posture, not RPO/R
 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
 python -m chronos.operations.restore_drill \
   --db data/chronos.db \
-  --out /var/backups/chronos/$(date -u +%Y%m%d) \
+  --out /var/backups/chronos \
   --restore-into /var/backups/chronos/restore-$(date -u +%Y%m%dT%H%M%SZ) \
   --pretty
 ```
@@ -33,6 +33,12 @@ python -m chronos.operations.restore_drill \
   was written to the source in either case.
 
 The manifest is inside the envelope as `<stem>-<stamp>/manifest.json`.
+
+**`--out` is the pruner's root (N3-3 r6).** The envelope `chronos-<stamp>/` is published directly
+under `--out`, and the pruner (below) reads only the direct children of its `--root`. Publish
+under `/var/backups/chronos` and prune `/var/backups/chronos`, so the two commands meet. Older
+runs of this page used a dated `--out /var/backups/chronos/<YYYYMMDD>`; see the pruner section
+for how those are pruned.
 
 ## What the two numbers are — and are not
 
@@ -293,7 +299,99 @@ connection was proven to have opened; a manifest written before this field exist
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same
   disk as the database is a convenience, not a recovery. Where the copy goes, how it is
   encrypted in transit and at rest, and who can read it are the owner's.
-- **Retention** is likewise not implemented: the harness never deletes.
+- **Retention** is not done by the harness, which never deletes. Kevin's ruling (2026-10-15):
+  the encrypted archive and pre-cutover backups live 90 days, then are deleted — by the
+  separate Kevin-run pruner below.
+
+## Pruning old backups — Kevin-run, 90 days (N3-3)
+
+`python -m chronos.operations.backup_pruner --root /var/backups/chronos --pretty` lists what
+it WOULD delete and deletes nothing. Add `--apply` to delete.
+
+- **Which `--root`:** the directory the envelopes were published into (their `--out`), because
+  only its direct children are read; the pruner never descends into other directories.
+  - Backups made with the commands on this page and in [`N3-CUTOVER.md`](N3-CUTOVER.md) sit
+    directly under `/var/backups/chronos`: one run, the command above.
+  - Backups made earlier under a dated `--out` (`/var/backups/chronos/<YYYYMMDD>/chronos-<stamp>/`),
+    or under the earlier cutover page's `--out /var/backups/chronos/n3`, are pre-cutover
+    backups too and fall under the same 90 days. The run above does not reach them (it lists
+    each such directory as `unclassified`). Prune each with its own run. The routine below
+    visits ONLY directories named exactly eight digits, plus `n3`; it skips a name that does
+    not exist (an unmatched glob stays literal, so without that check it would be passed to
+    the pruner as a root) and skips a symlink before the pruner is invoked. It is a dry run
+    until you set `PRUNE_FLAGS=--apply`. `PRUNE_FLAGS` must be empty, unset, or exactly
+    `--apply`; anything else is refused (exit 2) before the pruner runs, so it cannot add or
+    replace a `--root`. The block is a subshell, so a refusal does not close your terminal:
+    ```bash
+    (
+      case "${PRUNE_FLAGS:-}" in
+        "")      prune_flags=() ;;
+        --apply) prune_flags=(--apply) ;;
+        *)       echo "PRUNE_FLAGS must be empty or exactly --apply" >&2; exit 2 ;;
+      esac
+      for d in /var/backups/chronos/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] /var/backups/chronos/n3; do
+        [ -d "$d" ] || continue
+        [ -L "$d" ] && { echo "skipping symlink: $d" >&2; continue; }
+        python -m chronos.operations.backup_pruner --root "$d" --pretty "${prune_flags[@]}"
+      done
+    )
+    ```
+    The exit status of this block is not reliable evidence about any pruner invocation: it can
+    be `0` after an earlier refusal (`2`), find (`10`) or delete (`11`) when a later candidate
+    is skipped. Do not use `$?` as the result; read every report.
+    When the reports are what you expect, run it again with `export PRUNE_FLAGS=--apply` first. A directory
+    that does not match (`20261017-restore`, `7-unrelated`, anything else) is never entered;
+    if you keep older envelopes anywhere else, give that directory its own deliberate
+    `--root` run by hand. The pruner reads only the direct children of the root you give it
+    and is unchanged.
+
+- **What it deletes:** a published envelope `chronos-<stamp>/` whose own `manifest.json`
+  records a pre-cutover schema (`schema_head` of `schema_version:N`, N below 18 — the archive
+  of the old schema-17 database is one), an `encryption.scheme` exactly equal to the restore
+  drill's `age-x25519-v1`, and a `snapshot_completed_at` more than 90 days before now. Exactly
+  90 days is kept. Age and class are read from the manifest, never from file times.
+- **What it never deletes:** a post-cutover envelope (schema 18 and up) however old; anything
+  it cannot classify (an `alembic:`/`unversioned` head, a bad or missing manifest, an
+  unexpected file, a future-dated snapshot, any other encryption scheme, crash temps
+  `.chronos-…tmp`, restore copies, stray files) — these are listed under `unclassified` so you can decide by hand; anything
+  outside `--root`.
+- **Symlinks:** a symlink ANYWHERE under the root (a direct child, a file inside an envelope,
+  or deep inside any other directory), or a symlinked `--root`, refuses the whole run (exit 2)
+  before anything is deleted. It is never followed. A tree too deep or too large to check is
+  refused the same way.
+- **How a delete is bound to the right directory:** the envelope is opened once (no-follow) and
+  its identity must equal the one that was classified; it is then renamed to a private
+  `.n3-prune-<random>` name inside the root and checked again; its files are unlinked through the
+  open descriptor and the quarantine is removed. If a different directory takes the name, what
+  happens depends on when:
+  1. **Before the quarantine identity check passes:** the classified envelope's files are not
+     touched. If the rename moved a substitute into quarantine, that substitute is put back to
+     the envelope name; a classified envelope the swap moved aside stays there. The report names
+     the envelope under `failed`, and the exit is 2.
+  2. **After that check, before its files are unlinked:** the classified envelope's files ARE
+     removed (through the descriptor that was opened and checked; the swap cannot redirect
+     that), the substitute's content is not touched, the report names the envelope under
+     `failed`, the exit is 2, and the emptied envelope directory is wherever the swap moved it.
+  3. **After the last identity check, before the final `rmdir`:** someone with write access to
+     the root can swap in a directory of their own. If it is empty it is removed (they made it;
+     the run reports success); if it holds anything it stays untouched and the delete is
+     reported as `failed`. Only an empty directory an attacker created can be removed this way.
+
+  In every case a substitute's content is never deleted. A `.n3-prune-…` leftover means a delete was
+  interrupted; the next run lists it under `unclassified`.
+- **Exit codes:** `0` nothing to prune · `10` dry run found candidates (nothing deleted) ·
+  `11` pruned · `2` refused (or a delete failed; the report names it).
+- **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
+  `--now`. Output is JSON of counts, names and fixed reasons only — no manifest value and no
+  file name from inside an envelope is ever echoed.
+- **Restore copies:** under the default targets above (`/var/backups/chronos/restore-<stamp>`,
+  `/var/backups/chronos/n3-verify`) the cleartext copies `--restore-into` writes sit INSIDE the
+  backup root. The pruner reports each as `unclassified` ("not a published envelope name") and
+  never deletes it (measured: a dry run and an `--apply` left such a directory byte-identical).
+  Removing them is a by-hand owner step; their lifetime is the open decision stated under
+  "The isolation rule". A target pointed elsewhere is outside the root and equally yours to
+  remove. **Not covered:** off-host copies of an
+  envelope are yours to prune too.
 
 ## What a FAILED verdict means
 

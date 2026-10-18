@@ -3,7 +3,7 @@
 One command, owner-run, with every Chronos process stopped::
 
     python -m chronos.operations.cutover_archive --db data/chronos.db \\
-        --out /var/backups/chronos/n3 \\
+        --out /var/backups/chronos \\
         --restore-into /var/backups/chronos/n3-verify [--apply] [--pretty]
 
 Dry-run (the default) runs the gate below, prints what ``--apply`` would do, writes nothing

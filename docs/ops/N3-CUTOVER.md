@@ -123,7 +123,7 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
    python -m chronos.operations.cutover_archive \
      --db data/chronos.db \
-     --out /var/backups/chronos/n3 \
+     --out /var/backups/chronos \
      --restore-into /var/backups/chronos/n3-verify \
      --pretty
    ```
@@ -267,8 +267,11 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    autonomy per the shadow-campaign runbook.
 
 10. **Retention — 90 days.** The envelope under `--out` is a pre-cutover backup (its manifest
-    says `schema_version:17`); the pruner (`python -m chronos.operations.backup_pruner`) deletes
-    it after 90 days, as the ruling says. Keep `data/chronos.db.archived-<stamp>` (and its
+    says `schema_version:17`); the pruner deletes it after 90 days, as the ruling says. Run
+    it with `--root /var/backups/chronos`, the same directory as `--out` (it reads only the
+    direct children of `--root`; [`RESTORE-DRILL.md`](RESTORE-DRILL.md), "Pruning old backups"):
+    `python -m chronos.operations.backup_pruner --root /var/backups/chronos --pretty`, then add
+    `--apply`. Keep `data/chronos.db.archived-<stamp>` (and its
     siblings) until you are satisfied the keyed store is right, then the same 90 days; they are
     the unkeyed history and the rollback, nothing else reads them.
 
