@@ -933,41 +933,53 @@ def test_5e_fix_rt_a_pre_existing_empty_restore_target_refuses_before_any_envelo
     _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
 
 
-@pytest.mark.parametrize("where", ["tmp-child", "tmp-grandchild"])
-def test_5f_fix_rt_a_restore_target_under_tmp_refuses_before_any_envelope_exists(
+@pytest.mark.parametrize("where", ["sticky-child", "sticky-grandchild"])
+def test_5f_fix_rt_a_restore_target_under_a_sticky_dir_refuses_before_any_envelope_exists(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], where: str
 ) -> None:
-    """A different predictable /tmp name is insufficient (Daybreak): /tmp is sticky and world-
-    writable, so it is not part of a protected chain, whether the target is its child or sits in
-    a private directory inside it."""
+    """A sticky, world-writable directory (``/tmp``-style, mode 1777) is not part of a protected
+    chain (Daybreak), whether the restore target is its child or sits in a private 0700 directory
+    inside it. The test makes that directory itself, under this module's protected 0700 root, so
+    it does not depend on what the host's ``/tmp`` is (a sandbox mounts its own, 0755), and
+    asserts the refusal names THAT directory as the component it refused. Two rules refuse it:
+    as the target's direct parent it fails the owner-private rule on the leaf directory; as a
+    higher ancestor (the grandchild) it fails the sticky/writable-ancestor rule."""
 
     store = _store(tmp_path, binding="closed")
-    scratch = Path(tempfile.mkdtemp(prefix="chronos-fix-rt-", dir="/tmp"))  # 0700, this uid
-    target = (
-        scratch / "verify"
-        if where == "tmp-grandchild"
-        else Path("/tmp") / f"{scratch.name}-verify"  # absent; /tmp itself is its parent
-    )
+    sticky = tmp_path / "sticky-world-writable"
+    sticky.mkdir()
+    os.chmod(sticky, 0o1777)  # explicit: umask must not decide the premise
+    assert stat.S_IMODE(os.lstat(sticky).st_mode) == 0o1777
+    if where == "sticky-grandchild":
+        private = sticky / "private"
+        private.mkdir()
+        os.chmod(private, 0o700)  # owned by this uid, owner-only: only its parent is at fault
+        target = private / "verify"
+    else:
+        target = sticky / "verify"  # absent; the sticky directory itself is its parent
     before = _sha256(store.db)
-    try:
-        argv = [
-            "--db",
-            str(store.db),
-            "--out",
-            str(tmp_path / "backups"),
-            "--restore-into",
-            str(target),
-            "--apply",
-        ]
-        code = cutover.main(argv, clock=_clock(store.now))
-        report = json.loads(capsys.readouterr().out)
-        assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_PROTECTED", report
-        assert "/tmp" in report["failures"][0], report
-        assert not target.exists() and not (tmp_path / "backups").exists()
-        _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
-    finally:
-        shutil.rmtree(target, ignore_errors=True)
-        shutil.rmtree(scratch, ignore_errors=True)
+    argv = [
+        "--db",
+        str(store.db),
+        "--out",
+        str(tmp_path / "backups"),
+        "--restore-into",
+        str(target),
+        "--apply",
+    ]
+    code = cutover.main(argv, clock=_clock(store.now))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_PROTECTED", report
+    # the component walked and refused is the sticky directory (the --restore-into text also
+    # starts with its path, so pin the "<walked> <reason>" pair the walk emits)
+    reason = (
+        "is a sticky, group/other-writable directory (mode 1777"
+        if where == "sticky-grandchild"
+        else "is writable by its group or by others (mode 1777)"
+    )
+    assert f"{sticky} {reason}" in report["failures"][0], report
+    assert not target.exists() and not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
 
 
 def test_5g_fix_rt_the_runbook_target_is_out_of_tmp_and_the_stop_is_in_the_document() -> None:
