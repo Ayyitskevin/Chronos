@@ -78,8 +78,9 @@ from chronos.orders.ownership import PersistedOrderOwnershipLedger
 _REPO = Path(__file__).resolve().parents[2]
 _CHECKLIST = _REPO / "docs" / "ops" / "m4-read-only-gate-session-checklist.md"
 
-#: The keys of checklist §3.2, exactly. ``AUTONOMY_MANDATE_FILE`` is deliberately NOT a key
-#: there: the block carries it only as a comment ("stays unset").
+#: The keys of checklist §3.2 that carry a value. ``AUTONOMY_MANDATE_FILE`` is deliberately NOT a
+#: key there: the block carries it only as a comment ("stays unset"). The block's empty
+#: ``CHRONOS_PERSISTENCE_KEY`` line is pinned on its own; the suite's conftest supplies the key.
 _B1_KEYS = frozenset(
     {
         "BROKER_MODE",
@@ -179,7 +180,11 @@ def test_the_checklist_env_block_is_exactly_the_documented_b1_shape() -> None:
     block = _b1_env_block()
     values = {k: v for k, v in dotenv_values(stream=io.StringIO(block)).items() if v is not None}
 
-    assert set(values) == _B1_KEYS
+    # N3-1 R-2: b1-preflight refuses without the persistence key, so the block names it, with
+    # no value of any kind; the owner generates and places it (docs/ops/N3-CUTOVER.md).
+    assert set(values) == _B1_KEYS | {"CHRONOS_PERSISTENCE_KEY"}
+    assert values["CHRONOS_PERSISTENCE_KEY"] == ""
+    assert "docs/ops/N3-CUTOVER.md" in block
     assert values["BROKER_MODE"] == "ibkr"
     assert values["BROKER_ADAPTER"] == "official_ibkr"
     assert values["IB_ENVIRONMENT"] == "paper"
