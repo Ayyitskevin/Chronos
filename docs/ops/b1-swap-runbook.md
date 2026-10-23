@@ -13,7 +13,7 @@ reconnects and incidents; `docs/ibkr_setup.md` owns the API install. Line number
 commit this file was written on and drift; the tests named in each step pin the facts.
 
 **Why a runbook at all.** Moving to the real paper adapter is **not "config only"**: ten keys
-change (checklist `:87-101`) plus one the checklist's block omits (a `DATABASE_URL` of its own,
+change (checklist `:87-104`) plus one the checklist's block omits (a `DATABASE_URL` of its own,
 step 6); the factory builds a different adapter with four hooks — three safety hooks plus
 the S1-F1 cancel-ownership ledger (`src/chronos/runtime.py:305-331`); and five things are owner acts, not configuration (steps
 2-6 and your word in step 10). Contract and rehearsal: `tests/unit/test_b1_swap_contract.py`.
@@ -21,7 +21,7 @@ the S1-F1 cancel-ownership ledger (`src/chronos/runtime.py:305-331`); and five t
 ## Conventions
 - Run everything from the repository root, in the Chronos venv (`.venv/bin/...`).
 - Never paste a secret, a password or an account id into a chat, a ticket or a repository file.
-  Never put an IBKR username or password in any Chronos file (checklist `:103`).
+  Never put an IBKR username or password in any Chronos file (checklist `:106`).
 - **Stop rules.** A live port (7496 TWS / 4001 Gateway) listening, a banner that does not say
   paper/simulated, or any `True` where this runbook expects `False`: stop, do not connect.
 
@@ -71,7 +71,7 @@ port listening means you are in a live session: stop.
 Enable market data for at least the **first** symbol in `SYMBOL_ALLOWLIST` (the smoke test
 qualifies only the first symbol and fails on an `UNKNOWN`/empty quote by design; checklist
 `:82-84`; `docs/ibkr_setup.md`). There is no offline check. Missing permissions surface at first
-contact as explicit missing-data states (`UNKNOWN` quote quality; checklist `:199`
+contact as explicit missing-data states (`UNKNOWN` quote quality; checklist `:205`
 "quote permissions").
 
 ### Step 5 — The official TWS API, installed and pinned (owner act)
@@ -87,12 +87,12 @@ cd IBJts/source/pythonclient && /path/to/Chronos/.venv/bin/pip install .
 .venv/bin/pip show ibapi | grep -E '^(Name|Version):'
 ```
 **Expected:** a path inside the Chronos `.venv` `site-packages`; then `Name: ibapi` and a
-`Version:` line. Write the version in your session evidence doc (checklist `:254-262`).
+`Version:` line. Write the version in your session evidence doc (checklist `:262-267`).
 **Rollback:** `.venv/bin/pip uninstall ibapi` (reversible; Chronos runs in demo mode without it).
 
 ### Step 6 — The private `.env`, with its own `DATABASE_URL` (owner act)
 Create `.env` at the repository root. It is untracked, mode 0600, never committed. Start from
-the checklist's block (`:87-101`) **verbatim**, replace the placeholder account with your real
+the checklist's block (`:87-104`) **verbatim**, replace the placeholder account with your real
 paper id, and add **two lines the block does not carry**:
 
 ```dotenv
@@ -107,6 +107,9 @@ ALLOW_ORDER_TRANSMIT=false
 ALLOW_LIVE_TRADING=false
 SYMBOL_ALLOWLIST=AAPL,MSFT,SPY
 # AUTONOMY_MANDATE_FILE stays unset
+# CHRONOS_PERSISTENCE_KEY: yours, generated and placed by your keystrokes only, never an agent's;
+# this 0600 .env is its only working copy. Custody, escrow: docs/ops/N3-CUTOVER.md steps 5-6.
+CHRONOS_PERSISTENCE_KEY=
 DATABASE_URL=sqlite:////absolute/path/outside/the/repo/chronos-b1.db
 CHRONOS_CAPTURE_PEPPER=<64 hex, generated below; never shown to anyone>
 ```
@@ -141,7 +144,7 @@ other lines with your editor. **Expected:** `600 .env`; `database file absent (f
 pre-existing file must be unbound or already B1-scoped; if you are unsure, choose a new path).
 
 ### Step 7 — The configuration audit: both conjunctions must print `False`
-This is checklist §3.3 step 2 (`:108-118`), unchanged.
+This is checklist §3.3 step 2 (`:111-121`), unchanged.
 ```text
 # NOT RUN
 .venv/bin/python -c "
@@ -206,11 +209,11 @@ ls data/live_kill_switch.json
 ```
 **Expected:** the first line ends in `passed` with no failure (the module counts will have
 changed since this file was written: read the summary, do not match a number). The smoke test
-**must skip**, with a reason naming `CHRONOS_RUN_IBKR_SMOKE` (checklist `:124-127`): if it runs
+**must skip**, with a reason naming `CHRONOS_RUN_IBKR_SMOKE` (checklist `:127-130`): if it runs
 or errors, stop (your environment already opts in, or collection is broken). `status` prints the
 platform halt and audit-chain state (default paths `data/platform_halt.json`,
 `data/platform_audit.jsonl`); a **missing** kill-switch file means *disengaged*, the opposite of
-the platform halt, whose missing file reads *halted* (checklist `:119-123`). Record the output
+the platform halt, whose missing file reads *halted* (checklist `:122-126`). Record the output
 in the session-1 evidence doc.
 
 **A note on `.env` and pytest.** The preflight *function* reads no `.env` (the `b1-preflight` command opens the file you name; see step 8). The *test suite* does:
@@ -261,10 +264,10 @@ database file is bound. Those are steps 2-6.
 | setting | state | until | cite |
 |---|---|---|---|
 | `ALLOW_LIVE_TRADING` | **false, always, on this path** | never part of B1; live needs the full ADR-0009 conjunction (`IB_ENVIRONMENT=live`, a live `U…` account on `IB_ACCOUNT_ALLOWLIST`, arming, typed confirmation) | `settings.py:386-421`, `:502-523`; checklist `:50-56` |
-| `ALLOW_ORDER_TRANSMIT` | **false** for the whole read-only campaign | the campaign's EXIT (≥5 sessions including a restart, no mutation, no leak, no drift, no unexplained callback or pacing failure, fixtures replay offline exactly; checklist `:310-322`) **and a separate Kevin decision** for paper order transmission (ADR-0025 fixes a paper floor of ≥20 order lifecycles across ≥10 paper sessions, `docs/adr/ADR-0025-owner-directed-live-experimentation.md:96-102`; this is the author's reading — no document found grants transmission) | `settings.py:490-499` |
+| `ALLOW_ORDER_TRANSMIT` | **false** for the whole read-only campaign | the campaign's EXIT (≥5 sessions including a restart, no mutation, no leak, no drift, no unexplained callback or pacing failure, fixtures replay offline exactly; checklist `:317-327`) **and a separate Kevin decision** for paper order transmission (ADR-0025 fixes a paper floor of ≥20 order lifecycles across ≥10 paper sessions, `docs/adr/ADR-0025-owner-directed-live-experimentation.md:96-102`; this is the author's reading — no document found grants transmission) | `settings.py:490-499` |
 | …and when it is turned on | also needs `IB_ACCOUNT_ALLOWLIST` containing the paper id (the mode lock denies "paper account allowlist is empty"), a non-blank `IB_ACCOUNT_ID`, a broker-reported paper environment, readiness RECONCILED | | `src/chronos/control/modes.py:126-143`; `settings.py:448-453` |
 | `AUTONOMY_MANDATE_FILE` | **unset** for the whole campaign | D2 (you author the mandate) | checklist `:62-64`, `:100` |
-| `CHRONOS_RUN_IBKR_SMOKE` | **unset** unless you opt in to the read-only smoke on session 1 | your word for a session | checklist `:124-127`; `scripts/smoke_test_ibkr.py` force-sets it itself |
+| `CHRONOS_RUN_IBKR_SMOKE` | **unset** unless you opt in to the read-only smoke on session 1 | your word for a session | checklist `:127-130`; `scripts/smoke_test_ibkr.py` force-sets it itself |
 | exported `BROKER_*`, `IB_*`, `ALLOW_*`, `AUTONOMY_*` | **none** | always | step 1 |
 
 `IB_ACCOUNT_ALLOWLIST` is deliberately **not** in the read-only block (default empty,
@@ -311,7 +314,7 @@ paper transmission.
    (`pip uninstall ibapi`, step 5). **The pepper** stays in the untracked file; rotating it means
    new tokens, old fixtures remain valid but unlinkable to new ones, and losing it loses only
    linkability (`.env.example:215-218`).
-6. **Evidence you already captured** stays off-repo until the gate-passage PR (checklist `:299-308`);
+6. **Evidence you already captured** stays off-repo until the gate-passage PR (checklist `:306-313`);
    a rollback is not a reason to delete it.
 
 ## Not proven offline — what this runbook cannot tell you
