@@ -48,7 +48,8 @@ readonly SELF="${0##*/}"
 # and the path set is still bounded by the PR's own file list — but it means a PASS here proves
 # "the same lines landed", not "the same file landed".
 normalised_patch () {
-  git diff -U0 "$1" "$2" -- "${@:3}" | grep -v '^index ' | sed 's/^@@.*/@@/'
+  GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects diff -U0 "$1" "$2" -- "${@:3}" \
+    | grep -v '^index ' | sed 's/^@@.*/@@/'
 }
 
 # Sourced with POST_MERGE_PROOF_LIB=1, this file defines its helpers and stops, so the patch
@@ -141,7 +142,11 @@ pass "mergeCommit.oid is ${MERGE_SHA}"
 # --------------------------------------------------------------------------
 step "2. the merge result is on ${DEFAULT_BRANCH} (§6.2)"
 
-if git merge-base --is-ancestor "${MERGE_SHA}" "origin/${DEFAULT_BRANCH}" 2>/dev/null; then
+# D-44: every ancestry read in this proof (here, §6.3's identity, the PR base, and MERGE_SHA^ in
+# normalised_patch) disables grafts, replacement refs and the commit-graph, exactly as gate 30
+# does: a forged commit-graph in the clone or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store can
+# rewrite parent edges, so the answer is read from the commit objects themselves.
+if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects merge-base --is-ancestor "${MERGE_SHA}" "origin/${DEFAULT_BRANCH}" 2>/dev/null; then
   pass "${MERGE_SHA} is an ancestor of origin/${DEFAULT_BRANCH}"
 else
   fail "${MERGE_SHA} is NOT an ancestor of origin/${DEFAULT_BRANCH} — the result is stranded"
@@ -177,7 +182,7 @@ else
   fail "the PR touched paths that were not passed to this script, so any equality proved below is narrower than it reads: ${MISSING[*]}"
 fi
 
-if git merge-base --is-ancestor "${HEAD_OID}" "${MERGE_SHA}" 2>/dev/null; then
+if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects merge-base --is-ancestor "${HEAD_OID}" "${MERGE_SHA}" 2>/dev/null; then
   pass "identity preserved: ${HEAD_OID} is an ancestor of the merge result (merge or fast-forward)"
   printf '        §6.3 asks for byte equality only where identity was rewritten, so it is not\n'
   printf '        checked here: a merge commit may legitimately carry other changes to these paths.\n'
@@ -187,7 +192,7 @@ else
     pass "byte-for-byte equal on the given path(s): git diff --exit-code ${HEAD_OID} ${MERGE_SHA} -- ${PATHS[*]}"
   else
     # Byte equality stays the first question; this is only reached when it says no.
-    PR_BASE="$(git merge-base "${HEAD_OID}" "${MERGE_SHA}^" 2>/dev/null || true)"
+    PR_BASE="$(GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects merge-base "${HEAD_OID}" "${MERGE_SHA}^" 2>/dev/null || true)"
     if [[ -z "${PR_BASE}" ]]; then
       fail "the merge result differs from the reviewed candidate and the PR's base cannot be derived (no first parent of ${MERGE_SHA}), so the patch comparison cannot run"
     else
