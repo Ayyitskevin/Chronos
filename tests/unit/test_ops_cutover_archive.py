@@ -1187,34 +1187,135 @@ def _escrow(
     return completed, out
 
 
-def test_7c_the_escrow_tool_encrypts_the_key_it_is_given_and_proves_it_decrypts_back(
+def _age_decrypt(identity: Path, artifact: Path) -> subprocess.CompletedProcess[bytes]:
+    assert AGE is not None
+    return subprocess.run(
+        [AGE, "-d", "-i", str(identity), str(artifact)], capture_output=True, check=False
+    )
+
+
+def _x25519_stanzas(artifact: Path) -> int:
+    """How many recipient stanzas the artifact's own age header carries (age v1: one
+    ``-> X25519 <share>`` line per recipient) — read from the file, independent of the report."""
+
+    header = artifact.read_bytes().split(b"\n---", 1)[0]
+    assert header.startswith(b"age-encryption.org/v1\n"), header[:32]
+    return sum(1 for line in header.split(b"\n") if line.startswith(b"-> X25519 "))
+
+
+@dataclass(frozen=True)
+class RecoveryIdentity:
+    identity: Path
+    public_key: str
+
+
+@pytest.fixture
+def recovery_identity(
+    tmp_path: Path, age_keys: KeyMaterial, monkeypatch: pytest.MonkeyPatch
+) -> RecoveryIdentity:
+    """A THROWAWAY recovery identity substituted for the pinned recipient at its one home,
+    ``restore_drill.KEVIN_RECOVERY_RECIPIENT`` (``setattr`` raises if the constant ever moves),
+    so a test can open what the escrow tool wrote to the recovery recipient. Kevin's real key is
+    untouched: its private half exists on no fleet host. The recipients file names the
+    substitute beside the host key only so that code which still validates that file (the
+    drill; the escrow tool before K-20261023-003) reaches encryption under the substitution."""
+
+    identity = tmp_path / "keys" / "recovery-throwaway.age"
+    public_key = _keygen(identity)
+    monkeypatch.setattr(drill, "KEVIN_RECOVERY_RECIPIENT", public_key)
+    age_keys.recipients.write_text(f"{age_keys.host_public_key}\n{public_key}\n", encoding="utf-8")
+    return RecoveryIdentity(identity=identity, public_key=public_key)
+
+
+def test_7c_the_escrow_tool_encrypts_the_key_to_the_recovery_recipient_alone(
     tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
-    """P1-3: the escrow step is a pinned tool. A TEST key (derived at run time) goes in on
-    stdin, never through the environment or argv; the tool encrypts it to the drill's two
-    validated recipients, decrypts the artifact back through the host identity in a private
-    scratch, compares in process, and reports — never printing the key or a digest of it."""
+    """K-20261023-003 (escrow = recovery-key-only): the artifact is age-encrypted to exactly ONE
+    recipient, the pinned ``KEVIN_RECOVERY_RECIPIENT``; the host identity is not a recipient and
+    cannot open it. A TEST key (derived at run time) goes in on stdin, never through the
+    environment or argv; the report names the one recipient, claims no decrypt (no key on the
+    host could prove one — that proof is Kevin's, off-host, runbook step 6), and never prints
+    the key or a digest of it."""
 
     key = _hex("n3-2 r1 TEST persistence key — never a real one")
     completed, out = _escrow(tmp_path, key + "\n")
     assert completed.returncode == 0, completed.stderr
+    by_host = _age_decrypt(age_keys.identity, out)
+    assert by_host.returncode != 0 and by_host.stdout == b"", "the host identity opened it"
+    assert b"no identity matched" in by_host.stderr, by_host.stderr
+    assert _x25519_stanzas(out) == 1
     report = json.loads(completed.stdout)
-    assert report["verdict"] == "ESCROWED" and report["verified"] is True
+    assert report["recipients"] == [drill.KEVIN_RECOVERY_RECIPIENT]
+    assert report["verdict"] == "ESCROWED" and report["decrypt_verified"] is False
+    assert "verified" not in report  # no field that reads as a decrypt proof
     assert report["out"] == str(out) and out.is_file()
-    assert sorted(report["recipients"]) == sorted(
-        [age_keys.host_public_key, drill.KEVIN_RECOVERY_RECIPIENT]
-    )
     assert report["ciphertext_sha256"] == _sha256(out)
     assert oct(out.stat().st_mode & 0o777) == "0o600"
     assert key not in completed.stdout + completed.stderr
     without_digest = completed.stdout.replace(report["ciphertext_sha256"], "")
     assert re.search(r"[0-9a-f]{64}", without_digest) is None  # only the ciphertext digest
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(out)], check=True, capture_output=True
-    )
-    assert decrypted.stdout == (key + "\n").encode()
-    assert not list((tmp_path / "escrow").glob(".chronos-escrow-*"))  # the scratch is gone
+
+
+def test_7l_the_escrow_artifact_opens_with_the_recovery_identity_and_nothing_else(
+    tmp_path: Path,
+    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The single recipient, pinned by decryption: with a throwaway recovery identity substituted
+    for the pinned recipient, the artifact decrypts through it to exactly the typed line; the
+    host identity — present, valid, 0600 — cannot open it; the header carries one stanza."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    key = _hex("b2 TEST key for the single-recipient pin — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0, report
+    by_host = _age_decrypt(age_keys.identity, out)
+    assert by_host.returncode != 0 and by_host.stdout == b"", "the host identity opened it"
+    by_recovery = _age_decrypt(recovery_identity.identity, out)
+    assert by_recovery.returncode == 0, by_recovery.stderr
+    assert by_recovery.stdout == (key + "\n").encode()
+    assert _x25519_stanzas(out) == 1
+    assert report["recipients"] == [recovery_identity.public_key]
+    assert key not in json.dumps(report)
+
+
+def test_7m_an_empty_artifact_is_refused_and_named_never_reported_escrowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no decrypt on the host, age exiting 0 is not the whole claim: the tool proves the
+    artifact it holds is non-empty before it reports. An encrypt step that leaves an empty file
+    (forced: the real age runs, then the file is truncated) is ``ARTIFACT_EMPTY``, and — a
+    post-create failure — the file is left in place and named for the owner to shred."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    real_encrypt = escrow._encrypt
+
+    def truncating(*args: Any, **kwargs: Any) -> None:
+        real_encrypt(*args, **kwargs)
+        os.truncate(out, 0)
+
+    monkeypatch.setattr(escrow, "_encrypt", truncating)
+    key = _hex("b2 TEST key for the empty artifact — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "ARTIFACT_EMPTY", report
+    created = report["created_artifact"]
+    assert created["path"] == str(out) and created["removed"] is False
+    assert created["identity"] == "{}:{}".format(*_identity(out))
+    assert _entries(out.parent) == [out.name] and out.stat().st_size == 0
+    assert key not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
@@ -1268,7 +1369,10 @@ def test_7e_the_escrow_tool_never_reads_the_key_from_the_environment(
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     assert code == 0, capsys.readouterr()
     assert "CHRONOS_PERSISTENCE_KEY" not in recorder.looked_up
-    assert drill.IDENTITY_ENV in recorder.looked_up
+    # K-20261023-003: the host's key files are outside the escrow's trust domain — not looked up
+    assert drill.IDENTITY_ENV not in recorder.looked_up
+    assert drill.RECIPIENTS_ENV not in recorder.looked_up
+    assert "PATH" in recorder.looked_up  # the recorder sees lookups: age is resolved on PATH
     assert "sentinel-never-read" not in capsys.readouterr().out
 
 
@@ -1289,21 +1393,22 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
 @pytest.mark.parametrize(
     "shape",
     [
-        "swap-then-decrypt-fails",
-        "swap-then-decrypt-succeeds",
-        "decrypt-fails",
+        "swap-then-digest-fails",
+        "swap-then-digest-succeeds",
+        "digest-fails",
     ],
 )
 def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_created(
     tmp_path: Path,
-    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     shape: str,
 ) -> None:
     """Daybreak P1-3 (r1, r2): after the artifact is created, its name is swapped (the created
-    file renamed aside, a foreign file planted at the name) and/or the decrypt-and-compare fails.
-    The tool verifies through the descriptor it holds, proves the name still resolves to it
+    file renamed aside, a foreign file planted at the name) and/or the step between the tool's
+    two name checks fails (B2: the ciphertext digest — the host-decrypt proof that sat there is
+    gone). The tool reads through the descriptor it holds, proves the name still resolves to it
     before success, and after a post-create failure DELETES NOTHING (r3: Linux has no
     unlink-by-descriptor, so any unlink is by name and can hit a swapped-in foreign entry): the
     foreign entry survives, the created ciphertext stays — at its name, or under the renamed
@@ -1315,25 +1420,25 @@ def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_c
     out.parent.mkdir()
     aside = out.with_name("artifact-aside")
     foreign = b"not the file this run created"
-    real_decrypt = escrow._decrypts_back_to
+    real_digest = escrow._sha256_fd
 
-    def hooked(*args: Any, **kwargs: Any) -> None:
-        monkeypatch.setattr(escrow, "_decrypts_back_to", real_decrypt)
+    def hooked(fd: int) -> str:
+        monkeypatch.setattr(escrow, "_sha256_fd", real_digest)
         if shape.startswith("swap"):
             os.rename(out, aside)
             out.write_bytes(foreign)
         if shape.endswith("fails"):
-            raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
-        real_decrypt(*args, **kwargs)
+            raise escrow.EscrowRefused("FORCED", "forced: the digest step failed")
+        return real_digest(fd)
 
-    monkeypatch.setattr(escrow, "_decrypts_back_to", hooked)
+    monkeypatch.setattr(escrow, "_sha256_fd", hooked)
     key = _hex(f"n3-2 r2 TEST key for {shape} — never a real one")
     monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     report = json.loads(capsys.readouterr().out)
     assert code == 2 and report["verdict"] == "REFUSED", report
-    expected_code = "TARGET_SWAPPED" if shape == "swap-then-decrypt-succeeds" else "AGE_FAILED"
-    assert report["code"] == expected_code, report  # succeeds: the decrypt read the HELD inode
+    expected_code = "TARGET_SWAPPED" if shape == "swap-then-digest-succeeds" else "FORCED"
+    assert report["code"] == expected_code, report  # succeeds: the digest read the HELD inode
     created = report["created_artifact"]
     assert created["path"] == str(out)
     assert created["removed"] is False and "shred" in created["note"]  # the tool deletes nothing
@@ -1346,10 +1451,7 @@ def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_c
         assert _entries(out.parent) == [out.name]  # the created file stays at its name
         ciphertext = out
     assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
-    )
+    decrypted = _age_decrypt(recovery_identity.identity, ciphertext)
     assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
     assert key not in json.dumps(report)
 
@@ -1390,6 +1492,28 @@ def test_7k_the_runbook_says_the_escrow_tool_deletes_nothing_after_a_failure() -
     text = RUNBOOK.read_text(encoding="utf-8")
     step6 = text[text.index("6. **Escrow") : text.index("7. **")]
     assert "deletes nothing" in step6 and "shred" in step6 and "removed: true" not in step6
+
+
+def test_7n_the_runbook_moves_the_decrypt_proof_off_host_before_any_copy_is_deleted() -> None:
+    """K-20261023-003: the host cannot decrypt the escrow, so the decrypt-and-compare is Kevin's,
+    off-host, through his recovery identity — a required step BEFORE any local ciphertext copy is
+    deleted; the page no longer says the host identity can open the artifact."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
+    prose = " ".join(step6.split())
+    assert '"decrypt_verified": false' in step6 and '"verified": true' not in step6
+    assert "off-host" in prose and "recovery identity" in prose
+    compare = step6.index("age -d -i <your recovery identity>")
+    assert "ssh <host>" in step6 and "MATCH" in step6
+    # the .env value never leaves the host: what crosses ssh is its digest
+    remote = re.search(r'ssh <host> "([^"]*)"', step6)
+    assert remote is not None and remote.group(1).endswith("| sha256sum"), step6
+    assert compare < step6.index("shred -u")  # the proof comes before the deletion
+    assert "host identity can also open" not in prose
+    assert "decrypts the new artifact through the host identity" not in prose
+    rollback = " ".join(text[text.index("## Rollback") :].split())
+    assert "(or the host identity)" not in rollback
 
 
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
@@ -2477,18 +2601,18 @@ def test_9l_an_archived_report_proves_the_admitted_set_quiet_and_the_live_names_
 
 def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothing(
     tmp_path: Path,
-    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Daybreak r2 P1-3, the exact probe: the identity predicate confirms the created artifact
     and, before it returns, the created file is renamed aside and a foreign file planted at the
     name. r2 unlinked the name after the predicate — the foreign entry. r3: after a post-create
-    failure the tool deletes nothing, so there is no interval to race — the only ``unlink`` the
-    module performs is its own scratch cleartext (recorded here: none on this path, where the
-    decrypt is forced to fail before the scratch exists), the predicate is not consulted for a
-    cleanup, the foreign entry (wherever the probe put one) survives, and the created ciphertext
-    is reported by device:inode for the owner to shred."""
+    failure the tool deletes nothing, so there is no interval to race — the module performs no
+    ``unlink`` at all (B2: the host-decrypt proof and its private scratch are gone; recorded here,
+    with the step between the two name checks — the ciphertext digest — forced to fail), the
+    predicate is not consulted for a cleanup, the foreign entry (wherever the probe put one)
+    survives, and the created ciphertext is reported by device:inode for the owner to shred."""
 
     from chronos.operations import persistence_key_escrow as escrow
 
@@ -2497,10 +2621,10 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
     aside = out.with_name("artifact-aside")
     foreign = b"not the file this run created"
 
-    def failing_decrypt(*args: Any, **kwargs: Any) -> None:
-        raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
+    def failing_digest(fd: int) -> str:
+        raise escrow.EscrowRefused("FORCED", "forced: the digest step failed")
 
-    monkeypatch.setattr(escrow, "_decrypts_back_to", failing_decrypt)
+    monkeypatch.setattr(escrow, "_sha256_fd", failing_digest)
     real_predicate = escrow._entry_is_real_file
     verdicts: list[bool] = []
 
@@ -2525,7 +2649,7 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
     monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     report = json.loads(capsys.readouterr().out)
-    assert code == 2 and report["code"] == "AGE_FAILED", report
+    assert code == 2 and report["code"] == "FORCED", report
     assert unlinked == [], unlinked  # nothing was unlinked on the failure path
     assert verdicts == [True]  # the one post-create check; no cleanup consults the name
     created = report["created_artifact"]
@@ -2535,14 +2659,11 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
         assert out.read_bytes() == foreign  # the foreign entry survives
     assert _entries(out.parent) == sorted(p.name for p in (out, aside) if p.exists())
     assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
-    )
+    decrypted = _age_decrypt(recovery_identity.identity, ciphertext)
     assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
     assert key not in json.dumps(report)
-    # and statically: the module's only deletions are its private scratch (the cleartext the
-    # proof wrote, and the 0700 directory it made) — never the artifact, never by name
+    # and statically: the module deletes nothing at all — no scratch since B2 removed the
+    # host-decrypt proof, never the artifact, never by name
     tree = ast.parse(ESCROW_MODULE.read_text(encoding="utf-8"))
     deleters = sorted(
         ast.unparse(node)
@@ -2551,7 +2672,7 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("unlink", "remove", "rmdir", "rmtree", "unlink_created")
     )
-    assert deleters == ["os.rmdir(scratch)", "os.unlink('key', dir_fd=scratch_fd)"], deleters
+    assert deleters == [], deleters
 
 
 # ------------------------------------------- (10, r3) the live namespace is never vacant
