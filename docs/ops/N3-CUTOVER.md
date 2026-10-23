@@ -210,36 +210,60 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    it is never typed into an agent, a handoff, a ticket or a chat. No example appears on this
    page on purpose.
 
-6. **Escrow one copy off-host, encrypted, and prove it decrypts back.** The tool below reads the
-   key from a non-echoing prompt — type (or paste) the same 64 hex characters you put in `.env`;
-   it never takes them from the environment or the command line, so an unset variable cannot
-   silently escrow an empty line — refuses anything but exactly one line of 64 lowercase hex,
-   encrypts the line with `age` to the two recipients every backup uses (the host identity's
-   public key and `KEVIN_RECOVERY_RECIPIENT`, validated by the restore drill from
-   `CHRONOS_BACKUP_AGE_IDENTITY` / `CHRONOS_BACKUP_AGE_RECIPIENTS` exactly as in step 2),
-   immediately decrypts the new artifact through the host identity into a private scratch and
-   compares it in process (never printing it), and only then reports:
+6. **Escrow one copy off-host, encrypted to your recovery key alone, and prove it decrypts back
+   off-host.** The tool below reads the key from a non-echoing prompt — type (or paste) the same
+   64 hex characters you put in `.env`; it never takes them from the environment or the command
+   line, so an unset variable cannot silently escrow an empty line — refuses anything but exactly
+   one line of 64 lowercase hex, and encrypts the line with `age` to ONE recipient: your recovery
+   key, `KEVIN_RECOVERY_RECIPIENT`, pinned in code in the restore drill (ruling K-20261023-003).
+   The host identity is not a recipient. Nothing on this host can open the artifact, so the tool
+   cannot prove it decrypts; that proof is yours, off-host, below.
    ```bash
    python -m chronos.operations.persistence_key_escrow --out chronos-persistence-key.age --pretty
    ```
-   Expect exit `0`, `"verdict": "ESCROWED"`, `"verified": true`, the two `recipients`, and the
-   artifact's `ciphertext_sha256`. Exit `2` with `code: KEY_MALFORMED` means the line was not
-   64 lowercase hex (nothing was written); `ESCROW_MISMATCH` means the artifact did not decrypt
-   to what you typed — do not keep it. After any failure once the file was created, the tool
-   **deletes nothing** (a removal would be by name, and a name can be swapped under it in the
-   last instant; only its own private scratch is ever removed): `created_artifact` in the report
+   Expect exit `0`, `"verdict": "ESCROWED"`, `"decrypt_verified": false`, one `recipients` entry
+   (your recovery key), and the artifact's `ciphertext_sha256`.
+
+   | `ESCROWED` proves (the report's `proved_on_host`) | It does NOT prove |
+   |---|---|
+   | the line you typed was exactly one line of 64 lowercase hex (an empty line is refused) | that the artifact decrypts to your key: only your recovery identity can open it, and it is never on this host |
+   | `age` exited 0 | that the `.env` holds the same value you typed |
+   | the artifact is a non-empty regular file that `age` created through the directory descriptor the tool holds, held open since, still at the name when the tool reports | where the artifact goes next, or that it gets there |
+
+   Exit `2` with `code: KEY_MALFORMED` means the line was not 64 lowercase hex (nothing was
+   written); `AGE_MISSING`, that `age` is not on PATH (nothing was written); `ARTIFACT_EMPTY`,
+   that `age` exited 0 but the file it left is empty. After any failure once the file was
+   created, the tool **deletes nothing** (a removal would be by name, and a name can be swapped
+   under it in the last instant; it removes nothing, ever): `created_artifact` in the report
    names the ciphertext this run created by `path` and device:inode (`removed` is always
    `false`) — find it (`find <dir> -inum <inode>`) and shred it yourself, at its name or under a
    renamed entry. `TARGET_SWAPPED` means the output name stopped naming the file the tool wrote
-   before the proof finished (something renamed or replaced it): the tool verifies through the
-   descriptor it holds, so the ciphertext this run created sits under the renamed entry; the
-   foreign entry at the name is not the tool's and was not touched. Then move
-   `chronos-persistence-key.age` off this host (password manager attachment, or the same place
-   the backup escrow goes), and `shred -u` or `rm` the local file yourself — the tool never
-   deletes a verified artifact either. One escrow copy, exactly; the `.env` on the host is the
-   only working copy. Your recovery private key never exists on a fleet host; the host identity
-   can also open this artifact, as it can every backup — that is what made the on-host
-   decrypt-and-compare possible.
+   before it reported (something renamed or replaced it): the tool reads through the descriptor
+   it holds, so the ciphertext this run created sits under the renamed entry; the foreign entry
+   at the name is not the tool's and was not touched.
+
+   **Then decrypt and compare, off-host. This is required before any copy is deleted.** On your
+   own machine, where your recovery identity lives (never on this host, never on a fleet host),
+   copy the artifact over, decrypt it with your recovery identity and compare its sha256 with
+   the sha256 of the host's `.env` value. The key never leaves the host and the decrypted escrow
+   never leaves your machine: only the host-side digest crosses ssh, both values stay in shell
+   memory, and nothing is printed or written to disk. `<host>` is this host's ssh name and
+   `<checkout>` this checkout's absolute path:
+   ```bash
+   scp <host>:<checkout>/chronos-persistence-key.age .
+   a=$(age -d -i <your recovery identity> chronos-persistence-key.age) && [ ${#a} -eq 64 ] &&
+     b=$(ssh <host> "sed -n 's/^CHRONOS_PERSISTENCE_KEY=//p' <checkout>/.env | sha256sum") &&
+     [ "$(echo "$a" | sha256sum)" = "$b" ] && echo MATCH || echo 'NO MATCH: delete nothing'
+   unset a b
+   ```
+   `MATCH` is the proof the host cannot give. On anything else (`NO MATCH`, an age error, an ssh
+   error) delete nothing: keep the `.env` and every copy of the artifact, and find out why (a
+   `.env` line written with quotes, `export` or a trailing space reads as a mismatch). Only after
+   `MATCH`: put the artifact where it lives (password manager attachment, or the same place the
+   backup escrow goes), then `shred -u` or `rm` the copy on this host yourself, and any other
+   transient copy — the tool never deletes an artifact. One escrow copy, exactly; the `.env` on
+   the host is the only working copy. Your recovery private key never exists on a fleet host,
+   and no key that can open this artifact does either.
 
 7. **Vacate the live names yourself, then start the backend.** `ls -la data/` once more (step
    3's listing: four sentinel directories, three `.archived-<stamp>` files, the old siblings).
@@ -296,8 +320,8 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
   (`RESTORE-DRILL.md`, step 4); a restored schema-17 copy is usable only under the pre-cutover
   code.
 - **The key is lost after cutover:** the keyed store cannot bind and has no proof path;
-  the escrow copy is the only supported recovery (step 6): decrypt it with your recovery key
-  (or the host identity), put the value back in the 0600 `.env`, start. If the escrow copy is gone too,
+  the escrow copy is the only supported recovery (step 6): decrypt it off-host with your
+  recovery identity (the host identity cannot open it), put the value back in the 0600 `.env`, start. If the escrow copy is gone too,
   this is an owner decision, not a procedure: this command refuses the keyed store
   (`SCHEMA_ALREADY_CURRENT` — a store at the running schema is not a pre-cutover store), nothing
   on this page re-keys it, and its rows written since cutover are unrecoverable as a bound store;
