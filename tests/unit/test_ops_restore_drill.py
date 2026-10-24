@@ -16,6 +16,7 @@ measured numbers and the runbook on top of that posture rather than beside it.
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import itertools
 import json
@@ -27,6 +28,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -192,6 +194,47 @@ def _fixed_clock(wall: datetime, ticks: list[float]) -> Clock:
     return Clock(wall=lambda: wall, monotonic=lambda: next(it))
 
 
+def _before_removal(monkeypatch: pytest.MonkeyPatch, observe: Callable[[Path], None]) -> None:
+    """N3-4: the drill removes its cleartext copy before ``restore()`` returns, so a test that must
+    look at the copy looks at the instant the removal begins — after every verifier has spoken,
+    through the module's own removal seam — and asserts afterwards that it is gone."""
+
+    real = drill._remove_restore_copy
+
+    def observing(
+        staged: object, manifest: BackupManifest, copy_fd: int | None
+    ) -> tuple[list[str], tuple[str, ...]]:
+        observe(staged.target_abs)  # type: ignore[attr-defined]
+        return real(staged, manifest, copy_fd)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(drill, "_remove_restore_copy", observing)
+
+
+def _refusing_unlink(
+    monkeypatch: pytest.MonkeyPatch, targets: tuple[Path, ...], name: str
+) -> list[str]:
+    """``os.unlink`` as the module sees it refuses ``name`` (EPERM) when its ``dir_fd`` designates
+    one of ``targets`` — the removal's own unlink and nothing else (the rpo scratch and the
+    decrypt's clean-up keep working). Returns the list the refusals are recorded in."""
+
+    real_unlink = os.unlink
+    refused: list[str] = []
+
+    def unlink(path: str, *, dir_fd: int | None = None) -> None:
+        if dir_fd is not None and path == name:
+            held = os.fstat(dir_fd)
+            for target in targets:
+                if target.exists():
+                    st = os.stat(target)
+                    if (st.st_dev, st.st_ino) == (held.st_dev, held.st_ino):
+                        refused.append(path)
+                        raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(drill.os, "unlink", unlink)
+    return refused
+
+
 # ----------------------------------------------------------- (1) backup + manifest
 
 
@@ -297,7 +340,7 @@ def test_1e_a_source_that_is_not_a_regular_file_is_refused_typed(tmp_path: Path,
 
 
 def test_1f_the_backup_api_captures_committed_wal_rows_that_a_file_copy_misses(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The integration drill's posture (tests/integration/test_backup_restore_drill.py):
     a holder connection keeps the WAL from being checkpointed, so committed rows live only
@@ -328,29 +371,41 @@ def test_1f_the_backup_api_captures_committed_wal_rows_that_a_file_copy_misses(
     finally:
         holder.close()
     assert manifest.row_counts["application_events"] == 7
+    # N3-4: the drill removes its copy before returning, so the rows are counted at the instant
+    # the removal begins — after every verifier — through the module's own seam
+    counted: list[int] = []
+    _before_removal(
+        monkeypatch, lambda t: counted.append(_row_count(t / "chronos.db", "application_events"))
+    )
     report = restore(manifest, tmp_path / "restored")
     assert report.verified, report.failures
-    assert _row_count(Path(report.restored_path), "application_events") == 7
+    assert counted == [7] and not (tmp_path / "restored").exists()
 
 
 # ----------------------------------------------------------- (2) restore + verify
 
 
 def test_2a_restore_into_a_fresh_dir_is_verified_and_rto_is_the_pinned_monotonic_delta(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = _demo_store(tmp_path)
     wall = datetime(2026, 9, 15, 2, 0, tzinfo=UTC)
-    # restore() reads the monotonic clock exactly twice: at start and at verified
+    # restore() reads the monotonic clock exactly twice: at start and at verified (N3-4: the
+    # removal that follows is not restore time and reads no clock)
     clock = _fixed_clock(wall, [100.0, 103.25])
     manifest = backup(db, tmp_path / "out", clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    was_file: list[bool] = []
+    _before_removal(monkeypatch, lambda t: was_file.append((t / "chronos.db").is_file()))
     report = restore(manifest, tmp_path / "restored", clock=clock)
     assert report.verified, report.failures
     assert report.rto_s == pytest.approx(3.25)
     assert report.sha256_ok and report.schema_head_ok and report.row_counts_ok
     assert report.audit_chain == "NOT_APPLICABLE"
     assert Path(report.restored_path).parent == tmp_path / "restored"
-    assert Path(report.restored_path).is_file()
+    # N3-4: a regular file when every verifier had spoken; gone, with its directory, afterwards
+    assert was_file == [True]
+    assert report.restore_copy_removed is True and report.removed == ("chronos.db",)
+    assert not (tmp_path / "restored").exists()
 
 
 def test_2b_a_digest_that_is_not_the_restored_bytes_fails_sha256(tmp_path: Path) -> None:
@@ -366,12 +421,14 @@ def test_2b_a_digest_that_is_not_the_restored_bytes_fails_sha256(tmp_path: Path)
     assert any(f.startswith("sha256:") for f in report.failures), report.failures
 
 
-def test_2c_a_dropped_row_in_the_restored_copy_fails_row_counts(tmp_path: Path) -> None:
+def test_2c_a_dropped_row_in_the_restored_copy_fails_row_counts(
+    tmp_path: Path, age_keys: KeyMaterial
+) -> None:
     db = _demo_store(tmp_path, events=4)
     manifest = backup(db, tmp_path / "out")
-    report = restore(manifest, tmp_path / "restored")
-    assert report.verified, report.failures
-    restored = Path(report.restored_path)
+    # N3-4: the drill's own copy is gone when restore() returns, so the verifier is exercised on
+    # the by-hand restore (the runbook's step 4) through the public verify_restored
+    restored = _decrypt(manifest, age_keys.identity, tmp_path / "restored")
     with closing(sqlite3.connect(restored)) as connection, connection:
         connection.execute(
             "DELETE FROM application_events WHERE id = (SELECT MIN(id) FROM application_events)"
@@ -397,11 +454,13 @@ def test_2d_a_non_empty_restore_target_is_refused(tmp_path: Path) -> None:
     assert sorted(p.name for p in target.iterdir()) == ["something"]
 
 
-def test_2e_the_schema_head_check_refuses_a_restored_store_whose_head_moved(tmp_path: Path) -> None:
+def test_2e_the_schema_head_check_refuses_a_restored_store_whose_head_moved(
+    tmp_path: Path, age_keys: KeyMaterial
+) -> None:
     db = _demo_store(tmp_path)
     manifest = backup(db, tmp_path / "out")
-    report = restore(manifest, tmp_path / "restored")
-    restored = Path(report.restored_path)
+    # N3-4: as in 2c — the by-hand restore, verified through the public seam
+    restored = _decrypt(manifest, age_keys.identity, tmp_path / "restored")
     with closing(sqlite3.connect(restored)) as connection, connection:
         connection.execute("UPDATE schema_version SET version = version + 1")
     failures, facts = verify_restored(manifest, restored, None)
@@ -411,7 +470,7 @@ def test_2e_the_schema_head_check_refuses_a_restored_store_whose_head_moved(tmp_
 
 
 def test_2f_the_audit_chain_travels_with_the_backup_and_verifies_on_the_restored_store(
-    tmp_path: Path,
+    tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
     db = _demo_store(tmp_path)
     log = AuditLog(db.parent / "platform_audit.jsonl")
@@ -423,8 +482,16 @@ def test_2f_the_audit_chain_travels_with_the_backup_and_verifies_on_the_restored
     report = restore(manifest, tmp_path / "restored")
     assert report.verified, report.failures
     assert report.audit_chain == "VALID"
-    # a broken chain on the restored store is a failure, not a warning
-    restored_log = Path(report.target_dir) / "platform_audit.jsonl"
+    # N3-4: that copy and its audit pair went with it, in this order, and so did the directory
+    assert report.removed == ("chronos.db", "platform_audit.jsonl", "platform_audit.head.json")
+    assert report.restore_copy_removed and not (tmp_path / "restored").exists()
+    # a broken chain beside a restored store is a failure, not a warning: on the by-hand restore
+    # (the runbook's step 4 — decrypt, then copy the audit pair beside it), verified publicly
+    by_hand = _decrypt(manifest, age_keys.identity, tmp_path / "by-hand")
+    envelope = Path(manifest.audit_log_path).parent
+    for name in (drill.AUDIT_LOG_NAME, drill.AUDIT_ANCHOR_NAME):
+        shutil.copyfile(envelope / name, by_hand.parent / name)
+    restored_log = by_hand.parent / "platform_audit.jsonl"
     lines = restored_log.read_text().splitlines()
     lines[0] = (
         lines[0].replace('"n": 1', '"n": 9')
@@ -432,7 +499,7 @@ def test_2f_the_audit_chain_travels_with_the_backup_and_verifies_on_the_restored
         else lines[0].replace("1", "9", 1)
     )
     restored_log.write_text("\n".join(lines) + "\n")
-    failures, facts = verify_restored(manifest, Path(report.restored_path), restored_log)
+    failures, facts = verify_restored(manifest, by_hand, restored_log)
     assert facts["audit_chain"] == "BROKEN"
     assert any(f.startswith("audit_chain:") for f in failures), failures
 
@@ -791,9 +858,14 @@ def test_r1_3c_destination_directories_are_fsynced(
     manifest = backup(db, tmp_path / "out")
     assert os.stat(tmp_path / "out").st_ino in synced_dirs, "the backup directory was not fsynced"
     synced_dirs.clear()
+    # N3-4: the target is gone when restore() returns; its inode is read at the instant the
+    # removal begins, and the parent must be fsynced after the rmdir
+    target_ino: list[int] = []
+    _before_removal(monkeypatch, lambda t: target_ino.append(os.stat(t).st_ino))
     restore(manifest, tmp_path / "restored")
-    assert os.stat(tmp_path / "restored").st_ino in synced_dirs, (
-        "the restore target was not fsynced"
+    assert target_ino and target_ino[0] in synced_dirs, "the restore target was not fsynced"
+    assert synced_dirs and synced_dirs[-1] == os.stat(tmp_path).st_ino, (
+        "the parent was not fsynced after the target's removal"
     )
 
 
@@ -1017,8 +1089,18 @@ def test_r3_1b_an_ancestor_swap_after_the_restore_copy_is_never_verified(
     assert swapped, "the swap must have happened after the copy"
     assert report.verified is False
     assert any("restore target swapped" in f for f in report.failures), report.failures
-    # the copy this drill made is in the renamed directory, not at the reported path
-    assert (swapped[0] / manifest.cleartext_name).is_file()
+    # N3-4: the copy this drill made went through the held descriptor — out of the renamed
+    # directory, where it really was — and the stranger planted at the reported path was never
+    # touched (no path re-resolution); the emptied directory stays, because its leaf name no
+    # longer designates it, and the report says so, typed
+    assert swapped[0].is_dir() and list(swapped[0].iterdir()) == []
+    assert (target / manifest.cleartext_name).read_bytes() == clear.read_bytes()
+    assert report.removed == ("chronos.db", "platform_audit.jsonl", "platform_audit.head.json")
+    assert report.restore_copy_removed is False
+    assert any(
+        f.startswith("RESTORE_COPY_NOT_REMOVED:") and "no longer names the directory" in f
+        for f in report.failures
+    ), report.failures
 
 
 def _fork_backup(db: Path, out: Path, crash: str) -> tuple[int, Path | None]:
@@ -1578,11 +1660,18 @@ def test_enc_2b_age_runs_as_an_argv_list_to_the_validated_recipients_and_the_cle
 
 
 def test_enc_3a_the_full_drill_is_verified_end_to_end_with_encryption_on(
-    tmp_path: Path, age_keys: KeyMaterial
+    tmp_path: Path, age_keys: KeyMaterial, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = _store_with_audit(tmp_path)
     wall = datetime.now(UTC) + timedelta(minutes=5)  # after the audit entry stamped just now
     clock = _fixed_clock(wall, [10.0, 12.5])  # restore() reads the monotonic clock twice
+    seen: list[tuple[bool, list[str]]] = []
+    _before_removal(
+        monkeypatch,
+        lambda t: seen.append(
+            ((t / "chronos.db").read_bytes().startswith(SQLITE_HEADER), sorted(os.listdir(t)))
+        ),
+    )
     report = run_drill(db, tmp_path / "out", tmp_path / "restored", clock=clock)
     assert report.verdict == "VERIFIED", report.failures
     assert report.rpo_s is not None and report.rpo_s >= 0
@@ -1590,16 +1679,19 @@ def test_enc_3a_the_full_drill_is_verified_end_to_end_with_encryption_on(
     assert report.restore is not None and report.restore.audit_chain == "VALID"
     restored = Path(report.restore.restored_path)
     assert restored.name == "chronos.db" and report.restore.sha256_ok
-    assert restored.read_bytes().startswith(SQLITE_HEADER)
+    # N3-4: when the removal began the copy was a SQLite file beside exactly the audit pair; the
+    # drill then removed the three and the directory, and the report says what went
+    assert seen == [(True, ["chronos.db", "platform_audit.head.json", "platform_audit.jsonl"])]
+    assert report.restore.restore_copy_removed and not restored.parent.exists()
+    assert report.restore.removed == (
+        "chronos.db",
+        "platform_audit.jsonl",
+        "platform_audit.head.json",
+    )
     # byte-identical cleartext: the by-hand decrypt of the pinned envelope (the acceptance
     # check on the restored copy flips its journal header afterwards)
     clear = _decrypt(report.manifest, age_keys.identity, tmp_path / "clear")
     assert _sha256(clear) == report.manifest.sha256
-    assert sorted(p.name for p in restored.parent.iterdir()) == [
-        "chronos.db",
-        "platform_audit.head.json",
-        "platform_audit.jsonl",
-    ]
     # the report names both recipients
     payload = report.to_dict()
     assert payload["manifest"]["encryption"]["recipients"] == sorted(  # type: ignore[index]
@@ -1629,7 +1721,9 @@ def test_enc_3b_a_throwaway_identity_cannot_decrypt_the_envelope(
         "decrypt: refused — decryption of chronos.db.age: age exited"
     ), report.failures
     assert "no identity matched" in report.failures[0]
-    assert target.is_dir() and list(target.iterdir()) == []  # no cleartext at the target
+    # N3-4: nothing at the target — the refused decrypt left no copy, and the drill removed the
+    # directory it had made
+    assert not target.exists() and report.restore_copy_removed and report.removed == ()
     # positive control: the host identity decrypts the same envelope byte for byte
     monkeypatch.setenv(drill.IDENTITY_ENV, str(age_keys.identity))
     age_keys.recipients.write_text(
@@ -1687,7 +1781,7 @@ def test_enc_3d_a_corrupted_ciphertext_is_a_typed_refusal_with_nothing_partial_i
     assert report.failures[0].startswith(
         "decrypt: refused — decryption of chronos.db.age: age exited"
     )
-    assert list(target.iterdir()) == [], "nothing partial may stay in the target"
+    assert not target.exists(), "nothing partial may stay in the target (N3-4: nor the directory)"
     # the drill verdict carries it and measures no rpo from unverified bytes
     drill_report = run_drill(db, tmp_path / "out2", tmp_path / "restored2")
     assert drill_report.verdict == "VERIFIED"  # a fresh envelope is fine
@@ -2037,12 +2131,18 @@ def test_t3_1a_a_descriptor_to_the_copied_inode_is_held_through_the_acceptance_c
         return real_check(dfd, name, identity)
 
     monkeypatch.setattr(drill, "_entry_is_real_file", observing_check)
+    identity: list[tuple[int, int]] = []
+
+    def remember(t: Path) -> None:  # N3-4: read at the instant the removal begins
+        st = os.stat(t / "chronos.db")
+        identity.append((st.st_dev, st.st_ino))
+
+    _before_removal(monkeypatch, remember)
     report = restore(manifest, target)
     assert report.verified, report.failures
     assert seen == [1, 1], seen  # exactly one descriptor, at both comparisons
     # and none after restore() returns: the held descriptor is closed in a finally
-    copy = os.stat(target / "chronos.db")
-    assert _descriptors_to((copy.st_dev, copy.st_ino)) == []
+    assert identity and _descriptors_to(identity[0]) == []
 
 
 def test_t3_1b_a_fresh_file_planted_at_the_name_during_the_acceptance_check_is_never_verified(
@@ -2182,7 +2282,7 @@ def test_rt_2_a_pre_created_target_owned_by_another_uid_is_refused_by_fstat_on_t
 
 @pytest.mark.parametrize("umask", [0o002, 0o000], ids=["umask-002", "umask-000"])
 def test_rt_3_the_decrypted_store_and_everything_beside_it_is_owner_only_whatever_the_umask(
-    tmp_path: Path, umask: int
+    tmp_path: Path, umask: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Measured at the decrypt (``_staged_restore``: before any acceptance could repair it, which
     is where the archive path stays) and after a whole ``restore()``."""
@@ -2205,10 +2305,17 @@ def test_rt_3_the_decrypted_store_and_everything_beside_it_is_owner_only_whateve
         assert modes[drill.AUDIT_LOG_NAME] == 0o600 and modes[drill.AUDIT_ANCHOR_NAME] == 0o600, (
             modes
         )
+        # N3-4: judged at the instant the removal begins — after the acceptance, before the copy
+        # and its directory go
+        after: list[tuple[list[str], int]] = []
+        _before_removal(
+            monkeypatch,
+            lambda t: after.append((_no_group_or_other(t), stat.S_IMODE(os.lstat(t).st_mode))),
+        )
         report = restore(manifest, tmp_path / "restored")
         assert report.verified, report.failures
-        assert _no_group_or_other(tmp_path / "restored") == []
-        assert stat.S_IMODE(os.lstat(tmp_path / "restored").st_mode) == 0o700
+        assert after == [([], 0o700)]
+        assert not (tmp_path / "restored").exists()
     finally:
         os.umask(previous)
 
@@ -2238,7 +2345,7 @@ def test_rt_4_a_decrypt_that_lands_wider_than_0600_is_refused_and_nothing_stays(
     assert report.verified is False
     assert report.failures[0].startswith("decrypt: refused"), report.failures
     assert "0600" in report.failures[0], report.failures
-    assert list((tmp_path / "restored").iterdir()) == []
+    assert not (tmp_path / "restored").exists()  # N3-4: nor the directory it had made
 
 
 def test_rt_5_a_target_that_appears_between_the_absence_check_and_the_mkdir_is_judged_not_trusted(
@@ -2261,17 +2368,21 @@ def test_rt_5_a_target_that_appears_between_the_absence_check_and_the_mkdir_is_j
     assert list((tmp_path / "raced").iterdir()) == []
 
 
-def test_rt_6a_an_absent_target_is_created_0700_by_this_uid_and_verifies(tmp_path: Path) -> None:
+def test_rt_6a_an_absent_target_is_created_0700_by_this_uid_and_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db = _demo_store(tmp_path)
     manifest = backup(db, tmp_path / "out")
+    made: list[os.stat_result] = []
+    _before_removal(monkeypatch, lambda t: made.append(os.lstat(t)))  # N3-4: before it goes
     previous = os.umask(0)
     try:
         report = restore(manifest, tmp_path / "fresh")
     finally:
         os.umask(previous)
     assert report.verified, report.failures
-    st = os.lstat(tmp_path / "fresh")
-    assert stat.S_IMODE(st.st_mode) == 0o700 and st.st_uid == os.geteuid()
+    assert [(stat.S_IMODE(s.st_mode), s.st_uid) for s in made] == [(0o700, os.geteuid())]
+    assert not (tmp_path / "fresh").exists()
 
 
 def test_rt_6b_an_existing_empty_target_of_this_uid_at_0700_still_restores(tmp_path: Path) -> None:
@@ -2293,3 +2404,219 @@ def test_rt_7_the_runbook_default_target_is_out_of_tmp_and_the_rule_is_in_the_do
     assert "mkdir -m 700" in prose
     assert "group or other" in prose and "effective uid" in prose
     assert "0600" in prose
+
+
+# --------------------------------------------- N3-4: the drill removes its own cleartext copy
+# Kevin's ruling K-20261023-002 (P2-4 option B; the memo is flow-team/n3-decision-20261015/build/
+# N3-3/P2-4-OPTIONS.md): no cleartext restore copy outlives the run that made it. The removal
+# goes through the descriptors the drill has held since it made the copy — the target directory,
+# its parent and the verified copy's own — never through a path, and never takes an entry the run
+# did not write. The expected names below are the module's contract, written here, not read back.
+
+
+def test_n34_1a_the_copy_and_its_directory_are_gone_when_restore_returns_and_the_report_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    seen: list[list[str]] = []
+    _before_removal(monkeypatch, lambda t: seen.append(sorted(os.listdir(t))))
+    report = restore(manifest, target)
+    assert report.verified, report.failures
+    assert seen == [["chronos.db"]], "the copy was there when every verifier had spoken"
+    assert report.restore_copy_removed is True and report.removed == ("chronos.db",)
+    assert not target.exists() and tmp_path.is_dir()  # the leaf went; its parent is untouched
+    payload = report.to_dict()
+    assert payload["restore_copy_removed"] is True and payload["removed"] == ["chronos.db"]
+
+
+def test_n34_1b_sqlite_bookkeeping_beside_the_copy_goes_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository's acceptance opens the copy and SQLite may leave ``-journal``, ``-wal`` or
+    ``-shm`` beside it: they are the copy's and go with it. On this host the acceptance's own
+    bookkeeping is gone again by the time the removal begins (measured at cce8a90), so the three
+    names are modelled: 0600 regular files of this uid planted at the instant the removal begins."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+
+    def plant(t: Path) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            path = t / f"chronos.db{suffix}"
+            path.write_bytes(b"")
+            path.chmod(0o600)
+
+    _before_removal(monkeypatch, plant)
+    report = restore(manifest, target)
+    assert report.verified, report.failures
+    assert report.removed == (
+        "chronos.db",
+        "chronos.db-journal",
+        "chronos.db-wal",
+        "chronos.db-shm",
+    )
+    assert report.restore_copy_removed and not target.exists()
+
+
+def test_n34_1c_run_drill_and_the_cli_report_the_removal_and_the_audit_pair_goes_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _store_with_audit(tmp_path)
+    wall = datetime.now(UTC) + timedelta(minutes=5)  # after the audit entry stamped just now
+    clock = _fixed_clock(wall, [1.0, 2.0])
+    report = run_drill(db, tmp_path / "out", tmp_path / "restored", clock=clock)
+    assert report.verdict == "VERIFIED", report.failures
+    assert report.restore is not None and report.restore.restore_copy_removed is True
+    assert report.restore.removed == (
+        "chronos.db",
+        "platform_audit.jsonl",
+        "platform_audit.head.json",
+    )
+    assert not (tmp_path / "restored").exists()
+    # the CLI, in this process: exit 0 and the JSON carries both fields
+    code = drill.main(
+        ["--db", str(db), "--out", str(tmp_path / "out2"), "--restore-into", str(tmp_path / "r2")]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["verdict"] == "VERIFIED", payload
+    assert payload["restore"]["restore_copy_removed"] is True
+    assert payload["restore"]["removed"] == [
+        "chronos.db",
+        "platform_audit.jsonl",
+        "platform_audit.head.json",
+    ]
+    assert not (tmp_path / "r2").exists()
+
+
+def test_n34_2a_a_removal_the_filesystem_refuses_is_typed_the_copy_stays_and_nothing_is_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = _demo_store(tmp_path)
+    target, target2 = tmp_path / "restored", tmp_path / "restored2"
+    refused = _refusing_unlink(monkeypatch, (target, target2), "chronos.db")
+    report = run_drill(db, tmp_path / "out", target)
+    assert refused == ["chronos.db"], "the removal's unlink is the one refused"
+    assert report.restore is not None
+    # every verifier spoke and passed — the report says so — and still nothing is claimed
+    assert report.restore.sha256_ok and report.restore.schema_head_ok
+    assert report.restore.row_counts_ok
+    assert report.verdict == "FAILED" and report.restore.verified is False
+    assert report.restore.restore_copy_removed is False and report.restore.removed == ()
+    assert [f.split(":", 1)[0] for f in report.failures] == ["RESTORE_COPY_NOT_REMOVED"]
+    assert "chronos.db" in report.failures[0] and "Operation not permitted" in report.failures[0]
+    # the copy it could not remove is still there, as the line says, and so is the directory
+    assert sorted(p.name for p in target.iterdir()) == ["chronos.db"]
+    # the CLI: exit 2, the typed line first, restore_copy_removed false
+    code = drill.main(
+        ["--db", str(db), "--out", str(tmp_path / "out2"), "--restore-into", str(target2)]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2 and payload["verdict"] == "FAILED", payload
+    assert payload["restore"]["restore_copy_removed"] is False
+    assert payload["failures"][0].startswith("RESTORE_COPY_NOT_REMOVED: chronos.db")
+    assert sorted(p.name for p in target2.iterdir()) == ["chronos.db"]
+    assert refused == ["chronos.db", "chronos.db"]
+
+
+def test_n34_2b_an_entry_this_run_did_not_write_is_left_named_and_the_directory_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    _before_removal(monkeypatch, lambda t: (t / "stranger").write_bytes(b"not mine"))
+    report = restore(manifest, target)
+    # verification itself passed; the run's own copy went; the stranger and the directory stay
+    assert report.sha256_ok and report.schema_head_ok and report.row_counts_ok
+    assert report.verified is False and report.restore_copy_removed is False
+    assert report.removed == ("chronos.db",)
+    assert sorted(p.name for p in target.iterdir()) == ["stranger"]
+    assert (target / "stranger").read_bytes() == b"not mine"
+    typed = [f for f in report.failures if f.startswith("RESTORE_COPY_NOT_REMOVED:")]
+    assert len(typed) == 1 and "stranger" in typed[0] and "did not write" in typed[0], typed
+
+
+def test_n34_2c_a_different_inode_at_the_copy_s_name_is_never_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N3-2's identity rule, applied to the removal: the object verified is the object removed. At
+    the instant the removal begins the verified copy is moved aside and a fresh file of the same
+    bytes sits at its name. The drill still holds the verified inode's descriptor, sees that the
+    name designates another, removes nothing at that name, and says so; both files stay, and the
+    directory with them."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+
+    def swap(t: Path) -> None:
+        copy = t / "chronos.db"
+        copy.rename(t / "aside")
+        copy.write_bytes((t / "aside").read_bytes())
+        copy.chmod(0o600)
+
+    _before_removal(monkeypatch, swap)
+    report = restore(manifest, target)
+    assert report.sha256_ok and report.schema_head_ok and report.row_counts_ok
+    assert report.verified is False and report.restore_copy_removed is False
+    assert report.removed == ()
+    assert sorted(p.name for p in target.iterdir()) == ["aside", "chronos.db"]
+    assert any(
+        f.startswith("RESTORE_COPY_NOT_REMOVED: chronos.db")
+        and "not the copy this drill verified" in f
+        for f in report.failures
+    ), report.failures
+    assert any("still holds aside, which this run did not write" in f for f in report.failures), (
+        report.failures
+    )
+
+
+def test_n34_2e_a_parent_fsync_failure_after_the_rmdir_says_removed_not_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi's P3-1 on ca0e42b: the rmdir succeeded and only the parent's fsync failed — the
+    directory is gone, so the typed line must not say it remains; the verdict stays FAILED and
+    ``restore_copy_removed`` False, because the removal is not proven durable."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    parent = os.stat(tmp_path)
+    armed: list[bool] = []
+    _before_removal(monkeypatch, lambda t: armed.append(True))  # arm at the removal, not before
+    real_fsync = os.fsync
+    refused: list[bool] = []
+
+    def failing_parent_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if armed and (st.st_dev, st.st_ino) == (parent.st_dev, parent.st_ino):
+            refused.append(not target.exists())  # True iff the rmdir had already happened
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(drill.os, "fsync", failing_parent_fsync)
+    report = restore(manifest, target)
+    assert refused == [True], "the parent's fsync after the rmdir is the one that failed"
+    assert not target.exists()  # the rmdir did happen
+    assert report.sha256_ok and report.schema_head_ok and report.row_counts_ok
+    assert report.verified is False and report.restore_copy_removed is False
+    assert report.removed == ("chronos.db",)
+    typed = [f for f in report.failures if f.startswith("RESTORE_COPY_NOT_REMOVED:")]
+    assert len(typed) == 1, report.failures
+    assert "was removed" in typed[0] and "not proven durable" in typed[0], typed
+    assert "remains" not in typed[0], typed
+
+
+def test_n34_2d_the_runbook_states_the_self_cleaning_and_its_typed_failure() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    prose = " ".join(text.split())
+    assert "nothing here deletes it" not in prose and "open decision" not in prose
+    assert "does not outlive the run" in prose
+    assert "restore_copy_removed" in prose and "`RESTORE_COPY_NOT_REMOVED:`" in prose
+    assert "never deletes an entry it did not write" in prose
+    # the one command is unchanged (the pruner layout test parses its --restore-into value)
+    one_command = text.split("## The one command", 1)[1].split("\n## ", 1)[0]
+    assert "--restore-into /var/backups/chronos/restore-" in one_command

@@ -60,7 +60,8 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    retired schema that the running repository refuses by design; see the drill).
 3. **Verdict ``ARCHIVE_VERIFIED`` required** — the drill's distinct verdict for a bound
    retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
-   live store is untouched and the report names the envelope and the restore copy that exist.
+   live store is untouched and the report names the envelope that exists (the drill's cleartext
+   restore copy is removed either way — N3-4 — or the report says why not).
 4. **ONLY THEN the store moves aside — by EXCHANGE with a sentinel, never delete, and the
    live namespace is never vacant (r3):** in the store's directory, reached by the drill's
    no-follow walk: the bound connection is closed and every admitted sidecar is leased likewise
@@ -108,8 +109,10 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
 What this command never does: it never generates, reads or prints the persistence key (the
 module does not touch the environment or ``Settings`` — the drill reads its own age-key
 variables); never starts the service; never initializes the fresh database; never opens the
-old store for writing; never deletes anything — the sentinel directories it leaves at the four
-live names included: the owner's ``rmdir`` vacates them. Runbook: ``docs/ops/N3-CUTOVER.md``.
+old store for writing; deletes nothing of the owner's — the sentinel directories it leaves at
+the four live names included: the owner's ``rmdir`` vacates them — and only ever its own
+cleartext verify copy under ``--restore-into`` (the drill's N3-4 removal, reported as
+``drill.restore_copy_removed``). Runbook: ``docs/ops/N3-CUTOVER.md``.
 
 Trust root (r5, stated for review): (a) the adversary does not hold the store owner's uid or
 root; (b) code running in the same Python process is trusted — it could replace ``flatten_gate``
@@ -152,6 +155,7 @@ from chronos.operations.restore_drill import (
     _RENAME_EXCHANGE,
     ARCHIVE_VERIFIED,
     MANIFEST_NAME,
+    RESTORE_COPY_NOT_REMOVED,
     AgeKeys,
     BoundSource,
     Clock,
@@ -1424,8 +1428,10 @@ def _next_manual_steps(
     restore_dir: str, schema_head_value: str, live_names: tuple[str, ...]
 ) -> tuple[str, ...]:
     return (
-        f"Remove the restore copy under {restore_dir} (rm -r): it is a CLEARTEXT copy of the "
-        "archived store and the drill has already verified it.",
+        f"Confirm the restore copy is gone: this run removed the CLEARTEXT copy it verified under "
+        f"{restore_dir}, and that directory, before printing this report "
+        "(drill.restore_copy_removed above is true; drill.removed names what went) — "
+        f"`ls -ld {restore_dir}` must say no such file. Nothing of it is left for you to delete.",
         "Record the envelope path, manifest_sha256 and ciphertext_sha256 printed above in the "
         f"cutover log ({RUNBOOK} step 3).",
         "Generate the persistence key YOURSELF: python -c 'import secrets; "
@@ -1457,7 +1463,9 @@ def archive(
     """Gate → (dry-run stops here) → drill → VERIFIED required → move aside → report.
 
     Refusals BEFORE the drill raise :class:`CutoverRefused` (nothing exists); after the
-    drill they are returned as reports that name the envelope and the restore copy.
+    drill they are returned as reports that name the envelope (the drill's cleartext restore
+    copy is removed, N3-4; one it could not remove is ``RESTORE_COPY_NOT_REMOVED``, nothing
+    moved).
     """
 
     clock = clock or system_clock()
@@ -1563,7 +1571,8 @@ def _archive_admitted(
         # FIX-RT: first a protected chain with the leaf absent; then the drill creates it 0700
         # and verifies uid and mode by fstat
         _require_protected_absent_target(restore_into)
-        os.close(_fresh_directory(restore_into, "restore target"))
+        for descriptor in _fresh_directory(restore_into, "restore target"):
+            os.close(descriptor)
     except DrillRefused as error:
         raise CutoverRefused("RESTORE_TARGET_NOT_FRESH", str(error)) from None
     _require_excluded(source, "before the drill")
@@ -1601,13 +1610,24 @@ def _archive_admitted(
             "rto_s": report.rto_s,
             "failures": list(report.failures),
             "acceptance": None if report.restore is None else report.restore.acceptance,
+            # N3-4: the drill removed its cleartext copy under --restore-into, and the leaf
+            "restore_copy_removed": (
+                None if report.restore is None else report.restore.restore_copy_removed
+            ),
+            "removed": [] if report.restore is None else list(report.restore.removed),
         },
     }
     if report.verdict != ARCHIVE_VERIFIED:
+        # N3-4: the archive verified but the drill could not remove its cleartext copy — the
+        # envelope is good and named, the live store untouched; the move-aside waits until the
+        # copy is gone (remove it by hand, then re-run: the next run makes a new envelope)
+        only_removal = bool(report.failures) and all(
+            failure.startswith(f"{RESTORE_COPY_NOT_REMOVED}:") for failure in report.failures
+        )
         return ArchiveReport(
-            verdict="ARCHIVE_NOT_VERIFIED",
+            verdict="REFUSED" if only_removal else "ARCHIVE_NOT_VERIFIED",
             dry_run=False,
-            code="ARCHIVE_NOT_VERIFIED",
+            code=RESTORE_COPY_NOT_REMOVED if only_removal else "ARCHIVE_NOT_VERIFIED",
             failures=tuple(f"drill: {failure}" for failure in report.failures)
             or ("drill: verdict " + report.verdict,),
             **facts,
@@ -1672,7 +1692,7 @@ def main(argv: list[str] | None = None, *, clock: Clock | None = None) -> int:
         "--restore-into",
         required=True,
         type=Path,
-        help="a FRESH directory for the drill's isolated restore (a cleartext copy; remove it)",
+        help="a FRESH directory for the isolated restore (a cleartext copy, removed by this run)",
     )
     parser.add_argument(
         "--apply",

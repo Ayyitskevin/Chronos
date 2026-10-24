@@ -486,6 +486,36 @@ async def issue_evidence(
     )
 
 
+#: The ONLY account and position fields a served document may carry. An allow-list, never
+#: ``model_dump`` minus one key: a field added to the broker models later is absent from the
+#: document (and from the model prompt) until someone names it here. The raw broker
+#: ``account_id`` is deliberately not named — the model-view contract
+#: (``chronos.autonomy.evidence``) lets account identity appear only as a pseudonymous
+#: fingerprint, and a proposer reasons from the facts, not from who owns them. The worker's
+#: legacy local composition restates both lists (``worker.evidence``; the worker imports
+#: nothing from ``chronos``), pinned equal by ``tests/safety/test_served_evidence_redaction.py``.
+ACCOUNT_FACT_FIELDS: tuple[str, ...] = (
+    "net_liquidation",
+    "total_cash",
+    "buying_power",
+    "currency",
+    "as_of",
+)
+POSITION_FACT_FIELDS: tuple[str, ...] = (
+    "contract",
+    "quantity",
+    "average_cost",
+    "market_price",
+    "unrealized_pnl",
+)
+
+
+def _project_fact(dumped: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """The named fields of one serialized fact, and nothing else."""
+
+    return {name: dumped[name] for name in fields if name in dumped}
+
+
 def compose_served_document(
     runtime: Any,
     state: Any,
@@ -527,8 +557,11 @@ def compose_served_document(
         return None
 
     payload: dict[str, Any] = {
-        "account": summary.model_dump(mode="json"),
-        "positions": [position.model_dump(mode="json") for position in positions],
+        "account": _project_fact(summary.model_dump(mode="json"), ACCOUNT_FACT_FIELDS),
+        "positions": [
+            _project_fact(position.model_dump(mode="json"), POSITION_FACT_FIELDS)
+            for position in positions
+        ],
         "open_orders": [_order_fact(record) for record in orders],
     }
     bars: dict[str, Any] = {}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from scripts.verify_release_security import (
     build_scan_commands,
     verify_release_security,
 )
+from tests.support.forged_ancestry import ARMS, DEAD, plant_forged_parent, raw_git
 
 from chronos.backtest.engine import BacktestResult
 
@@ -692,3 +694,120 @@ def test_the_success_line_names_the_check_this_gate_does_not_make(
     assert line.startswith("release security gate passed (")
     assert "manifest/lock coherence" in line
     assert "release-artifact gate" in line
+
+
+# D-44: the history gate's three ancestry reads (the octopus refusal, a reviewed commit's
+# reachability, the history walk itself) must come from the commit objects, as gate 30's does, so a
+# forged commit-graph, grafts file or replace ref in the clone cannot hide history from the scan.
+# The arms are tests/support/forged_ancestry.py's; each pin first proves its forgery fools raw git.
+@pytest.fixture
+def isolated_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
+@pytest.mark.usefixtures("isolated_git")
+@pytest.mark.parametrize("arm", ARMS)
+def test_history_scanner_octopus_refusal_reads_commit_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    repository = tmp_path / "repository"
+    _initialize_repository(repository)
+    for side in ("side-a", "side-b"):
+        _git(repository, "switch", "-c", side, "main")
+        (repository / f"{side}.txt").write_text(f"{side}\n", encoding="utf-8")
+        _commit(repository, side)
+    _git(repository, "switch", "main")
+    (repository / "main.txt").write_text("main\n", encoding="utf-8")
+    first_parent = _commit(repository, "main")
+    _git(repository, "merge", "side-a", "side-b", "-m", "octopus")
+    octopus = _git(repository, "rev-parse", "HEAD")
+    (repository / "after.txt").write_text("after\n", encoding="utf-8")
+    _commit(repository, "after the octopus")
+    raw = ("rev-list", "--min-parents=3", "--max-count=1", "HEAD")
+    assert raw_git(repository, {}, *raw).stdout.strip() == octopus
+    env = plant_forged_parent(repository, arm, target=octopus, forged_parent=first_parent)
+    if raw_git(repository, env, *raw).stdout.strip():
+        pytest.fail(f"{DEAD} (arm {arm}: the octopus is still visible)")
+    baseline = repository / ".secrets.baseline"
+    _write_test_baseline(baseline)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SecurityGateError, match="octopus"):
+        security_module.verify_git_history_secrets(root=repository, baseline=baseline)
+
+
+@pytest.mark.usefixtures("isolated_git")
+@pytest.mark.parametrize("arm", ARMS)
+def test_history_review_reachability_reads_commit_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    repository = tmp_path / "repository"
+    _initialize_repository(repository)
+    _git(repository, "switch", "-c", "stranded")
+    (repository / "stranded.txt").write_text("stranded\n", encoding="utf-8")
+    stranded = _commit(repository, "stranded")
+    _git(repository, "switch", "main")
+    (repository / "one.txt").write_text("one\n", encoding="utf-8")
+    intermediate = _commit(repository, "one")
+    (repository / "two.txt").write_text("two\n", encoding="utf-8")
+    _commit(repository, "two")
+    raw = ("merge-base", "--is-ancestor", stranded, "HEAD")
+    assert raw_git(repository, {}, *raw).returncode == 1
+    env = plant_forged_parent(repository, arm, target=intermediate, forged_parent=stranded)
+    if raw_git(repository, env, *raw).returncode != 0:
+        pytest.fail(f"{DEAD} (arm {arm}: the stranded commit is still unreachable)")
+    baseline = repository / ".secrets.baseline"
+    reviewed = {
+        "stranded.txt": [
+            {
+                "type": "AWS Access Key",
+                "hashed_secret": "0" * 40,
+                "is_secret": False,
+                "observed_commit": stranded,
+                "reason": "synthetic review of a commit HEAD does not contain",
+            }
+        ]
+    }
+    _write_test_baseline(baseline, history_results=reviewed)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SecurityGateError, match=f"not reachable from HEAD: {stranded}"):
+        security_module.verify_git_history_secrets(root=repository, baseline=baseline)
+
+
+@pytest.mark.usefixtures("isolated_git")
+@pytest.mark.parametrize("arm", ARMS)
+def test_history_walk_reads_commit_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    repository = tmp_path / "repository"
+    _initialize_repository(repository)
+    root = _git(repository, "rev-parse", "HEAD")
+    fake_access_key = "AKIA" + ("G" * 16)
+    (repository / "config.py").write_text(f"value = {fake_access_key!r}\n", encoding="utf-8")
+    added = _commit(repository, "add credential")
+    (repository / "config.py").unlink()
+    removed = _commit(repository, "remove credential")
+    (repository / "later.txt").write_text("later\n", encoding="utf-8")
+    _commit(repository, "later")
+    raw = ("log", "--format=%H", "HEAD")
+    assert added in raw_git(repository, {}, *raw).stdout.split()
+    env = plant_forged_parent(repository, arm, target=removed, forged_parent=root)
+    if added in raw_git(repository, env, *raw).stdout.split():
+        pytest.fail(f"{DEAD} (arm {arm}: the walk still reaches the credential commit)")
+    baseline = repository / ".secrets.baseline"
+    _write_test_baseline(baseline)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SecurityGateError) as raised:
+        security_module.verify_git_history_secrets(root=repository, baseline=baseline)
+
+    message = str(raised.value)
+    assert "unreviewed potential secrets" in message
+    assert "AWS Access Key" in message
+    assert "config.py" in message
+    assert fake_access_key not in message

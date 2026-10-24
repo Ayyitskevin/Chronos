@@ -31,6 +31,12 @@ python -m chronos.operations.restore_drill \
 - exit `2` — `"verdict": "FAILED"` with `failures[]` naming the verifier that spoke, or a
   `refused:` line (the source was not a regular file, the target was not empty, …). Nothing
   was written to the source in either case.
+- `restore.restore_copy_removed: true` and `restore.removed[]` — the drill removed the
+  cleartext copy it made (the database, any `-journal`/`-wal`/`-shm` SQLite left beside it, the
+  audit pair) and the `--restore-into` directory itself, after the verifiers, through the
+  descriptors it had held since it made them (N3-4; see *The isolation rule*). `false` comes
+  with a `RESTORE_COPY_NOT_REMOVED:` line naming what remains, and the verdict is then `FAILED`
+  even when every verifier passed: remove the named leftover yourself, by hand.
 
 The manifest is inside the envelope as `<stem>-<stamp>/manifest.json`.
 
@@ -86,10 +92,20 @@ whole store in the clear, so:
   `fstat` before anything reads it, and a wider or foreign file is removed and refused. The
   audit copies are created `0600` too, and SQLite gives any journal it opens beside the copy
   the copy's own mode.
-- The lifetime of the restore copy (who removes it, and when) is a separate, open decision;
-  nothing here deletes it. The restored
-copy is for verification and for a deliberate, separate cut-over decision — not for the
-running backend. The source database is opened read-only (`mode=ro`, SQLite's normal
+- **The restore copy does not outlive the run (N3-4, Kevin's ruling 2026-10-23, P2-4
+  option B).** After the verifiers the drill removes what it wrote — `chronos.db`, only if the
+  entry at that name is still the very inode it verified; any `-journal`/`-wal`/`-shm` SQLite
+  left beside it; the audit pair — by name against the target descriptor it has held since
+  the decrypt, then the emptied target directory by its leaf name against the held parent,
+  after re-proving that the name still designates the directory it admitted. It never
+  re-resolves the path and never deletes an entry it did not write: a foreign entry stays,
+  named in a `RESTORE_COPY_NOT_REMOVED:` failure, and so does the directory. The one
+  residual, stated: between that re-proof and the `rmdir` only an **empty** directory can be
+  taken, and only by your uid or root. What the drill cannot reach is yours to remove by
+  hand: a copy a crash left between the decrypt and the removal, and the by-hand restore
+  (step 4 below). The restored
+copy is verification scratch for a deliberate, separate cut-over decision — never a store for
+the running backend. The source database is opened read-only (`mode=ro`, SQLite's normal
 locking — never `immutable=1`, which would ignore a WAL that appears after any check) and
 is never written; on a WAL-mode store a read-only reader may create empty `-wal`/`-shm`
 sidecars beside it (sqlite's own bookkeeping, a directory write, not a database write).
@@ -209,6 +225,9 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    audit copy (never from the live database — it has moved on); if that evidence is newer
    than `snapshot_completed_at`, do not write a negative number: record the refusal and
    check the clocks. `rto_s` from a stopwatch around steps 4–5.
+7. **Remove the copy.** The harness removes its own copy and the target directory as soon as
+   step 5 has spoken (`restore_copy_removed: true` in its report); by hand, `rm -r <fresh>`
+   yourself once the numbers are written down — the copy is the whole store in the clear.
 
 ## Encryption at rest — two recipients (Muse ruling 2026-09-16, delegated by Kevin)
 
@@ -299,7 +318,8 @@ connection was proven to have opened; a manifest written before this field exist
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same
   disk as the database is a convenience, not a recovery. Where the copy goes, how it is
   encrypted in transit and at rest, and who can read it are the owner's.
-- **Retention** is not done by the harness, which never deletes. Kevin's ruling (2026-10-15):
+- **Retention** is not done by the harness, which deletes nothing but its own restore copy
+  (N3-4). Kevin's ruling (2026-10-15):
   the encrypted archive and pre-cutover backups live 90 days, then are deleted — by the
   separate Kevin-run pruner below.
 
@@ -384,12 +404,15 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
 - **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
   `--now`. Output is JSON of counts, names and fixed reasons only — no manifest value and no
   file name from inside an envelope is ever echoed.
-- **Restore copies:** under the default targets above (`/var/backups/chronos/restore-<stamp>`,
-  `/var/backups/chronos/n3-verify`) the cleartext copies `--restore-into` writes sit INSIDE the
-  backup root. The pruner reports each as `unclassified` ("not a published envelope name") and
-  never deletes it (measured: a dry run and an `--apply` left such a directory byte-identical).
-  Removing them is a by-hand owner step; their lifetime is the open decision stated under
-  "The isolation rule". A target pointed elsewhere is outside the root and equally yours to
+- **Restore copies:** since N3-4 the drill removes the cleartext copy `--restore-into` holds,
+  and the directory, before it returns ("The isolation rule"), so a completed drill leaves
+  nothing of its own under the default targets above (`/var/backups/chronos/restore-<stamp>`,
+  `/var/backups/chronos/n3-verify`), INSIDE the backup root. What can still sit there is a
+  loose directory the drill could not remove (a `RESTORE_COPY_NOT_REMOVED:` report, a crash
+  between the decrypt and the removal) or a by-hand restore: the pruner reports each as
+  `unclassified` ("not a published envelope name") and never deletes it (measured: a dry run
+  and an `--apply` left such a directory byte-identical). Removing those is a by-hand owner
+  step; a target pointed elsewhere is outside the root and equally yours to
   remove. **Not covered:** off-host copies of an
   envelope are yours to prune too.
 
@@ -402,4 +425,5 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
 | `row_counts:` | a table's count differs from the manifest (names the tables) | the copy lost or gained rows after the backup — stop, investigate |
 | `audit_chain:` | the audit log beside the copy is BROKEN or missing while the manifest records a head | the tamper-evidence did not survive the copy; the restore is not trustworthy |
 | `rpo: refused —` | evidence in the retained snapshot is dated after the snapshot completed | a writer's or this host's clock is wrong; the backup itself may still be VERIFIED |
+| `RESTORE_COPY_NOT_REMOVED:` | the drill could not remove the cleartext copy it made (the line names what remains and why: not the inode it verified, an entry it did not write, an errno, a renamed directory); every other verifier may still have passed | the copy or the emptied directory is still at the named path: read why, then remove it yourself; the verdict stays FAILED until a run cleans up after itself |
 | `refused:` | a typed refusal — nothing is published (a `published:` refusal is the one exception: the envelope exists in the admitted directory but the path was swapped underneath) | fix the named condition (source type, non-empty target, an existing entry at the envelope's name, a half audit pair, a symlinked path component, a rename error) and re-run |

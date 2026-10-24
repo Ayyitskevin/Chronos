@@ -389,8 +389,19 @@ def test_phase_a_cycle_obeys_the_evidence_contract(
                 "interval": "1d",
                 "lookback": "5",
             }
-            assert snapshot["account"] == responses[1].json()
-            assert snapshot["positions"] == responses[2].json()
+            # SDOC-1: the snapshot is the raw reads MINUS the broker account id (the raw
+            # routes still carry it; the model-view contract lets identity appear only as a
+            # fingerprint), so the expectation drops that one key by name, independently
+            # of the worker's allow-list.
+            raw_account, raw_positions = responses[1].json(), responses[2].json()
+            assert "account_id" in raw_account
+            assert snapshot["account"] == {
+                k: v for k, v in raw_account.items() if k != "account_id"
+            }
+            assert snapshot["positions"] == [
+                {k: v for k, v in position.items() if k != "account_id"}
+                for position in raw_positions
+            ]
             assert snapshot["open_orders"] == responses[3].json()
             assert snapshot["daily_bars"] == {"SPY": responses[4].json()}
             assert citation["evidence_id"] == f"worker-snapshot:{snapshot['as_of']}"

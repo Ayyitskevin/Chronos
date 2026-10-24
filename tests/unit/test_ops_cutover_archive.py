@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import copy
+import errno
 import hashlib
 import inspect
 import io
@@ -51,6 +52,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 from collections.abc import Iterator, MutableMapping
 from contextlib import closing
@@ -1187,34 +1189,135 @@ def _escrow(
     return completed, out
 
 
-def test_7c_the_escrow_tool_encrypts_the_key_it_is_given_and_proves_it_decrypts_back(
+def _age_decrypt(identity: Path, artifact: Path) -> subprocess.CompletedProcess[bytes]:
+    assert AGE is not None
+    return subprocess.run(
+        [AGE, "-d", "-i", str(identity), str(artifact)], capture_output=True, check=False
+    )
+
+
+def _x25519_stanzas(artifact: Path) -> int:
+    """How many recipient stanzas the artifact's own age header carries (age v1: one
+    ``-> X25519 <share>`` line per recipient) — read from the file, independent of the report."""
+
+    header = artifact.read_bytes().split(b"\n---", 1)[0]
+    assert header.startswith(b"age-encryption.org/v1\n"), header[:32]
+    return sum(1 for line in header.split(b"\n") if line.startswith(b"-> X25519 "))
+
+
+@dataclass(frozen=True)
+class RecoveryIdentity:
+    identity: Path
+    public_key: str
+
+
+@pytest.fixture
+def recovery_identity(
+    tmp_path: Path, age_keys: KeyMaterial, monkeypatch: pytest.MonkeyPatch
+) -> RecoveryIdentity:
+    """A THROWAWAY recovery identity substituted for the pinned recipient at its one home,
+    ``restore_drill.KEVIN_RECOVERY_RECIPIENT`` (``setattr`` raises if the constant ever moves),
+    so a test can open what the escrow tool wrote to the recovery recipient. Kevin's real key is
+    untouched: its private half exists on no fleet host. The recipients file names the
+    substitute beside the host key only so that code which still validates that file (the
+    drill; the escrow tool before K-20261023-003) reaches encryption under the substitution."""
+
+    identity = tmp_path / "keys" / "recovery-throwaway.age"
+    public_key = _keygen(identity)
+    monkeypatch.setattr(drill, "KEVIN_RECOVERY_RECIPIENT", public_key)
+    age_keys.recipients.write_text(f"{age_keys.host_public_key}\n{public_key}\n", encoding="utf-8")
+    return RecoveryIdentity(identity=identity, public_key=public_key)
+
+
+def test_7c_the_escrow_tool_encrypts_the_key_to_the_recovery_recipient_alone(
     tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
-    """P1-3: the escrow step is a pinned tool. A TEST key (derived at run time) goes in on
-    stdin, never through the environment or argv; the tool encrypts it to the drill's two
-    validated recipients, decrypts the artifact back through the host identity in a private
-    scratch, compares in process, and reports — never printing the key or a digest of it."""
+    """K-20261023-003 (escrow = recovery-key-only): the artifact is age-encrypted to exactly ONE
+    recipient, the pinned ``KEVIN_RECOVERY_RECIPIENT``; the host identity is not a recipient and
+    cannot open it. A TEST key (derived at run time) goes in on stdin, never through the
+    environment or argv; the report names the one recipient, claims no decrypt (no key on the
+    host could prove one — that proof is Kevin's, off-host, runbook step 6), and never prints
+    the key or a digest of it."""
 
     key = _hex("n3-2 r1 TEST persistence key — never a real one")
     completed, out = _escrow(tmp_path, key + "\n")
     assert completed.returncode == 0, completed.stderr
+    by_host = _age_decrypt(age_keys.identity, out)
+    assert by_host.returncode != 0 and by_host.stdout == b"", "the host identity opened it"
+    assert b"no identity matched" in by_host.stderr, by_host.stderr
+    assert _x25519_stanzas(out) == 1
     report = json.loads(completed.stdout)
-    assert report["verdict"] == "ESCROWED" and report["verified"] is True
+    assert report["recipients"] == [drill.KEVIN_RECOVERY_RECIPIENT]
+    assert report["verdict"] == "ESCROWED" and report["decrypt_verified"] is False
+    assert "verified" not in report  # no field that reads as a decrypt proof
     assert report["out"] == str(out) and out.is_file()
-    assert sorted(report["recipients"]) == sorted(
-        [age_keys.host_public_key, drill.KEVIN_RECOVERY_RECIPIENT]
-    )
     assert report["ciphertext_sha256"] == _sha256(out)
     assert oct(out.stat().st_mode & 0o777) == "0o600"
     assert key not in completed.stdout + completed.stderr
     without_digest = completed.stdout.replace(report["ciphertext_sha256"], "")
     assert re.search(r"[0-9a-f]{64}", without_digest) is None  # only the ciphertext digest
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(out)], check=True, capture_output=True
-    )
-    assert decrypted.stdout == (key + "\n").encode()
-    assert not list((tmp_path / "escrow").glob(".chronos-escrow-*"))  # the scratch is gone
+
+
+def test_7l_the_escrow_artifact_opens_with_the_recovery_identity_and_nothing_else(
+    tmp_path: Path,
+    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The single recipient, pinned by decryption: with a throwaway recovery identity substituted
+    for the pinned recipient, the artifact decrypts through it to exactly the typed line; the
+    host identity — present, valid, 0600 — cannot open it; the header carries one stanza."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    key = _hex("b2 TEST key for the single-recipient pin — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0, report
+    by_host = _age_decrypt(age_keys.identity, out)
+    assert by_host.returncode != 0 and by_host.stdout == b"", "the host identity opened it"
+    by_recovery = _age_decrypt(recovery_identity.identity, out)
+    assert by_recovery.returncode == 0, by_recovery.stderr
+    assert by_recovery.stdout == (key + "\n").encode()
+    assert _x25519_stanzas(out) == 1
+    assert report["recipients"] == [recovery_identity.public_key]
+    assert key not in json.dumps(report)
+
+
+def test_7m_an_empty_artifact_is_refused_and_named_never_reported_escrowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no decrypt on the host, age exiting 0 is not the whole claim: the tool proves the
+    artifact it holds is non-empty before it reports. An encrypt step that leaves an empty file
+    (forced: the real age runs, then the file is truncated) is ``ARTIFACT_EMPTY``, and — a
+    post-create failure — the file is left in place and named for the owner to shred."""
+
+    from chronos.operations import persistence_key_escrow as escrow
+
+    out = tmp_path / "escrow" / "chronos-persistence-key.age"
+    out.parent.mkdir()
+    real_encrypt = escrow._encrypt
+
+    def truncating(*args: Any, **kwargs: Any) -> None:
+        real_encrypt(*args, **kwargs)
+        os.truncate(out, 0)
+
+    monkeypatch.setattr(escrow, "_encrypt", truncating)
+    key = _hex("b2 TEST key for the empty artifact — never a real one")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    code = escrow.main(["--out", str(out), "--key-from-stdin"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "ARTIFACT_EMPTY", report
+    created = report["created_artifact"]
+    assert created["path"] == str(out) and created["removed"] is False
+    assert created["identity"] == "{}:{}".format(*_identity(out))
+    assert _entries(out.parent) == [out.name] and out.stat().st_size == 0
+    assert key not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
@@ -1268,7 +1371,10 @@ def test_7e_the_escrow_tool_never_reads_the_key_from_the_environment(
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     assert code == 0, capsys.readouterr()
     assert "CHRONOS_PERSISTENCE_KEY" not in recorder.looked_up
-    assert drill.IDENTITY_ENV in recorder.looked_up
+    # K-20261023-003: the host's key files are outside the escrow's trust domain — not looked up
+    assert drill.IDENTITY_ENV not in recorder.looked_up
+    assert drill.RECIPIENTS_ENV not in recorder.looked_up
+    assert "PATH" in recorder.looked_up  # the recorder sees lookups: age is resolved on PATH
     assert "sentinel-never-read" not in capsys.readouterr().out
 
 
@@ -1289,21 +1395,22 @@ def test_7f_the_runbook_states_the_lost_key_boundary_and_promises_no_refusing_co
 @pytest.mark.parametrize(
     "shape",
     [
-        "swap-then-decrypt-fails",
-        "swap-then-decrypt-succeeds",
-        "decrypt-fails",
+        "swap-then-digest-fails",
+        "swap-then-digest-succeeds",
+        "digest-fails",
     ],
 )
 def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_created(
     tmp_path: Path,
-    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     shape: str,
 ) -> None:
     """Daybreak P1-3 (r1, r2): after the artifact is created, its name is swapped (the created
-    file renamed aside, a foreign file planted at the name) and/or the decrypt-and-compare fails.
-    The tool verifies through the descriptor it holds, proves the name still resolves to it
+    file renamed aside, a foreign file planted at the name) and/or the step between the tool's
+    two name checks fails (B2: the ciphertext digest — the host-decrypt proof that sat there is
+    gone). The tool reads through the descriptor it holds, proves the name still resolves to it
     before success, and after a post-create failure DELETES NOTHING (r3: Linux has no
     unlink-by-descriptor, so any unlink is by name and can hit a swapped-in foreign entry): the
     foreign entry survives, the created ciphertext stays — at its name, or under the renamed
@@ -1315,25 +1422,25 @@ def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_c
     out.parent.mkdir()
     aside = out.with_name("artifact-aside")
     foreign = b"not the file this run created"
-    real_decrypt = escrow._decrypts_back_to
+    real_digest = escrow._sha256_fd
 
-    def hooked(*args: Any, **kwargs: Any) -> None:
-        monkeypatch.setattr(escrow, "_decrypts_back_to", real_decrypt)
+    def hooked(fd: int) -> str:
+        monkeypatch.setattr(escrow, "_sha256_fd", real_digest)
         if shape.startswith("swap"):
             os.rename(out, aside)
             out.write_bytes(foreign)
         if shape.endswith("fails"):
-            raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
-        real_decrypt(*args, **kwargs)
+            raise escrow.EscrowRefused("FORCED", "forced: the digest step failed")
+        return real_digest(fd)
 
-    monkeypatch.setattr(escrow, "_decrypts_back_to", hooked)
+    monkeypatch.setattr(escrow, "_sha256_fd", hooked)
     key = _hex(f"n3-2 r2 TEST key for {shape} — never a real one")
     monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     report = json.loads(capsys.readouterr().out)
     assert code == 2 and report["verdict"] == "REFUSED", report
-    expected_code = "TARGET_SWAPPED" if shape == "swap-then-decrypt-succeeds" else "AGE_FAILED"
-    assert report["code"] == expected_code, report  # succeeds: the decrypt read the HELD inode
+    expected_code = "TARGET_SWAPPED" if shape == "swap-then-digest-succeeds" else "FORCED"
+    assert report["code"] == expected_code, report  # succeeds: the digest read the HELD inode
     created = report["created_artifact"]
     assert created["path"] == str(out)
     assert created["removed"] is False and "shred" in created["note"]  # the tool deletes nothing
@@ -1346,10 +1453,7 @@ def test_7g_escrow_failure_cleanup_deletes_nothing_and_names_the_file_this_run_c
         assert _entries(out.parent) == [out.name]  # the created file stays at its name
         ciphertext = out
     assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
-    )
+    decrypted = _age_decrypt(recovery_identity.identity, ciphertext)
     assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
     assert key not in json.dumps(report)
 
@@ -1390,6 +1494,391 @@ def test_7k_the_runbook_says_the_escrow_tool_deletes_nothing_after_a_failure() -
     text = RUNBOOK.read_text(encoding="utf-8")
     step6 = text[text.index("6. **Escrow") : text.index("7. **")]
     assert "deletes nothing" in step6 and "shred" in step6 and "removed: true" not in step6
+
+
+def test_7n_the_runbook_moves_the_decrypt_proof_off_host_before_any_copy_is_deleted() -> None:
+    """K-20261023-003: the host cannot decrypt the escrow, so the decrypt-and-compare is Kevin's,
+    off-host, through his recovery identity — a required step BEFORE any local ciphertext copy is
+    deleted; the page no longer says the host identity can open the artifact."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step6 = text[text.index("6. **Escrow") : text.index("7. **")]
+    prose = " ".join(step6.split())
+    assert '"decrypt_verified": false' in step6 and '"verified": true' not in step6
+    assert "off-host" in prose and "recovery identity" in prose
+    compare = step6.index("age -d -i <your recovery identity>")
+    assert "ssh <host>" in step6 and "MATCH" in step6
+    # the .env value never leaves the host: what crosses ssh is its digest
+    remote = re.search(r'ssh <host> "([^"]*)"', step6)
+    assert remote is not None and remote.group(1).endswith("| sha256sum"), step6
+    assert compare < step6.index("shred -u")  # the proof comes before the deletion
+    assert "host identity can also open" not in prose
+    assert "decrypts the new artifact through the host identity" not in prose
+    rollback = " ".join(text[text.index("## Rollback") :].split())
+    assert "(or the host identity)" not in rollback
+
+
+# B2-FIX1 (C1 F2): the key has ONE home, the checkout's .env, and a counted check proves it is
+# nowhere else the units or the shell hand the backend; (C1 F9) the artifact is not a repo file.
+
+#: what each cited line must say (the runbook states the precedence by file:line)
+_ONE_HOME_CITATIONS = {
+    "src/chronos/config/settings.py": ('env_file=".env"', "case_sensitive=False"),
+    "docs/ops/chronos-backend.service": ("WorkingDirectory=", "EnvironmentFile="),
+    "docs/ops/chronos-worker.service": ("WorkingDirectory=", "EnvironmentFile="),
+}
+
+
+def _step(text: str, start: str, end: str) -> str:
+    return text[text.index(start) : text.index(end)]
+
+
+def _one_home_block() -> str:
+    step5 = _step(RUNBOOK.read_text(encoding="utf-8"), "5. **Generate", "6. **Escrow")
+    blocks = [b for b in re.findall(r"```bash\n(.*?)```", step5, re.S) if "ONE HOME: OK" in b]
+    assert len(blocks) == 1, "step 5 carries exactly one one-home check block"
+    return textwrap.dedent(blocks[0])
+
+
+def test_7o_the_runbook_names_one_home_for_the_key_and_its_citations_hold() -> None:
+    """C1 F2: step 5 names the checkout's .env as the key's only home and says why, by file:line;
+    every cited line says what the page claims, and every claim is cited."""
+
+    step5 = _step(RUNBOOK.read_text(encoding="utf-8"), "5. **Generate", "6. **Escrow")
+    prose = " ".join(step5.split())
+    assert "One home: `<checkout>/.env`, and only there." in prose
+    assert "beats" in prose and "case-insensitively" in prose  # the precedence, stated
+    assert "settings_customise_sources" in prose  # the library's order, named
+    covered: set[tuple[str, str]] = set()
+    for path, number in re.findall(r"((?:src|docs)/[\w/.-]+\.(?:py|service)):(\d+)", step5):
+        assert path in _ONE_HOME_CITATIONS, path
+        line = (ROOT / path).read_text(encoding="utf-8").splitlines()[int(number) - 1]
+        said = [needle for needle in _ONE_HOME_CITATIONS[path] if needle in line]
+        assert said, f"{path}:{number} says {line!r}"
+        covered.update((path, needle) for needle in said)
+    wanted = {(path, n) for path, needles in _ONE_HOME_CITATIONS.items() for n in needles}
+    assert covered == wanted, wanted - covered
+
+
+def test_7p_the_process_environment_beats_the_dotenv_file_case_insensitively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The precedence the one-home rule rests on (C1 probe P1), pinned so a change to it sends
+    someone back to step 5: a value in the process environment — where a unit's EnvironmentFile=
+    puts it — wins over the dotenv file, and a lower-case name counts."""
+
+    from chronos.config.settings import Settings
+
+    dotenv = tmp_path / "dotenv-format"  # never a .env: the file Settings is pointed at
+    in_file = _hex("b2-fix1 TEST value in the dotenv file — never a real key")
+    in_environment = _hex("b2-fix1 TEST value in the process environment — never a real key")
+    dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={in_file}\n", encoding="utf-8")
+    monkeypatch.delenv("CHRONOS_PERSISTENCE_KEY", raising=False)
+    loaded = Settings(_env_file=dotenv).chronos_persistence_key
+    assert loaded is not None and loaded.get_secret_value() == in_file
+    monkeypatch.setenv("chronos_persistence_key", in_environment)
+    loaded = Settings(_env_file=dotenv).chronos_persistence_key
+    assert loaded is not None and loaded.get_secret_value() == in_environment
+    # inside the dotenv file a later second form of the name wins over the exact line the
+    # step-6 compare reads — why the check also counts every line that names the key
+    monkeypatch.delenv("chronos_persistence_key")
+    for second in (
+        f"chronos_persistence_key={in_environment}",
+        f"export CHRONOS_PERSISTENCE_KEY={in_environment}",
+    ):
+        dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={in_file}\n{second}\n", encoding="utf-8")
+        loaded = Settings(_env_file=dotenv).chronos_persistence_key
+        assert loaded is not None and loaded.get_secret_value() == in_environment, second
+
+
+def _run_one_home_check(
+    tmp_path: Path,
+    *,
+    dotenv: str,
+    backend_env: str | None = "",
+    worker_env: str = "",
+    unit_text: str = "",
+    manager_env: str = "",
+    shell_env: dict[str, str] | None = None,
+    drop_in_env_files: dict[str, str] | None = None,
+    units_installed: bool = True,
+    shell: str = "bash",
+) -> subprocess.CompletedProcess[str]:
+    """The step-5 block, run as written with two substitutions: ``<checkout>/.env`` is a file
+    named ``dotenv-substitute`` (no .env is ever created) and ``<PRIVATE_ENV_DIR>`` is a temp
+    directory; ``systemctl`` is a stub that prints the unit text, the manager environment and
+    the units' ``EnvironmentFiles`` in the format systemd 259 prints for ``show -p
+    EnvironmentFiles --value`` (measured: one ``<path> (ignore_errors=yes|no)`` line per file, a
+    blank line between units; a unit that does not exist prints nothing and exits 0).
+    ``drop_in_env_files`` adds files at a third path to the backend's list, as a drop-in
+    ``EnvironmentFile=`` would; ``units_installed=False`` lists nothing."""
+
+    checkout, private, stub = tmp_path / "checkout", tmp_path / "private", tmp_path / "bin"
+    for directory in (checkout, private, stub):
+        directory.mkdir()
+    (checkout / "dotenv-substitute").write_text(dotenv, encoding="utf-8")
+    if backend_env is not None:
+        (private / "chronos-backend.env").write_text(backend_env, encoding="utf-8")
+    (private / "chronos-worker.env").write_text(worker_env, encoding="utf-8")
+    (tmp_path / "units.txt").write_text(unit_text, encoding="utf-8")
+    (tmp_path / "manager.txt").write_text(manager_env, encoding="utf-8")
+    backend_files = [private / "chronos-backend.env"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name, content in (drop_in_env_files or {}).items():
+        (elsewhere / name).write_text(content, encoding="utf-8")
+        backend_files.append(elsewhere / name)
+    listing = "".join(f"{path} (ignore_errors=no)\n" for path in backend_files)
+    listing += f"\n{private / 'chronos-worker.env'} (ignore_errors=no)\n"
+    (tmp_path / "envfiles.txt").write_text(listing if units_installed else "", encoding="utf-8")
+    systemctl = stub / "systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\n"
+        f'case "$2" in cat) cat {tmp_path / "units.txt"} ;; '
+        f"show-environment) cat {tmp_path / 'manager.txt'} ;; "
+        f'show) [ "$3 $4 $5" = "-p EnvironmentFiles --value" ] || exit 64; '
+        f"cat {tmp_path / 'envfiles.txt'} ;; *) exit 64 ;; esac\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    block = re.sub(r"(?<![\w/.-])\.env\b", "dotenv-substitute", _one_home_block())
+    block = block.replace("<PRIVATE_ENV_DIR>", str(private))
+    assert re.search(r"<[A-Z_]+>", block) is None, block
+    env = {"PATH": f"{stub}:{os.environ['PATH']}", "HOME": str(tmp_path), **(shell_env or {})}
+    return subprocess.run(
+        [shell, "-c", block], cwd=checkout, env=env, capture_output=True, text=True, check=False
+    )
+
+
+_FIX1_KEY = _hex("b2-fix1 TEST key for the one-home check — never a real one")
+_FIX1_OTHER = _hex("b2-fix1 TEST other key — never a real one")
+
+
+@pytest.mark.parametrize(
+    ("case", "kwargs", "ok"),
+    [
+        pytest.param(*row, id=row[0])
+        for row in [
+            ("only-in-dotenv", {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"}, True),
+            (
+                "a-comment-elsewhere-is-not-a-key-line",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": "# CHRONOS_PERSISTENCE_KEY lives in the checkout's .env\n",
+                },
+                True,
+            ),
+            (
+                "wrong-file-only-in-backend-env",
+                {"dotenv": "", "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "empty-dotenv-line-key-in-backend-env",
+                {
+                    "dotenv": "CHRONOS_PERSISTENCE_KEY=\n",
+                    "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                },
+                False,
+            ),
+            (
+                "both-with-different-values",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "lower-case-name-in-worker-env",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "worker_env": f"chronos_persistence_key={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "two-lines-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\nCHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"
+                    ),
+                },
+                False,
+            ),
+            (
+                "exact-line-plus-a-lower-case-line-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+                        f"chronos_persistence_key={_FIX1_OTHER}\n"
+                    )
+                },
+                False,
+            ),
+            (
+                "exact-line-plus-an-export-line-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+                        f"export CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"
+                    )
+                },
+                False,
+            ),
+            (
+                "export-form-in-dotenv",
+                {"dotenv": f"export CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "environment-line-in-a-unit",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "unit_text": f"[Service]\nEnvironment=CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "in-the-user-manager-environment",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "manager_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "exported-in-this-shell",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "shell_env": {"CHRONOS_PERSISTENCE_KEY": _FIX1_KEY},
+                },
+                False,
+            ),
+            (
+                "a-private-env-file-that-is-not-there",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n", "backend_env": None},
+                False,
+            ),
+            # B2-FIX2 (kimi delta r1 P3-1): the block enumerates the units' environment files
+            (
+                "a-drop-in-third-environment-file-carries-the-key",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "drop_in_env_files": {"other.env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"},
+                },
+                False,
+            ),
+            (
+                "a-drop-in-third-environment-file-without-the-key",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "drop_in_env_files": {"other.env": "OTHER=1\n"},
+                },
+                False,
+            ),
+            (
+                "the-units-are-not-installed",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n", "units_installed": False},
+                False,
+            ),
+            # kimi delta r1's other break attempts, kept as they behaved there
+            (
+                "a-leading-space-before-the-key-line",
+                {"dotenv": f" CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "spaces-around-the-equals-sign",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY = {_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "an-inline-comment-naming-the-key-in-a-private-file",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": "OTHER=1  # CHRONOS_PERSISTENCE_KEY is in the .env\n",
+                },
+                False,
+            ),
+            (
+                # passes the check; the step-6 compare then reads the quotes and prints NO MATCH
+                "a-quoted-value-passes-the-check",
+                {"dotenv": f'CHRONOS_PERSISTENCE_KEY="{_FIX1_KEY}"\n'},
+                True,
+            ),
+        ]
+    ],
+)
+def test_7q_the_one_home_check_passes_only_with_the_key_in_the_dotenv_alone(
+    tmp_path: Path, case: str, kwargs: dict[str, Any], ok: bool
+) -> None:
+    """C1 F2, executed: the step-5 block ends ``ONE HOME: OK`` only when the exact key line is in
+    the checkout's .env once and no other source the units or this shell hand the backend names
+    it — the wrong-file case (the key only in chronos-backend.env) stops the operator before the
+    compare. It prints counts, never the value."""
+
+    completed = _run_one_home_check(tmp_path, **kwargs)
+    last = completed.stdout.strip().splitlines()[-1]
+    assert last == ("ONE HOME: OK" if ok else "STOP: the key is not in exactly one place"), (
+        case,
+        completed.stdout,
+        completed.stderr,
+    )
+    for value in (_FIX1_KEY, _FIX1_OTHER):
+        assert value not in completed.stdout + completed.stderr, case
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+@pytest.mark.parametrize(
+    ("ok", "where"),
+    [(True, "dotenv"), (False, "backend_env"), (False, "drop_in")],
+    ids=["only-in-dotenv", "wrong-file", "a-drop-in-third-environment-file"],
+)
+def test_7q_zsh_the_one_home_check_reads_the_same_in_zsh(
+    tmp_path: Path, ok: bool, where: str
+) -> None:
+    line = f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+    kwargs: dict[str, Any] = {
+        "dotenv": {"dotenv": line},
+        "backend_env": {"dotenv": "", "backend_env": line},
+        "drop_in": {"dotenv": line, "drop_in_env_files": {"other.env": line}},
+    }[where]
+    completed = _run_one_home_check(tmp_path, shell="zsh", **kwargs)
+    expected = "ONE HOME: OK" if ok else "STOP: the key is not in exactly one place"
+    assert completed.stdout.strip().splitlines()[-1] == expected, completed
+
+
+def test_7r_step6_runs_the_one_home_check_before_the_escrow_and_before_any_deletion() -> None:
+    """C1 F2: the check stands before the escrow command and again between MATCH and the first
+    deletion; the compare reads the one home, the file the check counted."""
+
+    step6 = _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **")
+    checks = [m.start() for m in re.finditer("one-home check", step6)]
+    escrow_command = step6.index("python -m chronos.operations.persistence_key_escrow")
+    assert any(at < escrow_command for at in checks), "no check before the escrow"
+    match, deletion = step6.index("echo MATCH"), step6.index("shred -u")
+    assert any(match < at < deletion for at in checks), "no check between MATCH and deletion"
+    remote = re.search(r'ssh <host> "([^"]*)"', step6)
+    assert remote is not None and "<checkout>/.env" in remote.group(1), step6
+
+
+def test_7s_the_escrow_artifact_is_written_outside_the_checkout_in_a_private_directory() -> None:
+    """C1 F9: ``--out`` names a 0700 directory under the home, made fresh just before the tool
+    runs — never a bare name, which lands in the checkout (not ignored; writable by the backend
+    unit); the copy, the compare and the shred all use that one path."""
+
+    step6 = _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **")
+    command = re.search(r"persistence_key_escrow --out (\S+)", step6)
+    assert command is not None
+    out = command.group(1)
+    directory, name = out.rsplit("/", 1) if "/" in out else ("", out)
+    assert directory.startswith("~/") and name == "chronos-persistence-key.age", out
+    made = step6.index(f"mkdir -m 0700 {directory}")
+    assert made < command.start()
+    assert f"scp <host>:{directory[2:]}/{name} ." in step6
+    assert f"shred -u {out}" in step6 and f"rmdir {directory}" in step6
+    assert "<checkout>/chronos-persistence-key.age" not in step6
 
 
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
@@ -1736,7 +2225,7 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
 
 
 def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_verifies_it(
-    tmp_path: Path,
+    tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
     """Daybreak r3 P1-2, the exact counterexample and its generalisation. A retired store the gate
     refuses (no reconciliation run) gets an envelope through the PUBLIC ``backup``; then the
@@ -1764,6 +2253,23 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
         envelope = Path(manifest.backup_path).parent
         restored = drill.restore(manifest, tmp_path / "restored-once")
         assert not restored.verified and restored.acceptance == "repository"
+        # N3-4: the drill removed that copy and its directory; the pool below needs a cleartext
+        # copy of the refused store at that path — the by-hand decrypt (the runbook's step 4)
+        assert AGE is not None and not Path(restored.target_dir).exists()
+        Path(restored.target_dir).mkdir(0o700)
+        subprocess.run(
+            [
+                AGE,
+                "-d",
+                "-i",
+                str(age_keys.identity),
+                "-o",
+                str(Path(restored.target_dir) / drill.DB_NAME),
+                manifest.backup_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
         counter = itertools.count()
 
         def fresh(prefix: str) -> Path:
@@ -2477,18 +2983,18 @@ def test_9l_an_archived_report_proves_the_admitted_set_quiet_and_the_live_names_
 
 def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothing(
     tmp_path: Path,
-    age_keys: KeyMaterial,
+    recovery_identity: RecoveryIdentity,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Daybreak r2 P1-3, the exact probe: the identity predicate confirms the created artifact
     and, before it returns, the created file is renamed aside and a foreign file planted at the
     name. r2 unlinked the name after the predicate — the foreign entry. r3: after a post-create
-    failure the tool deletes nothing, so there is no interval to race — the only ``unlink`` the
-    module performs is its own scratch cleartext (recorded here: none on this path, where the
-    decrypt is forced to fail before the scratch exists), the predicate is not consulted for a
-    cleanup, the foreign entry (wherever the probe put one) survives, and the created ciphertext
-    is reported by device:inode for the owner to shred."""
+    failure the tool deletes nothing, so there is no interval to race — the module performs no
+    ``unlink`` at all (B2: the host-decrypt proof and its private scratch are gone; recorded here,
+    with the step between the two name checks — the ciphertext digest — forced to fail), the
+    predicate is not consulted for a cleanup, the foreign entry (wherever the probe put one)
+    survives, and the created ciphertext is reported by device:inode for the owner to shred."""
 
     from chronos.operations import persistence_key_escrow as escrow
 
@@ -2497,10 +3003,10 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
     aside = out.with_name("artifact-aside")
     foreign = b"not the file this run created"
 
-    def failing_decrypt(*args: Any, **kwargs: Any) -> None:
-        raise escrow.EscrowRefused("AGE_FAILED", "forced: the decrypt step failed")
+    def failing_digest(fd: int) -> str:
+        raise escrow.EscrowRefused("FORCED", "forced: the digest step failed")
 
-    monkeypatch.setattr(escrow, "_decrypts_back_to", failing_decrypt)
+    monkeypatch.setattr(escrow, "_sha256_fd", failing_digest)
     real_predicate = escrow._entry_is_real_file
     verdicts: list[bool] = []
 
@@ -2525,7 +3031,7 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
     monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
     code = escrow.main(["--out", str(out), "--key-from-stdin"])
     report = json.loads(capsys.readouterr().out)
-    assert code == 2 and report["code"] == "AGE_FAILED", report
+    assert code == 2 and report["code"] == "FORCED", report
     assert unlinked == [], unlinked  # nothing was unlinked on the failure path
     assert verdicts == [True]  # the one post-create check; no cleanup consults the name
     created = report["created_artifact"]
@@ -2535,14 +3041,11 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
         assert out.read_bytes() == foreign  # the foreign entry survives
     assert _entries(out.parent) == sorted(p.name for p in (out, aside) if p.exists())
     assert created["identity"] == "{}:{}".format(*_identity(ciphertext))
-    assert AGE is not None
-    decrypted = subprocess.run(
-        [AGE, "-d", "-i", str(age_keys.identity), str(ciphertext)], check=True, capture_output=True
-    )
+    decrypted = _age_decrypt(recovery_identity.identity, ciphertext)
     assert decrypted.stdout == (key + "\n").encode()  # the created ciphertext, intact
     assert key not in json.dumps(report)
-    # and statically: the module's only deletions are its private scratch (the cleartext the
-    # proof wrote, and the 0700 directory it made) — never the artifact, never by name
+    # and statically: the module deletes nothing at all — no scratch since B2 removed the
+    # host-decrypt proof, never the artifact, never by name
     tree = ast.parse(ESCROW_MODULE.read_text(encoding="utf-8"))
     deleters = sorted(
         ast.unparse(node)
@@ -2551,7 +3054,7 @@ def test_7i_daybreak_s_race_a_swap_inside_the_last_identity_check_deletes_nothin
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("unlink", "remove", "rmdir", "rmtree", "unlink_created")
     )
-    assert deleters == ["os.rmdir(scratch)", "os.unlink('key', dir_fd=scratch_fd)"], deleters
+    assert deleters == [], deleters
 
 
 # ------------------------------------------- (10, r3) the live namespace is never vacant
@@ -3213,3 +3716,107 @@ def test_12e_the_move_never_re_walks_the_path_by_name() -> None:
     source = MODULE.read_text(encoding="utf-8")
     assert "_walk_directory" not in source
     assert "dir_fd=protected.leaf_fd" in source  # the source open, relative to the held leaf
+
+
+# ------------------------------------------------------------- N3-4: the drill's copy is gone
+# Kevin's ruling K-20261023-002 (P2-4 option B): the verify copy under --restore-into does not
+# outlive the command. The drill removes it through the descriptors it held; the command reports
+# it (``drill.restore_copy_removed``, ``drill.removed``) and, when the drill could not, refuses
+# before anything moves — the envelope stays and is named.
+
+
+def _refuse_removal_unlink_once(monkeypatch: pytest.MonkeyPatch, target: Path) -> list[str]:
+    """``os.unlink`` as the drill sees it refuses ``chronos.db`` (EPERM) the first time its
+    ``dir_fd`` designates ``target`` — the removal's own unlink; everything else, the rpo scratch
+    included, keeps working. Returns the list the refusal is recorded in."""
+
+    real_unlink = os.unlink
+    refused: list[str] = []
+
+    def unlink(path: str, *, dir_fd: int | None = None) -> None:
+        if dir_fd is not None and path == "chronos.db" and not refused and target.exists():
+            held, by_path = os.fstat(dir_fd), os.stat(target)
+            if (held.st_dev, held.st_ino) == (by_path.st_dev, by_path.st_ino):
+                refused.append(path)
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(drill.os, "unlink", unlink)
+    return refused
+
+
+def test_n34_1_apply_leaves_no_restore_copy_and_the_report_and_the_next_steps_say_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    monkeypatch.setattr(socket, "socket", _NoSocket)  # no broker, no network: proven, not said
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    assert report["drill"]["verdict"] == "ARCHIVE_VERIFIED"
+    assert report["drill"]["restore_copy_removed"] is True
+    assert report["drill"]["removed"] == ["chronos.db"]  # no audit pair travels with this store
+    assert report["restore_dir"] == str(tmp_path / "restored")  # where it was
+    assert not (tmp_path / "restored").exists()
+    assert Path(report["envelope"]).is_dir()  # the envelope stays
+    first = report["next_manual_steps"][0]
+    assert "restore_copy_removed" in first and "ls -ld" in first
+    assert not any("rm -r" in step for step in report["next_manual_steps"])
+
+
+def test_n34_2_a_copy_the_drill_could_not_remove_refuses_typed_before_anything_moves(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    target = tmp_path / "restored"
+    refused = _refuse_removal_unlink_once(monkeypatch, target)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert refused == ["chronos.db"]
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "RESTORE_COPY_NOT_REMOVED"
+    assert len(report["failures"]) == 1
+    assert report["failures"][0].startswith("drill: RESTORE_COPY_NOT_REMOVED: chronos.db")
+    # the archive is good and named, the drill's verifiers passed, the copy is still there
+    assert Path(report["envelope"]).is_dir() and report["manifest_sha256"]
+    assert report["drill"]["acceptance"] == f"archive:schema_version:{SCHEMA_VERSION - 1}"
+    assert report["drill"]["restore_copy_removed"] is False and report["drill"]["removed"] == []
+    assert sorted(p.name for p in target.iterdir()) == ["chronos.db"]
+    # nothing moved, no sentinel, the live store untouched
+    assert report["moved_aside"] == [] and report["sentinels"] == []
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+    # the runbook's instruction: remove the copy by hand, re-run — the next run makes a new
+    # envelope and stamp, the leaf being absent again
+    shutil.rmtree(target)
+    later = store.now + timedelta(minutes=1)
+    argv = [
+        "--db",
+        str(store.db),
+        "--out",
+        str(tmp_path / "backups"),
+        "--restore-into",
+        str(target),
+        "--apply",
+    ]
+    code = cutover.main(argv, clock=_clock(later))
+    again = json.loads(capsys.readouterr().out)
+    assert code == 0 and again["verdict"] == "ARCHIVED", again
+    assert again["drill"]["restore_copy_removed"] is True and not target.exists()
+    envelopes = sorted(
+        p.name for p in (tmp_path / "backups").iterdir() if not p.name.startswith(".")
+    )
+    assert len(envelopes) == 2 and Path(report["envelope"]).name in envelopes
+
+
+def test_n34_3_the_cutover_runbook_confirms_the_removal_instead_of_asking_for_an_rm() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    steps = text.split("## Steps", 1)[1]
+    step4 = steps.split("\n4. **", 1)[1].split("\n5. **", 1)[0]
+    assert "restore_copy_removed" in step4 and "ls -ld /var/backups/chronos/n3-verify" in step4
+    assert "rm -r /var/backups/chronos/n3-verify" not in step4
+    assert "the command never deletes" not in step4
+    assert "`RESTORE_COPY_NOT_REMOVED`" in steps  # step 3's bullet and the refusal table
+    table = text.split("## What the gate's refusal codes mean", 1)[1]
+    assert "| `RESTORE_COPY_NOT_REMOVED` |" in table
+    # the "Before you start" rule says the copy is removed before the report
+    before = text.split("## Before you start", 1)[1].split("## Steps", 1)[0]
+    assert "restore_copy_removed" in before

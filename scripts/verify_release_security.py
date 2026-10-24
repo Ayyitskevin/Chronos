@@ -132,11 +132,24 @@ def _run_command(command: ScanCommand, root: Path) -> None:
 
 
 def _git_output(root: Path, *arguments: str) -> bytes:
+    # D-44: two callers decide ancestry (the octopus refusal, a reviewed commit's reachability),
+    # so grafts, replacement refs and the commit-graph are all disabled, exactly as gate 30 does:
+    # a forged commit-graph in the clone or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store can
+    # rewrite parent edges. The other callers read no ancestry and are unchanged by the flags.
     try:
         result = subprocess.run(
-            ("git", "--no-replace-objects", "-C", str(root), *arguments),
+            (
+                "git",
+                "-c",
+                "core.commitGraph=false",
+                "--no-replace-objects",
+                "-C",
+                str(root),
+                *arguments,
+            ),
             check=True,
             capture_output=True,
+            env={**os.environ, "GIT_GRAFT_FILE": "/dev/null"},
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise SecurityGateError(
@@ -185,13 +198,18 @@ def _bounded_history_diff(
     environment.update(
         {
             "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(object_directory),
+            "GIT_GRAFT_FILE": "/dev/null",
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OBJECT_DIRECTORY": str(scratch_objects),
             "GIT_OPTIONAL_LOCKS": "0",
         }
     )
+    # D-44: the walk decides which commits are scanned, so it reads parents from the commit
+    # objects, never from a commit-graph (here only reachable through the alternate above).
     command = (
         "git",
+        "-c",
+        "core.commitGraph=false",
         "--no-replace-objects",
         "-c",
         "core.quotePath=false",
