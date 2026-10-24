@@ -491,7 +491,7 @@ Deliver:
   `CHRONOS_CAPTURE_PEPPER`, scheme `hmac-sha256-v2`, a 16-hex `pepper_fingerprint` in the manifest,
   and a capture refused before anything is written when the pepper is absent
   (.claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py:18-31;
-  docs/ops/m4-read-only-gate-session-checklist.md:270-279; #243, merge 7ee0319, with its checklist
+  docs/ops/m4-read-only-gate-session-checklist.md:297-302; #243, merge 7ee0319, with its checklist
   and pepper-documentation tail in #245, merge 148e936); backups encrypted at rest with age
   (X25519) to exactly two recipients, the host identity generated once per host, untracked, readable
   by the operator alone (docs/ops/RESTORE-DRILL.md:179-185; #244, merge 8d1ba6d); the restored

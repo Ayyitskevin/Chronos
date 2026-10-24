@@ -98,6 +98,9 @@ ALLOW_ORDER_TRANSMIT=false
 ALLOW_LIVE_TRADING=false
 SYMBOL_ALLOWLIST=AAPL,MSFT,SPY
 # AUTONOMY_MANDATE_FILE stays unset
+# CHRONOS_PERSISTENCE_KEY: yours, generated and placed by your keystrokes only, never an agent's;
+# this 0600 .env is its only working copy. Custody, escrow: docs/ops/N3-CUTOVER.md steps 5-6.
+CHRONOS_PERSISTENCE_KEY=
 ```
 
 Never put an IBKR username or password in any Chronos file.
