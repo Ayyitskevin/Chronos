@@ -5043,10 +5043,15 @@ def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]]
 
 # (markdown, the line checker's offences, how many fences a CommonMark renderer shows). Fix round 3
 # (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's, alone on
-# its line, closes it; any other line is content. The first three are legitimate CommonMark.
+# its line, closes it; any other line is content. The first six are legitimate CommonMark.
 _FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
     "kimi_a_content_line_starts_with_the_opener": (
-        "```bash\necho one\n```bash\necho two\n```\n",
+        "```bash\nprintf 'x'\n```bash\necho still-code\n```\n",
+        [],
+        1,
+    ),
+    "text_after_a_long_run_at_the_top_level_is_content": (
+        "```bash\nx\n``` trailing\n```\n",
         [],
         1,
     ),
