@@ -3967,6 +3967,10 @@ def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_by_construction(tmp_pat
     assert "mode=ro" in block and "FROM database_scope" in block
     assert "python -I -c" in block and "dotenv_values" in block and "account_fingerprint(" in block
     assert "CHRONOS_PERSISTENCE_KEY=" in block and "STOP" in block
+    # kimi delta r1 P2-1: dotenv_values interpolates `${VAR}` from os.environ by default, so the
+    # read must be literal; the 64-hex check then refuses a `${…}` line instead of an env value
+    assert 'dotenv_values(".env", interpolate=False)' in block, block
+    assert "FileNotFoundError" in block  # a missing .env is a STOP line, not a traceback
     for shell_source in ("env -i", "mandate fingerprint", "b1-preflight", "os.environ", "getenv"):
         assert shell_source not in block, shell_source
     assert "CLEAR [scope] already bound to this paper account" in step8  # the IBKR-paper check
@@ -4006,7 +4010,11 @@ def test_c1f_f1_the_step_8_fingerprint_comes_from_the_file_whatever_the_environm
     test may write into the venv's site-packages): still the file's fingerprint — while the OLD
     form (``mandate fingerprint``) under the same injection prints the INJECTED key's, the hole.
     (3) STOP cases: no key line, a doubled line, a second form, a malformed value — exit 1,
-    "STOP" on stderr, nothing on stdout, and the key never printed."""
+    "STOP" on stderr, nothing on stdout, and the key never printed. (4) kimi delta r1 P2-1: an
+    exact line whose value is ``${VAR}`` must STOP, not print the fingerprint of the environment's
+    VAR — whether VAR comes from the shell or from startup code (``dotenv_values`` interpolates
+    from ``os.environ`` unless told not to). (5) A missing ``.env`` is a ``STOP:`` line, exit 1,
+    never a traceback."""
 
     file_key = _hex("c1f-fix1: the key the .env holds — never a real key")
     other_key = _hex("c1f-fix1: a key injected into the process environment — never real")
@@ -4062,6 +4070,25 @@ def test_c1f_f1_the_step_8_fingerprint_comes_from_the_file_whatever_the_environm
         assert stopped.returncode == 1, (case, stopped)
         assert stopped.stdout == "" and stopped.stderr.startswith("STOP"), (case, stopped)
         assert file_key[:20] not in stopped.stderr and other_key[:20] not in stopped.stderr, case
+    # (4) interpolation: the file's exact line is `${VAR}`; VAR holds a well-formed key in the
+    # environment (the shell, then kimi's startup vector) — the file is read literally, so STOP
+    dotenv.write_text("CHRONOS_PERSISTENCE_KEY=${C1F_TEST_VAR}\n", encoding="utf-8")
+    interpolated = _run_step8_fingerprint(
+        checkout, isolated=True, env={**base_env, "C1F_TEST_VAR": other_key}
+    )
+    assert interpolated.returncode == 1, interpolated
+    assert interpolated.stdout == "" and interpolated.stderr.startswith("STOP"), interpolated
+    (site / "sitecustomize.py").write_text(
+        f'import os\nos.environ["C1F_TEST_VAR"] = "{other_key}"\n', encoding="utf-8"
+    )
+    via_startup = _run_step8_fingerprint(checkout, isolated=False, env=injected_env)
+    assert via_startup.returncode == 1, via_startup
+    assert via_startup.stdout == "" and via_startup.stderr.startswith("STOP"), via_startup
+    # (5) no .env at all: a STOP line, exit 1, no traceback (fail-closed AND clear)
+    dotenv.unlink()
+    absent = _run_step8_fingerprint(checkout, isolated=True, env=base_env)
+    assert absent.returncode == 1 and absent.stdout == "", absent
+    assert absent.stderr.startswith("STOP") and "Traceback" not in absent.stderr, absent
 
 
 def test_c1f_f4_the_sentinel_refusal_wording_matches_what_mv_prints(tmp_path: Path) -> None:
