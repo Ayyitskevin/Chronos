@@ -1599,11 +1599,18 @@ def _run_one_home_check(
     unit_text: str = "",
     manager_env: str = "",
     shell_env: dict[str, str] | None = None,
+    drop_in_env_files: dict[str, str] | None = None,
+    units_installed: bool = True,
     shell: str = "bash",
 ) -> subprocess.CompletedProcess[str]:
     """The step-5 block, run as written with two substitutions: ``<checkout>/.env`` is a file
     named ``dotenv-substitute`` (no .env is ever created) and ``<PRIVATE_ENV_DIR>`` is a temp
-    directory; ``systemctl`` is a stub that prints the unit text and the manager environment."""
+    directory; ``systemctl`` is a stub that prints the unit text, the manager environment and
+    the units' ``EnvironmentFiles`` in the format systemd 259 prints for ``show -p
+    EnvironmentFiles --value`` (measured: one ``<path> (ignore_errors=yes|no)`` line per file, a
+    blank line between units; a unit that does not exist prints nothing and exits 0).
+    ``drop_in_env_files`` adds files at a third path to the backend's list, as a drop-in
+    ``EnvironmentFile=`` would; ``units_installed=False`` lists nothing."""
 
     checkout, private, stub = tmp_path / "checkout", tmp_path / "private", tmp_path / "bin"
     for directory in (checkout, private, stub):
@@ -1614,11 +1621,22 @@ def _run_one_home_check(
     (private / "chronos-worker.env").write_text(worker_env, encoding="utf-8")
     (tmp_path / "units.txt").write_text(unit_text, encoding="utf-8")
     (tmp_path / "manager.txt").write_text(manager_env, encoding="utf-8")
+    backend_files = [private / "chronos-backend.env"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name, content in (drop_in_env_files or {}).items():
+        (elsewhere / name).write_text(content, encoding="utf-8")
+        backend_files.append(elsewhere / name)
+    listing = "".join(f"{path} (ignore_errors=no)\n" for path in backend_files)
+    listing += f"\n{private / 'chronos-worker.env'} (ignore_errors=no)\n"
+    (tmp_path / "envfiles.txt").write_text(listing if units_installed else "", encoding="utf-8")
     systemctl = stub / "systemctl"
     systemctl.write_text(
         "#!/bin/sh\n"
         f'case "$2" in cat) cat {tmp_path / "units.txt"} ;; '
-        f"show-environment) cat {tmp_path / 'manager.txt'} ;; *) exit 64 ;; esac\n",
+        f"show-environment) cat {tmp_path / 'manager.txt'} ;; "
+        f'show) [ "$3 $4 $5" = "-p EnvironmentFiles --value" ] || exit 64; '
+        f"cat {tmp_path / 'envfiles.txt'} ;; *) exit 64 ;; esac\n",
         encoding="utf-8",
     )
     systemctl.chmod(0o755)
@@ -1741,6 +1759,53 @@ _FIX1_OTHER = _hex("b2-fix1 TEST other key — never a real one")
                 {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n", "backend_env": None},
                 False,
             ),
+            # B2-FIX2 (kimi delta r1 P3-1): the block enumerates the units' environment files
+            (
+                "a-drop-in-third-environment-file-carries-the-key",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "drop_in_env_files": {"other.env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"},
+                },
+                False,
+            ),
+            (
+                "a-drop-in-third-environment-file-without-the-key",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "drop_in_env_files": {"other.env": "OTHER=1\n"},
+                },
+                False,
+            ),
+            (
+                "the-units-are-not-installed",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n", "units_installed": False},
+                False,
+            ),
+            # kimi delta r1's other break attempts, kept as they behaved there
+            (
+                "a-leading-space-before-the-key-line",
+                {"dotenv": f" CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "spaces-around-the-equals-sign",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY = {_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "an-inline-comment-naming-the-key-in-a-private-file",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": "OTHER=1  # CHRONOS_PERSISTENCE_KEY is in the .env\n",
+                },
+                False,
+            ),
+            (
+                # passes the check; the step-6 compare then reads the quotes and prints NO MATCH
+                "a-quoted-value-passes-the-check",
+                {"dotenv": f'CHRONOS_PERSISTENCE_KEY="{_FIX1_KEY}"\n'},
+                True,
+            ),
         ]
     ],
 )
@@ -1764,10 +1829,20 @@ def test_7q_the_one_home_check_passes_only_with_the_key_in_the_dotenv_alone(
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
-@pytest.mark.parametrize("ok", [True, False], ids=["only-in-dotenv", "wrong-file"])
-def test_7q_zsh_the_one_home_check_reads_the_same_in_zsh(tmp_path: Path, ok: bool) -> None:
+@pytest.mark.parametrize(
+    ("ok", "where"),
+    [(True, "dotenv"), (False, "backend_env"), (False, "drop_in")],
+    ids=["only-in-dotenv", "wrong-file", "a-drop-in-third-environment-file"],
+)
+def test_7q_zsh_the_one_home_check_reads_the_same_in_zsh(
+    tmp_path: Path, ok: bool, where: str
+) -> None:
     line = f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
-    kwargs: dict[str, Any] = {"dotenv": line} if ok else {"dotenv": "", "backend_env": line}
+    kwargs: dict[str, Any] = {
+        "dotenv": {"dotenv": line},
+        "backend_env": {"dotenv": "", "backend_env": line},
+        "drop_in": {"dotenv": line, "drop_in_env_files": {"other.env": line}},
+    }[where]
     completed = _run_one_home_check(tmp_path, shell="zsh", **kwargs)
     expected = "ONE HOME: OK" if ok else "STOP: the key is not in exactly one place"
     assert completed.stdout.strip().splitlines()[-1] == expected, completed
