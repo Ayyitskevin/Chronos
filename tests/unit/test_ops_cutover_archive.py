@@ -4454,7 +4454,42 @@ _LAST_SCHEMA17_MAIN = "8093176"
 _SCHEMA18_MERGE = "f0a3446"
 #: "Before you start"'s check that the recorded rollback commit is schema-17 code: it parses the
 #: file and never runs it, and prints the line only for ONE plain top-level ``= 17`` (fix round 1)
+#: in a file that uses no run-time code: exec, eval, compile, … importlib, builtins (fix round 2)
 _SCHEMA17_CHECK = """\
+git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
+import ast, sys
+tree = ast.parse(sys.stdin.buffer.read())
+name = "SCHEMA_VERSION"
+runs = {"exec", "eval", "compile", "__import__", "setattr", "globals", "vars", "locals"}
+used = sorted({  # run-time code that may set it, whatever it does: a name, a def, an import
+    w for n in ast.walk(tree)
+    for w in (getattr(n, "id", None), getattr(n, "name", None), getattr(n, "module", None))
+    if w in runs or str(w).split(".")[0] in ("importlib", "builtins", "__builtins__")
+})
+if used:
+    sys.exit("STOP: the file uses " + ", ".join(used) + ", which a static read cannot follow.")
+sets = [  # every node that may set it: bind, delete, import, keyword, string, bytes, import *
+    n for n in ast.walk(tree)
+    if name in (getattr(n, "id", None), getattr(n, "attr", None))
+    and not isinstance(n.ctx, ast.Load)
+    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "arg", None))
+    or name in (getattr(n, "rest", None), *getattr(n, "names", ()))
+    or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+    or isinstance(n, ast.Constant) and isinstance(n.value, bytes) and name.encode() in n.value
+    or isinstance(n, ast.alias) and n.name == "*"
+]
+top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
+if len(top) != 1:
+    sys.exit(f"STOP: {len(sets)} place(s) may set SCHEMA_VERSION, not one plain assignment.")
+value = top[0].value
+if not (isinstance(value, ast.Constant) and type(value.value) is int and value.value == 17):
+    sys.exit(f"STOP: SCHEMA_VERSION = {ast.unparse(value)}, not 17.")
+print("SCHEMA_VERSION = 17")
+'
+"""
+#: the be60be2 form (kimi C1R-F re-review HOLD P1): its string clause read ``str`` only, so
+#: ``SCHEMA_VERSION = 17`` then ``exec(b"SCHEMA_VERSION = 18")`` passed it
+_SCHEMA17_FIX1_CHECK = """\
 git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
 import ast, sys
 tree = ast.parse(sys.stdin.buffer.read())
@@ -4528,11 +4563,21 @@ def _n1_offences(runbook: str) -> list[str]:
         f"If you cannot establish it, use `{_LAST_SCHEMA17_MAIN}`, the last schema-17 commit on "
         f"main (`{_SCHEMA18_MERGE}^1`, the first parent of the merge that brought schema 18).",
         "Then check it. The check parses that commit's `database.py` with `ast` and never "
-        "imports or runs it: it prints `SCHEMA_VERSION = 17` only when the file sets "
-        "`SCHEMA_VERSION` in exactly one place, a plain top-level assignment of 17.",
-        "Two assignments, an annotated or augmented one, a binding anywhere else, a string or a "
-        "keyword argument that names it, or a `*` import each print a line beginning `STOP:` "
+        "imports or runs it: it prints `SCHEMA_VERSION = 17` only when the one place it can see "
+        "setting `SCHEMA_VERSION` is a plain top-level assignment of 17.",
+        "Two assignments, an annotated or augmented one, a binding anywhere else, a string, bytes "
+        "or keyword argument that names it, or a `*` import each print a line beginning `STOP:` "
         "instead (C1R-F fix round 1, kimi P1).",
+        "So does any use of `exec`, `eval`, `compile`, `__import__`, `setattr`, `globals`, "
+        "`vars`, `locals`, `importlib`, `builtins` or `__builtins__`, whatever it does: code "
+        "built or looked up at run time can set the name where a static read cannot follow it "
+        "(fix round 2, kimi P1).",
+        "The check guards against an honest wrong pick — a mistyped sha, a schema-18 commit — "
+        "not against a commit written to defeat it.",
+        "The backstop for that is the schema gate: code whose effective `SCHEMA_VERSION` is 18 "
+        "refuses the restored schema-17 store at start. `db-preflight`, which the backend unit "
+        "runs first, prints `REFUSE [schema] Unsupported Chronos schema version 17; expected 18` "
+        "and exits 78 (rehearsed), so such a pick fails loudly, not silently.",
         "This must print exactly one line, `SCHEMA_VERSION = 17`; anything else — a `STOP:` "
         "line, an error, or nothing — means that commit is not the rollback code, so stop:",
     )
@@ -4793,6 +4838,155 @@ def test_c1rf_fix1_n1_the_check_stops_on_a_bad_sha_and_a_missing_path(tmp_path: 
         assert refused.returncode != 0 and refused.stdout == "", (sha, refused)
         lines = refused.stderr.splitlines()
         assert lines[0].startswith("fatal: ") and lines[-1].startswith("STOP: "), (sha, refused)
+
+
+#: kimi's re-review counterexample: HEAD's schema-18 module with its one assignment set to 17,
+#: and 18 set again from a bytes literal the module executes
+_KIMI_BYTES_EXEC = 'SCHEMA_VERSION = 17\nexec(b"SCHEMA_VERSION = 18")\n'
+
+
+def _uses(*names: str) -> str:
+    return f"STOP: the file uses {', '.join(names)}, which a static read cannot follow.\n"
+
+
+_MAY_SET_TWICE = "STOP: 2 place(s) may set SCHEMA_VERSION, not one plain assignment.\n"
+_SET_18 = '"SCHEMA_" + "VERSION = 18"'  # computed: no constant names it
+#: (base commit, the one exact text replaced — None appends —, the replacement, exact stderr).
+#: One call or import per run-time name the check stops on, each spelled so that no OTHER clause
+#: of the check sees it, plus the bytes clause and the two clauses the round-2 names now shadow
+#: in the round-1 variants (a string and a keyword through ``globals()``).
+_SCHEMA17_FIX2_VARIANTS: dict[str, tuple[str, str | None, str, str]] = {
+    "kimi_17_then_exec_of_bytes": (
+        "HEAD",
+        "SCHEMA_VERSION = 18\n",
+        _KIMI_BYTES_EXEC,
+        _uses("exec"),
+    ),
+    "17_then_a_bytes_literal_naming_it": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        '_PATCH = b"SCHEMA_VERSION = 18"\n',
+        _MAY_SET_TWICE,
+    ),
+    "17_then_exec": (_LAST_SCHEMA17_MAIN, None, f"exec({_SET_18})\n", _uses("exec")),
+    "17_then_eval": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "eval(\"globals().update({'SCHEMA_' + 'VERSION': 18})\")\n",
+        _uses("eval"),
+    ),
+    "17_then_compile": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f'_CODE = compile({_SET_18}, "<n3>", "exec")\n',
+        _uses("compile"),
+    ),
+    "17_then___import__": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        '__import__("sys").modules[__name__].__dict__["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("__import__"),
+    ),
+    "17_then_setattr": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nsetattr(sys.modules[__name__], "SCHEMA_" + "VERSION", 18)\n',
+        _uses("setattr"),
+    ),
+    "17_then_globals": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'globals()["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("globals"),
+    ),
+    "17_then_vars": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nvars(sys.modules[__name__])["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("vars"),
+    ),
+    "17_then_locals": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'locals()["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("locals"),
+    ),
+    "17_then_import_importlib": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "import importlib.util as _util\n",
+        _uses("importlib.util"),
+    ),
+    "17_then_from_importlib": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "from importlib.util import find_spec as _find\n",
+        _uses("importlib.util"),
+    ),
+    "17_then_builtins": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f"import builtins\nbuiltins.exec({_SET_18})\n",
+        _uses("builtins"),
+    ),
+    "17_then___builtins__": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f'__builtins__["ex" + "ec"]({_SET_18})\n',
+        _uses("__builtins__"),
+    ),
+    "17_then_a_string_through_the_module_dict": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nsys.modules[__name__].__dict__["SCHEMA_VERSION"] = 18\n',
+        _MAY_SET_TWICE,
+    ),
+    "17_then_a_keyword_through_the_module_dict": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "import sys\nsys.modules[__name__].__dict__.update(SCHEMA_VERSION=18)\n",
+        _MAY_SET_TWICE,
+    ),
+}
+
+
+@pytest.mark.parametrize("variant", list(_SCHEMA17_FIX2_VARIANTS))
+def test_c1rf_fix2_n1_the_check_stops_on_bytes_and_on_any_run_time_code(
+    tmp_path: Path, variant: str
+) -> None:
+    """kimi C1R-F re-review HOLD P1: the be60be2 check read string constants only, so a module
+    that assigned 17 and then ran ``exec(b"SCHEMA_VERSION = 18")`` passed it. The check now
+    reads bytes like strings, and stops on any use of the run-time names (exec, eval, compile,
+    __import__, setattr, globals, vars, locals, importlib, builtins, __builtins__), whatever
+    their arguments: a static read cannot follow what they set. Each variant is one synthetic
+    commit run through the runbook's EXACT command: rc 1, nothing on stdout, and exactly the
+    expected ``STOP:`` line, which names the clause that stopped it."""
+
+    base, old, new, stderr = _SCHEMA17_FIX2_VARIANTS[variant]
+    repo, (sha,) = _synthetic_checkout(tmp_path, _variant(base, old, new))
+    result = _run_schema17_check(
+        _the_runbook_s_schema17_check(), repo, sha, _python_on_path(tmp_path)
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (1, "", stderr), result
+
+
+def test_c1rf_fix2_n1_control_the_be60be2_check_passed_kimi_s_bytes_exec(tmp_path: Path) -> None:
+    """Positive control for the fix-2 variants: kimi's synthetic commit really is the P1. The
+    be60be2 check prints ``SCHEMA_VERSION = 17``, rc 0, for it, while the module's effective
+    value is 18 (the two synthetic lines alone, run in an empty namespace — no Chronos code). And
+    the round-2 check passes every schema-17 module it must: 8093176's bytes, unchanged."""
+
+    namespace: dict[str, object] = {}
+    exec(_KIMI_BYTES_EXEC, namespace)
+    assert namespace["SCHEMA_VERSION"] == 18
+    source = _variant(*_SCHEMA17_FIX2_VARIANTS["kimi_17_then_exec_of_bytes"][:3])
+    fallback = _git("show", f"{_LAST_SCHEMA17_MAIN}:{_DATABASE_PY}").stdout
+    repo, (kimi, unchanged) = _synthetic_checkout(tmp_path, source, fallback)
+    env = _python_on_path(tmp_path)
+    old = _run_schema17_check(_SCHEMA17_FIX1_CHECK, repo, kimi, env)
+    assert (old.returncode, old.stdout, old.stderr) == (0, "SCHEMA_VERSION = 17\n", ""), old
+    new = _run_schema17_check(_the_runbook_s_schema17_check(), repo, unchanged, env)
+    assert (new.returncode, new.stdout, new.stderr) == (0, "SCHEMA_VERSION = 17\n", ""), new
 
 
 def _fence_offences(text: str) -> list[str]:
