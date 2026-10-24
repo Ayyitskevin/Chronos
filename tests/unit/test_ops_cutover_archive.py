@@ -1022,6 +1022,85 @@ def test_5g_fix_rt_the_runbook_target_is_out_of_tmp_and_the_stop_is_in_the_docum
     assert "--restore-into /var/backups/chronos/n3-verify" in module
 
 
+def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps() -> None:
+    """B3 (A2 review): the banner's condition is four-fold. A later edit that drops either new
+    marker (N3-4 restore-copy removal, recovery-key-only escrow) from the STOP — the banner, or
+    either echo — fails here, and so does a marker the named source no longer carries."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    banner = text[: text.index("\n\n", text.index("> **STOP"))]
+    banner_flat = " ".join(banner.replace("\n> ", " ").split())
+    added = (
+        "**And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) "
+        "AND the recovery-key-only escrow change have merged to main too.**"
+    )
+    c1f = (
+        "**And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 "
+        "rehearsal) has merged to main too.**"
+    )
+    assert added in banner_flat, "the banner must carry the N3-4 + escrow condition"
+    assert c1f in banner_flat, "the banner must carry the C1-F condition"
+    assert "K-20261023-002" in banner and "K-20261023-003" in banner  # Kevin's two rulings
+    assert "K-20261024-001" in banner  # the ruling that admitted C1-F
+    assert "all six" in banner_flat and "If any of them prints nothing" in banner_flat
+    # the two original checks stay
+    for old in (
+        "git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py",
+        "git grep -n RESTORE_TARGET_NOT_PROTECTED origin/main -- "
+        "src/chronos/operations/cutover_archive.py",
+    ):
+        assert f"`{old}`" in banner_flat
+    # the two new checks: each grep's pattern must exist in the named file at this tree
+    marks = {
+        "src/chronos/operations/restore_drill.py": "^RESTORE_COPY_NOT_REMOVED = ",
+        "src/chronos/operations/persistence_key_escrow.py": (
+            "recipient = restore_drill.KEVIN_RECOVERY_RECIPIENT"
+        ),
+    }
+    for path, pattern in marks.items():
+        assert f"`git grep -n '{pattern}' origin/main -- {path}`" in banner_flat, (path, pattern)
+        regex = re.compile(pattern, re.MULTILINE)
+        assert regex.search((ROOT / path).read_text(encoding="utf-8")), (path, pattern)
+    # the C1-F checks: two independent markers in the runbook, one per reviewed fix. Each reads the
+    # runbook itself, so a bracket keeps the banner's own text from matching it. The rollback marker
+    # is the atomic-link fallback (fix round 1); the step-8 marker is the literal `.env` read (fix
+    # round 2). A half-landed C1-F (one fix without the other) must fail at least one of them.
+    c1f_path = "docs/ops/N3-CUTOVER.md"
+    c1f_patterns = (
+        "ln -[T] data/chronos.db.archived-",
+        'dotenv_values(".env", interpolate=[F]alse)',
+    )
+    # git grep's default regex is basic: a parenthesis is literal. Python's is extended.
+    rx = {pat: pat.replace("(", r"\(").replace(")", r"\)") for pat in c1f_patterns}
+    for c1f_pattern in c1f_patterns:
+        grep_line = f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`"
+        assert grep_line in banner_flat, c1f_pattern
+        assert re.search(rx[c1f_pattern], text), "a C1-F marker must match the fixed runbook"
+        assert not re.search(rx[c1f_pattern], banner), "the banner must not satisfy its own marker"
+
+    def clears(runbook: str) -> bool:
+        """Would every runbook-targeted grep in the banner print something on this runbook text?"""
+        return all(re.search(rx[pat], runbook) for pat in c1f_patterns)
+
+    assert clears(text)
+    # the half-landed mutants: the rollback fix without step 8's literal read (fix round 1's step 8,
+    # and the original `env -i` form), and step 8 fixed with the rollback fix missing
+    no_literal = text.replace('dotenv_values(".env", interpolate=False)', 'dotenv_values(".env")')
+    assert no_literal != text and not clears(no_literal)
+    env_i = no_literal.replace("python -I -c '", "env -i python -c '")
+    assert env_i != no_literal and not clears(env_i)
+    no_link = text.replace("ln -T data/chronos.db.archived-", "mv data/chronos.db.archived-")
+    assert no_link != text and not clears(no_link)
+    assert not re.search(r"<[^>\n]*(marker|ruling)[^>\n]*>", text), "an unfilled placeholder"
+    # both echoes say the same, and both still point at the STOP
+    before = flat[flat.index("## Before you start") : flat.index("## Steps")]
+    steps = flat.index("## Steps")
+    step1 = flat[flat.index("1. **", steps) : flat.index("2. **", steps)]
+    for echo in (before, step1):
+        assert added in echo and c1f in echo and "STOP at the top of this page" in echo
+
+
 # ------------------------------------------------------------- (6) pins
 
 

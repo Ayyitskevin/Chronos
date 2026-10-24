@@ -1,19 +1,37 @@
 # N3 cutover — archive the unkeyed store, start the keyed one (strategy (iii))
 
 > **STOP: read this before you pick a date.** **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.**
+> Both have (#311/#312, #313). **And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) AND the recovery-key-only escrow change have merged to main too.** **And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 rehearsal) has merged to main too.**
 > - **Why (LINE STOP #6, 2026-10-17):** this page's original restore target was a fixed
 >   name under `/tmp`. Another local uid could create it first and read or replace the
 >   cleartext copy of the whole pre-cutover store. FIX-RT closes that in code. N3-3 ships
 >   the pruner that step 10's 90-day retention relies on.
-> - **How to check, on the host's checkout:** first refresh `origin/main`, then both
+> - **Why N3-4 (Kevin, P2-4 = B, K-20261023-002, 2026-10-23):** the drill's cleartext
+>   `--restore-into` copy was removed only by your own `rm -r`; N3-4 makes the verifying
+>   process remove the copy it created (`RESTORE_COPY_NOT_REMOVED` if it cannot).
+> - **Why the escrow change (Kevin, recovery-key-only, K-20261023-003, 2026-10-23):** step 6's
+>   escrow copy changes recipients; the change lands with its own step-6 rewording.
+> - **Why C1-F (K-20261024-001, 2026-10-24):** the C1 rehearsal found that step 8's key-bound
+>   check could take the key from the environment, not only from the file, and that the
+>   rollback's fallback was a check-then-move that could overwrite a live name. C1-F fixes both
+>   in this runbook; until it has merged, the steps below still carry those defects.
+> - **How to check, on the host's checkout:** first refresh `origin/main`, then all six
 >   `git grep` commands must print something and exit zero. They read the current tip, so a later
 >   removal or revert shows as a failure; a `git log -- <path>` would still print history.
 >   - `git fetch origin main`
 >   - `git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py` (N3-3)
 >   - `git grep -n RESTORE_TARGET_NOT_PROTECTED origin/main -- src/chronos/operations/cutover_archive.py`
 >     (FIX-RT)
-> - **If either prints nothing or exits non-zero,** stop here. This notice is removed only by a
->   reviewed change, once both have merged.
+>   - `git grep -n '^RESTORE_COPY_NOT_REMOVED = ' origin/main -- src/chronos/operations/restore_drill.py`
+>     (N3-4)
+>   - `git grep -n 'recipient = restore_drill.KEVIN_RECOVERY_RECIPIENT' origin/main -- src/chronos/operations/persistence_key_escrow.py`
+>     (escrow)
+>   - `git grep -n 'ln -[T] data/chronos.db.archived-' origin/main -- docs/ops/N3-CUTOVER.md`
+>     (C1-F, the rollback fix; the bracket keeps this line from matching itself)
+>   - `git grep -n 'dotenv_values(".env", interpolate=[F]alse)' origin/main -- docs/ops/N3-CUTOVER.md`
+>     (C1-F, step 8's literal `.env` read; a landed C1-F has both, a half-landed one fails this check or the one above)
+> - **If any of them prints nothing or exits non-zero,** stop here. This notice is removed
+>   only by a reviewed change, once all of them have merged.
 
 Kevin's physical steps, in order, for the one-time cutover from the unkeyed account
 fingerprint (schema 17) to the keyed one (schema 18, `CHRONOS_PERSISTENCE_KEY`). The rulings
@@ -41,7 +59,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 
 ## Before you start
 
-- **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** The STOP at the top of this page says how to check. If either is
+- **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** **And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) AND the recovery-key-only escrow change have merged to main too.** **And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 rehearsal) has merged to main too.** The STOP at the top of this page says how to check. If any is
   missing, nothing below applies yet.
 - **The restore target lives under a directory only you control, never under `/tmp`
   (FIX-RT).**
@@ -112,7 +130,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 ## Steps
 
 1. **Stop the service and prove it.** Before you schedule this step, or start it:
-   **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** (the STOP at the top of this page says how to check).
+   **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** **And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) AND the recovery-key-only escrow change have merged to main too.** **And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 rehearsal) has merged to main too.** (the STOP at the top of this page says how to check).
    ```bash
    systemctl --user stop chronos-worker chronos-backend
    systemctl --user is-active chronos-backend chronos-worker   # both lines: inactive
