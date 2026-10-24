@@ -4100,3 +4100,35 @@ def test_c1f_f5_the_module_and_the_runbook_say_the_dry_run_proves_the_restore_ta
     assert "dry run and `--apply` alike, before any envelope exists" in before
     module = MODULE.read_text(encoding="utf-8")
     assert "Gate → restore-target check → (dry-run stops here)" in module
+
+
+def test_c1f_f6_the_dry_run_s_next_steps_say_what_apply_will_do_not_what_it_did(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F6 (P3): the DRY_RUN report's ``next_manual_steps`` spoke in the past tense of an apply
+    ("this run removed the CLEARTEXT copy it verified…", "printed above") while its ``drill``
+    and ``envelope`` were null (S2-dryrun). A dry run's steps describe what ``--apply`` WILL do;
+    the apply report keeps the wording the N3-4 pin reads; the tense-free steps are shared."""
+
+    store = _store(tmp_path, binding="closed")
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 0 and report["verdict"] == "DRY_RUN", report
+    assert report["drill"] is None and report["envelope"] is None
+    steps = report["next_manual_steps"]
+    assert len(steps) == 7, steps
+    assert steps[0].startswith("--apply will"), steps[0]
+    for step in steps:
+        assert "this run" not in step and "printed above" not in step, step
+        assert "above is true" not in step and "rm -r" not in step, step
+    assert "ls -ld" in steps[0] and str(tmp_path / "restored") in steps[0]
+    assert "--apply will" in steps[1] and "record" in steps[1]
+    assert any("rmdir" in step and "--apply will leave" in step for step in steps), steps
+    assert "--apply makes" in steps[6]
+    # the apply report says what it did, as test_n34_1 pins; the tense-free steps are the same
+    code, applied = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and applied["verdict"] == "ARCHIVED", applied
+    done = applied["next_manual_steps"]
+    assert len(done) == len(steps)
+    assert "this run removed" in done[0] and "restore_copy_removed" in done[0]
+    assert all("--apply will" not in step for step in done), done
+    assert done[2:4] == steps[2:4] and done[5] == steps[5]
