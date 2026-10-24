@@ -123,9 +123,16 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   broker, start the backend, let it reconcile and record the closing fills, stop it, re-run.
   The one-hour bound is a constant (twice the longest periodic cadence): if you are slower than
   that between the stop and the command, start → let it reconcile → stop → run again.
-- The code on this host is the post-N3 checkout (`SCHEMA_VERSION` 18). Write down the
-  pre-cutover commit of the running code before you change anything — the Rollback section
-  needs it: `git -C <checkout> rev-parse HEAD` → `<pre-cutover sha>`.
+- The code on this host is the post-N3 checkout (`SCHEMA_VERSION` 18). The Rollback section
+  needs the commit the host ran **before** the post-N3 deploy, not the post-N3 `HEAD`: only
+  schema-17 code starts the restored schema-17 store, and the post-N3 code refuses it, by design
+  (`Unsupported Chronos schema version 17; expected 18`). Write that commit down as
+  `<pre-cutover sha>`: before the deploy it is `git -C <checkout> rev-parse HEAD`; after the
+  deploy, it is the entry `git -C <checkout> reflog` shows just before the deploy. If you cannot
+  establish it, use `8093176`, the last schema-17 commit on main (`f0a3446^1`, the first parent
+  of the merge that brought schema 18). Then check it — this must print exactly
+  `SCHEMA_VERSION = 17`; if it prints nothing, that commit is not the rollback code, so stop:
+  `git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | grep -x 'SCHEMA_VERSION = 17'`
 
 ## Steps
 
@@ -308,8 +315,10 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    artifact into a fresh private directory **outside the checkout**. Do not write it into the
    checkout: there it would be an untracked file in the repository (`*.age` is not ignored, so a
    `git add -A` would stage the one escrow copy), and the checkout is writable by both units
-   (`ReadWritePaths=` in the unit files). `ProtectHome=read-only` keeps the units out of
-   `~/chronos-escrow`. `mkdir` fails if the directory already exists; then find out what it holds
+   (`ReadWritePaths=` in the unit files). `ProtectHome=read-only` lets the units read
+   `~/chronos-escrow` but not write it (no `ReadWritePaths=` entry covers it); what they could
+   read is ciphertext that only your recovery key opens.
+   `mkdir` fails if the directory already exists; then find out what it holds
    before you go on. `ls -ld` must show both lines owned by you, with no `w` in the group or other
    columns.
    ```bash
@@ -362,7 +371,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    host copy yourself, and any other transient copy (the tool never deletes an artifact):
    ```bash
    shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow
-   ``` One escrow copy, exactly; the `.env` on
+   ```
+   One escrow copy, exactly; the `.env` on
    the host is the only working copy. Your recovery private key never exists on a fleet host,
    and no key that can open this artifact does either.
 
@@ -573,8 +583,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   **check**: `ls -la data/` must show no `.archived-<stamp>` name and the three regular files at
   the live names; a `not replacing` or `Already exists` line means a live name was occupied —
   stop and look before anything else. Then check out the pre-cutover code (`git checkout
-  <pre-cutover sha>`, the sha
-  you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by design);
+  <pre-cutover sha>`, the schema-17 commit you wrote down and checked under "Before you start" —
+  never the post-N3 `HEAD`: a schema-17 store is refused by the post-N3 code, by design);
   start. The move refuses if the live name exists; a sentinel still there says
   `mv: cannot move 'data/chronos.db.archived-<stamp>' to
   'data/chronos.db/chronos.db.archived-<stamp>': Permission denied` — `mv` aims inside the
