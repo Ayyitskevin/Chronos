@@ -130,9 +130,36 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   `<pre-cutover sha>`: before the deploy it is `git -C <checkout> rev-parse HEAD`; after the
   deploy, it is the entry `git -C <checkout> reflog` shows just before the deploy. If you cannot
   establish it, use `8093176`, the last schema-17 commit on main (`f0a3446^1`, the first parent
-  of the merge that brought schema 18). Then check it — this must print exactly
-  `SCHEMA_VERSION = 17`; if it prints nothing, that commit is not the rollback code, so stop:
-  `git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | grep -x 'SCHEMA_VERSION = 17'`
+  of the merge that brought schema 18). Then check it. The check parses that commit's
+  `database.py` with `ast` and never imports or runs it: it prints `SCHEMA_VERSION = 17` only
+  when the file sets `SCHEMA_VERSION` in exactly one place, a plain top-level assignment of 17.
+  Two assignments, an annotated or augmented one, a binding anywhere else, a string that names
+  it, or a `*` import each print a line beginning `STOP:` instead (C1R-F fix round 1, kimi P1).
+  This must print exactly one line, `SCHEMA_VERSION = 17`; anything else — a `STOP:` line, an
+  error, or nothing — means that commit is not the rollback code, so stop:
+  ```bash
+  git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
+  import ast, sys
+  tree = ast.parse(sys.stdin.buffer.read())
+  name = "SCHEMA_VERSION"
+  sets = [  # every node that may set it: bind, delete, import, name it in a string, import *
+      n for n in ast.walk(tree)
+      if name in (getattr(n, "id", None), getattr(n, "attr", None))
+      and not isinstance(n.ctx, ast.Load)
+      or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "rest", None))
+      or name in getattr(n, "names", ())
+      or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+      or isinstance(n, ast.alias) and n.name == "*"
+  ]
+  top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
+  if len(top) != 1:
+      sys.exit(f"STOP: {len(sets)} place(s) may set SCHEMA_VERSION, not one plain assignment.")
+  value = top[0].value
+  if not (isinstance(value, ast.Constant) and type(value.value) is int and value.value == 17):
+      sys.exit(f"STOP: SCHEMA_VERSION = {ast.unparse(value)}, not 17.")
+  print("SCHEMA_VERSION = 17")
+  '
+  ```
 
 ## Steps
 
