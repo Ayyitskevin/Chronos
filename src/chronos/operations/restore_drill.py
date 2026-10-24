@@ -54,6 +54,15 @@ What the drill does and does not do:
   admitted, else a typed refusal that says truthfully what was published.
 - The restore goes into a fresh directory the caller names; an existing
   non-empty target is refused. Nothing here ever writes to the live path.
+  The restored cleartext does not outlive the run (N3-4, Kevin's ruling 2026-10-23, P2-4
+  option B): after the verifiers the drill removes what it wrote — the database, only if
+  the entry at its name is still the inode it verified; any SQLite bookkeeping beside it;
+  the audit pair — by name against the target descriptor it has held since the decrypt,
+  then the emptied target directory by its leaf name against the held parent, after
+  re-proving that the name still designates the directory it admitted; never by
+  re-resolving a path, never an entry it did not write. ``restore_copy_removed`` and
+  ``removed`` say so in the report; a removal it could not make is a typed
+  ``RESTORE_COPY_NOT_REMOVED:`` failure and the verdict is FAILED.
 - The schema head is the alembic revision when the store carries an
   ``alembic_version`` table, else the ``schema_version`` row (a store created by
   ``Database.initialize()`` carries no alembic table). The head check on the
@@ -183,6 +192,13 @@ DB_NAME = "chronos.db"
 #: crash temp is recognised; a leading dot alone means nothing.
 TEMP_ENVELOPE_RE = re.compile(r"^\.chronos-\d{8}T\d{6}Z\.[0-9a-f]{16}\.tmp$")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+#: N3-4 (Kevin's ruling K-20261023-002, P2-4 option B): the typed failure prefix when the drill
+#: could not remove the cleartext copy it made; the report's ``restore_copy_removed`` is then
+#: false and the verdict is never VERIFIED, whatever the verifiers said.
+RESTORE_COPY_NOT_REMOVED = "RESTORE_COPY_NOT_REMOVED"
+#: SQLite bookkeeping that may sit beside the restored copy when the repository's acceptance
+#: opened it: the copy is this run's, so these are too, and they go with it when present.
+_COPY_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 #: renameat2(2) flags: publish only where nothing is (NOREPLACE), or swap two names in one
 #: syscall (EXCHANGE — the cutover's move, so a live name is never vacant)
 _RENAME_NOREPLACE = 1
@@ -292,6 +308,12 @@ class RestoreReport:
     #: gate's archive admission (N3-2 cutover archive of a RETIRED schema) and the copy was
     #: verified by exact head and gated source identity instead (see ``restore``).
     acceptance: str = "repository"
+    #: N3-4: the cleartext copy this run made — the database, any SQLite bookkeeping beside it,
+    #: the audit pair — was removed through the held target descriptor after the verifiers, and
+    #: the target directory with it; ``removed`` names what went. ``False`` comes with a
+    #: ``RESTORE_COPY_NOT_REMOVED:`` failure naming what remains, and the report never verifies.
+    restore_copy_removed: bool = False
+    removed: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
@@ -300,6 +322,7 @@ class RestoreReport:
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
         data["failures"] = list(self.failures)
+        data["removed"] = list(self.removed)
         data["verified"] = self.verified
         return data
 
@@ -827,12 +850,14 @@ def _require_owner_only(fd: int, what: str, absolute: Path) -> None:
         )
 
 
-def _fresh_directory(target: Path, what: str) -> int:
+def _fresh_directory(target: Path, what: str) -> tuple[int, int]:
     """The target must be absent or an empty directory, reached by the no-follow walk (a
     symlinked ancestor or leaf is refused); created 0700 when absent. Either way it must then
     be owned by the effective uid with no group or other bit (FIX-RT: by ``fstat`` on the held
     descriptor; a directory that appears between the absence check and the ``mkdir`` is judged
-    like any pre-existing one). Returns its fd.
+    like any pre-existing one). Returns the held parent's fd and the target's fd — the parent
+    stays open so the target can later be removed by its leaf name against it (N3-4); the
+    caller closes both.
 
     Ancestors are not judged here (FIX-RT's stated choice): every write into the target goes
     through this held, owner-only descriptor, so an ancestor another uid can write lets it
@@ -877,9 +902,10 @@ def _fresh_directory(target: Path, what: str) -> int:
         except BaseException:
             os.close(fd)
             raise
-        return fd
-    finally:
+        return parent_fd, fd
+    except BaseException:
         os.close(parent_fd)
+        raise
 
 
 # ----------------------------------------------------------------- store inspection
@@ -1603,21 +1629,27 @@ def _finish_verification(
 
 def _verify_in(
     manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
-) -> tuple[list[str], dict[str, bool | str]]:
+) -> tuple[list[str], dict[str, bool | str], int]:
     """The four verifiers with the REPOSITORY's acceptance, every read through the target
     directory descriptor. This function knows no other acceptance, and neither does any other
-    function at module scope (r4, Daybreak r3 P1-2)."""
+    function at module scope (r4, Daybreak r3 P1-2). Returns the verified copy's OPEN
+    descriptor with the failures and facts: the caller closes it — ``restore()`` once the copy
+    is removed by that very identity (N3-4), ``verify_restored()`` at once — so no descriptor
+    to the copy outlives either."""
 
     fd, failures, facts, head, counts = _open_copy(manifest, target_fd)
     try:
         problems = _repository_acceptance(manifest, target_fd, target_abs, fd)
-    finally:
-        os.close(fd)  # after the last comparison: no descriptor to the copy outlives restore()
-    failures.extend(problems)
-    facts["acceptance"] = "repository"
-    _finish_verification(manifest, target_fd, target_abs, has_audit, head, counts, failures, facts)
-    facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
-    return failures, facts
+        failures.extend(problems)
+        facts["acceptance"] = "repository"
+        _finish_verification(
+            manifest, target_fd, target_abs, has_audit, head, counts, failures, facts
+        )
+        facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
+    except BaseException:
+        os.close(fd)
+        raise
+    return failures, facts, fd
 
 
 def verify_restored(
@@ -1632,7 +1664,11 @@ def verify_restored(
     restored = Path(restored)
     target_fd, target_abs = _walk_directory(restored.parent, "restore target", create=False)
     try:
-        return _verify_in(manifest, target_fd, target_abs, restored_audit_log is not None)
+        failures, facts, fd = _verify_in(
+            manifest, target_fd, target_abs, restored_audit_log is not None
+        )
+        os.close(fd)  # a copy named by path is verified here, never removed
+        return failures, facts
     finally:
         os.close(target_fd)
 
@@ -1705,6 +1741,10 @@ class _Staged:
     target_abs: Path
     has_audit: bool
     decrypt_refused: DrillRefused | None
+    #: N3-4: the held parent and the leaf name under it — the removal of the target itself goes
+    #: by that name against that descriptor, never by the path
+    parent_fd: int
+    leaf: str
 
 
 @contextlib.contextmanager
@@ -1713,21 +1753,23 @@ def _staged_restore(manifest: BackupManifest, target_dir: Path, keys: AgeKeys) -
     directory and copy the audit pair beside it, every write through the held descriptors;
     yield the held target for the caller's verification — repository or, inside
     :func:`run_archive_drill` alone, that gate run's — and close everything after. A decrypt
-    refusal is yielded, not raised (the caller's report records it)."""
+    refusal is yielded, not raised (the caller's report records it). The held parent and the
+    leaf name travel in the staged value so the caller can remove the target through the same
+    descriptors (N3-4)."""
 
     _require_age_manifest(manifest)
     target_dir = Path(target_dir)
     target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
     env_fd, _env_abs = _open_envelope(manifest)
     try:
-        target_fd = _fresh_directory(target_dir, "restore target")
+        parent_fd, target_fd = _fresh_directory(target_dir, "restore target")
         try:
             db_name = manifest.cleartext_name
             encrypted_name = Path(manifest.backup_path).name
             try:
                 _decrypt_into(env_fd, encrypted_name, target_fd, db_name, keys)
             except DrillRefused as error:
-                yield _Staged(target_fd, target_abs, False, error)
+                yield _Staged(target_fd, target_abs, False, error, parent_fd, target_abs.name)
                 return
             has_audit = manifest.audit_log_path is not None
             if has_audit:
@@ -1738,9 +1780,10 @@ def _staged_restore(manifest: BackupManifest, target_dir: Path, keys: AgeKeys) -
                     finally:
                         os.close(src)
             os.fsync(target_fd)
-            yield _Staged(target_fd, target_abs, has_audit, None)
+            yield _Staged(target_fd, target_abs, has_audit, None, parent_fd, target_abs.name)
         finally:
             os.close(target_fd)
+            os.close(parent_fd)
     finally:
         os.close(env_fd)
 
@@ -1756,6 +1799,124 @@ def _target_swapped_after(staged: _Staged) -> list[str]:
     return []
 
 
+def _remove_restore_copy(
+    staged: _Staged, manifest: BackupManifest, copy_fd: int | None
+) -> tuple[list[str], tuple[str, ...]]:
+    """N3-4 (Kevin's ruling K-20261023-002, P2-4 option B): the drill removes the cleartext copy
+    it made, after the verifiers, through the descriptors it has held since it made it — never
+    by re-resolving a path, never an entry it did not write. By name against the held target
+    descriptor: the restored database, only if the entry at its name is, by lstat, the very
+    inode ``copy_fd`` still holds (the object verified is the object removed; ``None`` after a
+    refused decrypt, which left no copy); any SQLite bookkeeping beside it
+    (``_COPY_SIDECAR_SUFFIXES``: the repository's acceptance opened the copy) and the audit pair
+    when one was copied, each a regular file of the effective uid. Then the emptied target by
+    its leaf name against the held parent, only if that name still designates the directory
+    the walk admitted — the disclosed residual (P2-4 memo): between that re-proof and the
+    ``rmdir`` only an EMPTY directory can be taken, and only by this uid or root, the parent
+    being the drill's own no-follow walk. Anything else in the target was not written by this
+    run and stays, named. Returns the typed failures (``RESTORE_COPY_NOT_REMOVED: …``; none
+    when everything went) and the names removed; nothing here is best-effort, and the caller's
+    verdict is never VERIFIED while a failure stands."""
+
+    code = RESTORE_COPY_NOT_REMOVED
+    dfd, where, euid = staged.target_fd, staged.target_abs, os.geteuid()
+    failures: list[str] = []
+    removed: list[str] = []
+    examined: set[str] = set()  # names this run answered for above: reported once, never "foreign"
+    db_name = manifest.cleartext_name
+    if copy_fd is not None:
+        examined.add(db_name)
+        held = os.fstat(copy_fd)
+        try:
+            by_name = os.stat(db_name, dir_fd=dfd, follow_symlinks=False)
+        except OSError as error:
+            failures.append(
+                f"{code}: {db_name} under {where} could not be examined ({error.strerror}); "
+                "the copy this drill verified was not removed"
+            )
+        else:
+            if not stat.S_ISREG(by_name.st_mode) or (by_name.st_dev, by_name.st_ino) != (
+                held.st_dev,
+                held.st_ino,
+            ):
+                failures.append(
+                    f"{code}: {db_name} under {where} is not the copy this drill verified "
+                    f"(device:inode {by_name.st_dev}:{by_name.st_ino}, verified "
+                    f"{held.st_dev}:{held.st_ino}); left in place, nothing removed at that name"
+                )
+            else:
+                try:
+                    os.unlink(db_name, dir_fd=dfd)
+                except OSError as error:
+                    failures.append(
+                        f"{code}: {db_name} under {where}: {error.strerror}; the cleartext copy "
+                        "remains"
+                    )
+                else:
+                    removed.append(db_name)
+    beside = [db_name + suffix for suffix in _COPY_SIDECAR_SUFFIXES]
+    if staged.has_audit:
+        beside += [AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME]
+    for name in beside:
+        examined.add(name)
+        try:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            failures.append(
+                f"{code}: {name} under {where} could not be examined ({error.strerror}); "
+                "left in place"
+            )
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != euid:
+            failures.append(
+                f"{code}: {name} under {where} is not a regular file of this uid (mode "
+                f"{stat.S_IMODE(st.st_mode):04o}, uid {st.st_uid}); this run did not write it; "
+                "left in place"
+            )
+            continue
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except OSError as error:
+            failures.append(f"{code}: {name} under {where}: {error.strerror}; left in place")
+        else:
+            removed.append(name)
+    try:
+        remaining = sorted(os.listdir(dfd))
+    except OSError as error:
+        failures.append(f"{code}: {where} could not be listed ({error.strerror}); kept")
+        return failures, tuple(removed)
+    foreign = [name for name in remaining if name not in examined]
+    if foreign:
+        failures.append(
+            f"{code}: {where} still holds {', '.join(foreign)}, which this run did not write; "
+            "left in place and the directory kept"
+        )
+    if remaining:  # a name of this run's that could not go was reported above; the directory stays
+        return failures, tuple(removed)
+    identity = _dir_identity(dfd)
+    if not _entry_is_real_directory(staged.parent_fd, staged.leaf, identity):
+        failures.append(
+            f"{code}: {where} no longer names the directory this run restored into "
+            f"(device:inode {identity[0]}:{identity[1]}); the emptied directory was not removed"
+        )
+        return failures, tuple(removed)
+    try:
+        os.rmdir(staged.leaf, dir_fd=staged.parent_fd)
+    except OSError as error:
+        failures.append(f"{code}: {where}: {error.strerror}; the emptied directory remains")
+        return failures, tuple(removed)
+    try:
+        os.fsync(staged.parent_fd)
+    except OSError as error:  # the directory IS gone; only its durability is unproven (Kimi P3-1)
+        failures.append(
+            f"{code}: {where} was removed, but the parent directory's fsync failed "
+            f"({error.strerror}); the removal is not proven durable"
+        )
+    return failures, tuple(removed)
+
+
 def restore(
     manifest: BackupManifest,
     target_dir: Path,
@@ -1767,6 +1928,9 @@ def restore(
     copy the audit pair beside it, and verify them there — the target descriptor is held
     through the decrypt, the copy AND the verification; rto_s from start to verified. A
     decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``).
+    Then (N3-4) the copy is removed through the same held descriptors — see
+    :func:`_remove_restore_copy` — and the report says what went; a copy it could not remove
+    is a typed ``RESTORE_COPY_NOT_REMOVED:`` failure, never a verified report.
 
     The acceptance is the repository's — here and in every function at module scope (r4,
     Daybreak r3 P1-2): a RETIRED-schema copy, a schema the running repository refuses by
@@ -1778,8 +1942,12 @@ def restore(
     clock = clock or system_clock()
     keys = keys or load_age_keys()
     started = clock.monotonic()
+    removal_failures: list[str]
+    removed: tuple[str, ...]
     with _staged_restore(manifest, target_dir, keys) as staged:
         if staged.decrypt_refused is not None:
+            rto = clock.monotonic() - started
+            removal_failures, removed = _remove_restore_copy(staged, manifest, None)
             return RestoreReport(
                 target_dir=str(staged.target_abs),
                 restored_path=str(staged.target_abs / manifest.cleartext_name),
@@ -1787,14 +1955,23 @@ def restore(
                 schema_head_ok=False,
                 row_counts_ok=False,
                 audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
-                failures=(f"decrypt: refused — {staged.decrypt_refused}",),
-                rto_s=clock.monotonic() - started,
+                failures=(f"decrypt: refused — {staged.decrypt_refused}", *removal_failures),
+                rto_s=rto,
                 acceptance="repository",
+                restore_copy_removed=not removal_failures,
+                removed=removed,
             )
-        failures, facts = _verify_in(
+        failures, facts, fd = _verify_in(
             manifest, staged.target_fd, staged.target_abs, staged.has_audit
         )
-        failures.extend(_target_swapped_after(staged))
+        try:
+            failures.extend(_target_swapped_after(staged))
+            rto = clock.monotonic() - started  # to the moment verified; the removal is not
+            # N3-4: the copy goes now, by the identity the still-open descriptor pins
+            removal_failures, removed = _remove_restore_copy(staged, manifest, fd)
+        finally:
+            os.close(fd)  # no descriptor to the copy outlives restore()
+        failures.extend(removal_failures)
     return RestoreReport(
         target_dir=str(staged.target_abs),
         restored_path=str(staged.target_abs / manifest.cleartext_name),
@@ -1803,8 +1980,10 @@ def restore(
         row_counts_ok=bool(facts["row_counts_ok"]),
         audit_chain=str(facts["audit_chain"]),
         failures=tuple(failures),
-        rto_s=clock.monotonic() - started,
+        rto_s=rto,
         acceptance="repository",
+        restore_copy_removed=not removal_failures,
+        removed=removed,
     )
 
 
@@ -1979,6 +2158,8 @@ def run_archive_drill(
     started = clock.monotonic()
     restore_failures: list[str]
     facts: dict[str, bool | str]
+    removal_failures: list[str]
+    removed: tuple[str, ...]
     with _staged_restore(manifest, restore_into, keys) as staged:
         if staged.decrypt_refused is not None:
             restore_failures = [f"decrypt: refused — {staged.decrypt_refused}"]
@@ -1988,46 +2169,55 @@ def run_archive_drill(
                 "row_counts_ok": False,
                 "audit_chain": "NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
             }
+            rto = clock.monotonic() - started
+            removal_failures, removed = _remove_restore_copy(staged, manifest, None)
         else:
             # an archive of a RETIRED schema: the running repository refuses that version by
             # design, so this run's acceptance replaces it — nothing is opened by pathname and
             # nothing is initialized on the copy (the copy's bytes are the held descriptor's;
-            # head and counts came through _readonly_fd)
+            # head and counts came through _readonly_fd). The copy's descriptor stays open
+            # through the verifiers and the removal (N3-4): the object verified is the object
+            # removed, by the identity it pins
             fd, restore_failures, facts, head, counts = _open_copy(manifest, staged.target_fd)
-            os.close(fd)
-            problems: list[str] = []
-            if manifest.source_identity is None or (
-                tuple(manifest.source_identity) != tuple(admitted_identity)
-            ):
-                recorded = (
-                    "none"
-                    if manifest.source_identity is None
-                    else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
+            try:
+                problems: list[str] = []
+                if manifest.source_identity is None or (
+                    tuple(manifest.source_identity) != tuple(admitted_identity)
+                ):
+                    recorded = (
+                        "none"
+                        if manifest.source_identity is None
+                        else f"{manifest.source_identity[0]}:{manifest.source_identity[1]}"
+                    )
+                    problems.append(
+                        f"archive: the envelope's source identity {recorded} is not the gated "
+                        f"source {admitted_identity[0]}:{admitted_identity[1]} (device:inode); "
+                        "the backup was not of the gated object"
+                    )
+                if head != admitted_head:
+                    problems.append(
+                        f"schema_head: restored {head} != archive head {admitted_head}; a "
+                        "retired-schema archive is verified by exact head"
+                    )
+                restore_failures.extend(problems)
+                facts["acceptance"] = acceptance
+                _finish_verification(
+                    manifest,
+                    staged.target_fd,
+                    staged.target_abs,
+                    staged.has_audit,
+                    head,
+                    counts,
+                    restore_failures,
+                    facts,
                 )
-                problems.append(
-                    f"archive: the envelope's source identity {recorded} is not the gated "
-                    f"source {admitted_identity[0]}:{admitted_identity[1]} (device:inode); the "
-                    "backup was not of the gated object"
-                )
-            if head != admitted_head:
-                problems.append(
-                    f"schema_head: restored {head} != archive head {admitted_head}; a "
-                    "retired-schema archive is verified by exact head"
-                )
-            restore_failures.extend(problems)
-            facts["acceptance"] = acceptance
-            _finish_verification(
-                manifest,
-                staged.target_fd,
-                staged.target_abs,
-                staged.has_audit,
-                head,
-                counts,
-                restore_failures,
-                facts,
-            )
-            facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
-            restore_failures.extend(_target_swapped_after(staged))
+                facts["schema_head_ok"] = bool(facts["schema_head_ok"]) and not problems
+                restore_failures.extend(_target_swapped_after(staged))
+                rto = clock.monotonic() - started
+                removal_failures, removed = _remove_restore_copy(staged, manifest, fd)
+            finally:
+                os.close(fd)
+        restore_failures.extend(removal_failures)
     report = RestoreReport(
         target_dir=str(staged.target_abs),
         restored_path=str(staged.target_abs / manifest.cleartext_name),
@@ -2036,8 +2226,10 @@ def run_archive_drill(
         row_counts_ok=bool(facts["row_counts_ok"]),
         audit_chain=str(facts["audit_chain"]),
         failures=tuple(restore_failures),
-        rto_s=clock.monotonic() - started,
+        rto_s=rto,
         acceptance=acceptance,
+        restore_copy_removed=not removal_failures,
+        removed=removed,
     )
     failures.extend(report.failures)
     return gate, DrillReport(

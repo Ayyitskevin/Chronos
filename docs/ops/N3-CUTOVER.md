@@ -33,9 +33,10 @@ page; nothing here runs the migration.
 
 **What the command never does:** it never generates, reads or prints the persistence key;
 never starts the service; never initializes the fresh database; never opens the old store for
-writing (its writer exclusion is a kernel read lease on a read-only descriptor); never deletes
-anything — the four sentinel directories it leaves at the live names included: your `rmdir`
-vacates them (step 7); never calls the broker; has no `--force`. Every refusal is a typed
+writing (its writer exclusion is a kernel read lease on a read-only descriptor); deletes
+nothing of yours — the four sentinel directories it leaves at the live names included: your
+`rmdir` vacates them (step 7) — and only ever its own cleartext verify copy under
+`--restore-into` (N3-4, step 4); never calls the broker; has no `--force`. Every refusal is a typed
 `code` in its JSON and exit `2`; `--apply` writes nothing before every check has passed.
 
 ## Before you start
@@ -45,7 +46,10 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 - **The restore target lives under a directory only you control, never under `/tmp`
   (FIX-RT).**
   - The command restores the archive into `--restore-into` to verify it. That copy is the
-    whole pre-cutover store in the clear.
+    whole pre-cutover store in the clear — and the command removes it, directory included,
+    before it prints its report (N3-4, Kevin's ruling 2026-10-23): the drill unlinks what it
+    wrote through the directory descriptor it has held since it created the leaf, never by
+    the path, and `drill.restore_copy_removed` in the JSON says it did.
   - Use `--restore-into /var/backups/chronos/n3-verify`: beside `--out`, under the backup root.
   - The leaf (`n3-verify`) must **not exist**. The command creates it, mode `0700`, and the
     drill verifies its uid and mode by `fstat`.
@@ -164,8 +168,14 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    proved it before opening the store and again before the exchanges; `exclusion.parent` says
    so) and removing an entry needs write permission on **its parent**.
    - `"verdict": "ARCHIVE_NOT_VERIFIED"` (exit 2): the drill did not verify; **nothing moved**,
-     the live store is untouched, and the JSON names the envelope and the restore copy that now
-     exist. Read `drill.failures` against the drill runbook's table; do not retry blindly.
+     the live store is untouched, and the JSON names the envelope that now exists; the restore
+     copy was removed all the same (`drill.restore_copy_removed`), or `drill.failures` says why
+     not. Read `drill.failures` against the drill runbook's table; do not retry blindly.
+   - `code: RESTORE_COPY_NOT_REMOVED` (exit 2, `"verdict": "REFUSED"`): the drill verified the
+     archive but could not remove its cleartext copy (the `drill.failures` line says what remains
+     under `/var/backups/chronos/n3-verify` and why); **nothing moved**, the envelope exists and
+     is named. Remove that directory yourself (`rm -r`), find out why the command could not, and
+     re-run — the next run makes a new envelope and stamp, and the leaf must be absent again.
    - `code: TARGET_EXISTS` (exit 2): a moved-aside name already exists; nothing moved; move that
      entry out of the way by hand and re-run (the next run makes a new envelope and stamp).
    - `code: LIVE_NAME_OCCUPIED` (exit 2): a live name the gate did not admit — a `-wal`/`-shm`
@@ -192,9 +202,14 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    - `code: WRITER_OPEN` after the gate (exit 2): a process opened the store (or a sidecar) for
      writing while the command ran; nothing moved. Step 1 again — then re-run.
 
-4. **Remove the restore copy.** `/var/backups/chronos/n3-verify` holds a CLEARTEXT copy of the
-   archived store (the drill verified it there; `0700`, its `chronos.db` `0600`):
-   `rm -r /var/backups/chronos/n3-verify`. Your `rm` — the command never deletes.
+4. **Remove the restore copy — the command already did; confirm it is gone.** The command
+   removed `/var/backups/chronos/n3-verify`
+   itself — the CLEARTEXT copy the drill verified there (`0700`, its `chronos.db` `0600`), and
+   the directory — before it printed the report (N3-4: `drill.restore_copy_removed: true`,
+   `drill.removed` lists the names; the removal went through the descriptor the drill held,
+   never through the path). Check: `ls -ld /var/backups/chronos/n3-verify` must say `No such
+   file or directory`. If it exists, the report said why (`RESTORE_COPY_NOT_REMOVED`) and
+   nothing moved: step 3's bullet.
 
 5. **Generate the key yourself, into the 0600 `.env`.** On the host, in a shell whose history is
    off for this line (`set +o history` in bash; or `HISTFILE=` for the session):
@@ -324,6 +339,7 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 | `POSITION_OBSERVED` / `PROVENANCE_MISSING` | the latest run recorded a broker position (the message breaks it down by origin class) | flatten at the broker, reconcile, re-run |
 | `RESTORE_TARGET_NOT_PROTECTED` | `--restore-into`'s parent chain is not protected: a directory from `/` to its parent is owned by neither root nor you, writable by its group or by others (`/tmp` included), or a symlink; or the parent is not yours | use `/var/backups/chronos/n3-verify` under a chain you own (Before you start); re-run — nothing was backed up |
 | `RESTORE_TARGET_NOT_FRESH` | `--restore-into` already exists (empty or not), or could not be created `0700` and yours | name a path that does not exist; never reuse or pre-create it — the command creates it; re-run |
+| `RESTORE_COPY_NOT_REMOVED` | the drill verified the archive but could not remove its cleartext copy under `--restore-into` (the `drill.failures` line names what remains and why: an entry that is not the inode it verified, an entry it did not write, an errno, a renamed directory) | nothing moved and the envelope is named; remove `/var/backups/chronos/n3-verify` by hand, find out why, re-run (new envelope and stamp) |
 | `DRILL_REFUSED` | the drill refused before verifying (an envelope name collision, a rename error) | the drill runbook's `refused:` row; nothing moved |
 | `TARGET_EXISTS` / `SOURCE_SWAPPED` / `MOVE_FAILED` | the move-aside could not start, or the source changed under the command | step 3's bullets |
 | `LIVE_NAME_OCCUPIED` | a live name of the store's namespace (`-wal`/`-shm` not admitted by the gate, `-journal`) holds an entry, so no sentinel can take it; or, after the renames, a live name no longer holds this run's sentinel | step 3's bullet: nothing moved in the first case; find what wrote it, move it by hand, re-run |
