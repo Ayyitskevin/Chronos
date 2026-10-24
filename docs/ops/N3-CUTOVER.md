@@ -221,40 +221,129 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    ```
    CHRONOS_PERSISTENCE_KEY=<the value you just printed>
    ```
-   Then clear the terminal. Nobody and nothing else generates, sees, logs or handles this value;
-   it is never typed into an agent, a handoff, a ticket or a chat. No example appears on this
-   page on purpose.
+   on a line of its own: no quotes, no `export`, no spaces. If the file already has an empty
+   `CHRONOS_PERSISTENCE_KEY=` line (copied from `.env.example`), fill that one in; never add a
+   second. Then clear the terminal. Nobody and nothing else generates, sees, logs or handles this
+   value; it is never typed into an agent, a handoff, a ticket or a chat. No example appears on
+   this page on purpose.
 
-6. **Escrow one copy off-host, encrypted, and prove it decrypts back.** The tool below reads the
-   key from a non-echoing prompt — type (or paste) the same 64 hex characters you put in `.env`;
-   it never takes them from the environment or the command line, so an unset variable cannot
-   silently escrow an empty line — refuses anything but exactly one line of 64 lowercase hex,
-   encrypts the line with `age` to the two recipients every backup uses (the host identity's
-   public key and `KEVIN_RECOVERY_RECIPIENT`, validated by the restore drill from
-   `CHRONOS_BACKUP_AGE_IDENTITY` / `CHRONOS_BACKUP_AGE_RECIPIENTS` exactly as in step 2),
-   immediately decrypts the new artifact through the host identity into a private scratch and
-   compares it in process (never printing it), and only then reports:
+   **One home: `<checkout>/.env`, and only there.** That is the file the backend reads under the
+   shipped units: `settings.py` loads `.env` relative to the working directory
+   (`src/chronos/config/settings.py:102`, `env_file=".env"`), and both units start in the checkout
+   (`docs/ops/chronos-backend.service:25`, `docs/ops/chronos-worker.service:20`,
+   `WorkingDirectory=%h/<CHRONOS_CHECKOUT>`). Every command on this page runs from the checkout and
+   reads the same file, and step 6's compare reads it. But the units also load a private
+   environment file (`docs/ops/chronos-backend.service:26`, `docs/ops/chronos-worker.service:21`,
+   `EnvironmentFile=%h/<PRIVATE_ENV_DIR>/…`), and a value in the process environment beats the
+   `.env`. That is where `EnvironmentFile=`, an `Environment=` line, `systemctl --user
+   set-environment` and your own `export` put it: pydantic-settings reads the environment before
+   the dotenv file (`BaseSettings.settings_customise_sources` returns `init_settings,
+   env_settings, dotenv_settings, …` in that order), and it matches the name case-insensitively
+   (`src/chronos/config/settings.py:105`, `case_sensitive=False`). A key line in any of those
+   would be the key the backend runs on, and step 6's compare would never see it.
+
+   **The one-home check** prints counts, never the value. Run it from `<checkout>` now, before
+   step 6, and again in step 6 before you delete any copy. It asks systemd which environment files
+   the two units load, drop-ins included (`systemctl --user show -p EnvironmentFiles`), and counts
+   the key in every one. It stops if that list is not exactly the two private files the units'
+   templates name, so a drop-in `EnvironmentFile=` at another path stops it too. Write
+   `<PRIVATE_ENV_DIR>` as the absolute path, as systemd prints it (`%h` expanded).
    ```bash
-   python -m chronos.operations.persistence_key_escrow --out chronos-persistence-key.age --pretty
+   k=CHRONOS_PERSISTENCE_KEY; bad=0
+   n=$(grep -c "^$k=" .env); echo ".env, exact line: $n (must be 1)"; [ "$n" = 1 ] || bad=1
+   n=$(grep -v '^[[:space:]]*#' .env | grep -ic "$k"); echo ".env, any line naming it: $n (must be 1)"; [ "$n" = 1 ] || bad=1
+   want=$(printf '%s\n' <PRIVATE_ENV_DIR>/chronos-backend.env <PRIVATE_ENV_DIR>/chronos-worker.env | sort -u)
+   got=$(systemctl --user show -p EnvironmentFiles --value chronos-backend chronos-worker | sed -n 's/ (ignore_errors=[a-z]*)$//p')
+   [ "$(printf '%s\n' "$got" | sort -u)" = "$want" ] || { echo "the units' environment files are not the two named here:"; printf '%s\n' "${got:-(none)}" | sed 's/^/  /'; bad=1; }
+   while IFS= read -r f; do
+     [ -n "$f" ] || continue
+     [ -r "$f" ] || { echo "$f: not readable (fix the path)"; bad=1; continue; }
+     n=$(grep -v '^[[:space:]]*#' "$f" | grep -ic "$k"); echo "$f: $n (must be 0)"; [ "$n" = 0 ] || bad=1
+   done <<EOF
+   $got
+   EOF
+   u=$(systemctl --user cat chronos-backend chronos-worker) || bad=1
+   n=$(printf '%s\n' "$u" | grep -v '^[[:space:]]*#' | grep -ic "$k"); echo "unit files: $n (must be 0)"; [ "$n" = 0 ] || bad=1
+   m=$(systemctl --user show-environment) || bad=1
+   n=$(printf '%s\n' "$m" | grep -ic "$k"); echo "user manager environment: $n (must be 0)"; [ "$n" = 0 ] || bad=1
+   n=$(env | grep -ic "$k"); echo "this shell's environment: $n (must be 0)"; [ "$n" = 0 ] || bad=1
+   [ "$bad" = 0 ] && echo 'ONE HOME: OK' || echo 'STOP: the key is not in exactly one place'
+   unset k n f u m bad want got
    ```
-   Expect exit `0`, `"verdict": "ESCROWED"`, `"verified": true`, the two `recipients`, and the
-   artifact's `ciphertext_sha256`. Exit `2` with `code: KEY_MALFORMED` means the line was not
-   64 lowercase hex (nothing was written); `ESCROW_MISMATCH` means the artifact did not decrypt
-   to what you typed — do not keep it. After any failure once the file was created, the tool
-   **deletes nothing** (a removal would be by name, and a name can be swapped under it in the
-   last instant; only its own private scratch is ever removed): `created_artifact` in the report
+   The check must end `ONE HOME: OK`. `STOP: …` means a line above is not what it must be. Leave
+   the key line in `.env` and remove every other one (or fix the path the check could not read),
+   then re-run. Do not start step 6 until it says `ONE HOME: OK`.
+
+6. **Escrow one copy off-host, encrypted to your recovery key alone, and prove it decrypts back
+   off-host.** The tool below reads the key from a non-echoing prompt — type (or paste) the same
+   64 hex characters you put in `.env`; it never takes them from the environment or the command
+   line, so an unset variable cannot silently escrow an empty line — refuses anything but exactly
+   one line of 64 lowercase hex, and encrypts the line with `age` to ONE recipient: your recovery
+   key, `KEVIN_RECOVERY_RECIPIENT`, pinned in code in the restore drill (ruling K-20261023-003).
+   The host identity is not a recipient. Nothing on this host can open the artifact, so the tool
+   cannot prove it decrypts; that proof is yours, off-host, below.
+
+   First, the one-home check (step 5): it must say `ONE HOME: OK`, or stop here. Then write the
+   artifact into a fresh private directory **outside the checkout**. Do not write it into the
+   checkout: there it would be an untracked file in the repository (`*.age` is not ignored, so a
+   `git add -A` would stage the one escrow copy), and the checkout is writable by both units
+   (`ReadWritePaths=` in the unit files). `ProtectHome=read-only` keeps the units out of
+   `~/chronos-escrow`. `mkdir` fails if the directory already exists; then find out what it holds
+   before you go on. `ls -ld` must show both lines owned by you, with no `w` in the group or other
+   columns.
+   ```bash
+   mkdir -m 0700 ~/chronos-escrow && ls -ld ~ ~/chronos-escrow
+   python -m chronos.operations.persistence_key_escrow --out ~/chronos-escrow/chronos-persistence-key.age --pretty
+   ```
+   Expect exit `0`, `"verdict": "ESCROWED"`, `"decrypt_verified": false`, one `recipients` entry
+   (your recovery key), and the artifact's `ciphertext_sha256`.
+
+   | `ESCROWED` proves (the report's `proved_on_host`) | It does NOT prove |
+   |---|---|
+   | the line you typed was exactly one line of 64 lowercase hex (an empty line is refused) | that the artifact decrypts to your key: only your recovery identity can open it, and it is never on this host |
+   | `age` exited 0 | that the `.env` holds the same value you typed |
+   | the artifact is a non-empty regular file that `age` created through the directory descriptor the tool holds, held open since, still at the name when the tool reports | where the artifact goes next, or that it gets there |
+
+   Exit `2` with `code: KEY_MALFORMED` means the line was not 64 lowercase hex (nothing was
+   written); `AGE_MISSING`, that `age` is not on PATH (nothing was written); `ARTIFACT_EMPTY`,
+   that `age` exited 0 but the file it left is empty. After any failure once the file was
+   created, the tool **deletes nothing** (a removal would be by name, and a name can be swapped
+   under it in the last instant; it removes nothing, ever): `created_artifact` in the report
    names the ciphertext this run created by `path` and device:inode (`removed` is always
    `false`) — find it (`find <dir> -inum <inode>`) and shred it yourself, at its name or under a
    renamed entry. `TARGET_SWAPPED` means the output name stopped naming the file the tool wrote
-   before the proof finished (something renamed or replaced it): the tool verifies through the
-   descriptor it holds, so the ciphertext this run created sits under the renamed entry; the
-   foreign entry at the name is not the tool's and was not touched. Then move
-   `chronos-persistence-key.age` off this host (password manager attachment, or the same place
-   the backup escrow goes), and `shred -u` or `rm` the local file yourself — the tool never
-   deletes a verified artifact either. One escrow copy, exactly; the `.env` on the host is the
-   only working copy. Your recovery private key never exists on a fleet host; the host identity
-   can also open this artifact, as it can every backup — that is what made the on-host
-   decrypt-and-compare possible.
+   before it reported (something renamed or replaced it): the tool reads through the descriptor
+   it holds, so the ciphertext this run created sits under the renamed entry; the foreign entry
+   at the name is not the tool's and was not touched.
+
+   **Then decrypt and compare, off-host. This is required before any copy is deleted.** On your
+   own machine, where your recovery identity lives (never on this host, never on a fleet host),
+   copy the artifact over, decrypt it with your recovery identity and compare its sha256 with
+   the sha256 of the host's `.env` value: the one home, the file the check counted. The key never
+   leaves the host and the decrypted escrow never leaves your machine: only the host-side digest
+   crosses ssh, both values stay in shell memory, and nothing is printed or written to disk.
+   `<host>` is this host's ssh name, `<checkout>` this checkout's absolute path, and the `scp`
+   source is relative to your home on the host:
+   ```bash
+   scp <host>:chronos-escrow/chronos-persistence-key.age .
+   a=$(age -d -i <your recovery identity> chronos-persistence-key.age) && [ ${#a} -eq 64 ] &&
+     b=$(ssh <host> "sed -n 's/^CHRONOS_PERSISTENCE_KEY=//p' <checkout>/.env | sha256sum") &&
+     [ "$(echo "$a" | sha256sum)" = "$b" ] && echo MATCH || echo 'NO MATCH: delete nothing'
+   unset a b
+   ```
+   `MATCH` is the proof the host cannot give. On anything else (`NO MATCH`, an age error, an ssh
+   error) delete nothing: keep the `.env` and every copy of the artifact, and find out why (a
+   `.env` line written with quotes, `export` or a trailing space reads as a mismatch). Only after
+   `MATCH`, run the one-home check (step 5) on the host once more. It must still say
+   `ONE HOME: OK`; on `STOP`, delete nothing and fix the file it names, because the key the
+   backend would run on is then not the one you just proved. Then put the artifact where it
+   lives (password manager attachment, or the same place the backup escrow goes), and remove the
+   host copy yourself, and any other transient copy (the tool never deletes an artifact):
+   ```bash
+   shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow
+   ``` One escrow copy, exactly; the `.env` on
+   the host is the only working copy. Your recovery private key never exists on a fleet host,
+   and no key that can open this artifact does either.
 
 7. **Vacate the live names yourself, then start the backend.** `ls -la data/` once more (step
    3's listing: four sentinel directories, three `.archived-<stamp>` files, the old siblings).
@@ -311,8 +400,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   (`RESTORE-DRILL.md`, step 4); a restored schema-17 copy is usable only under the pre-cutover
   code.
 - **The key is lost after cutover:** the keyed store cannot bind and has no proof path;
-  the escrow copy is the only supported recovery (step 6): decrypt it with your recovery key
-  (or the host identity), put the value back in the 0600 `.env`, start. If the escrow copy is gone too,
+  the escrow copy is the only supported recovery (step 6): decrypt it off-host with your
+  recovery identity (the host identity cannot open it), put the value back in the 0600 `.env`, start. If the escrow copy is gone too,
   this is an owner decision, not a procedure: this command refuses the keyed store
   (`SCHEMA_ALREADY_CURRENT` — a store at the running schema is not a pre-cutover store), nothing
   on this page re-keys it, and its rows written since cutover are unrecoverable as a bound store;

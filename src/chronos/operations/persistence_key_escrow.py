@@ -1,4 +1,4 @@
-"""Escrow ONE encrypted copy of the persistence key and prove it decrypts back (runbook step 6).
+"""Escrow ONE encrypted copy of the persistence key to the owner's recovery key (runbook step 6).
 
 Kevin's custody ruling: he generates the key himself, places it in the host's 0600 ``.env``, and
 keeps one age-encrypted escrow copy off-host — his keystrokes only. Daybreak P1-3 (N3-2 review):
@@ -6,22 +6,27 @@ the earlier runbook step piped a shell variable into ``age``, and an unset varia
 escrowed an empty line. This tool closes that: the key is typed into a non-echoing prompt (or,
 for a pipe, read from standard input with ``--key-from-stdin``), NEVER taken from the environment
 or the command line; anything but exactly one line of 64 lowercase hex characters — what
-``secrets.token_hex(32)`` prints — is refused with nothing written; the line is encrypted with
-``age`` to the two recipients the restore drill validates (the host identity's public key and the
-owner's pinned recovery recipient — the backups' own policy; the host identity is the only key on
-the host that can DECRYPT, which the proof below needs); the new artifact is opened ONCE and held
-through the proof: it is decrypted THROUGH THAT DESCRIPTOR (``/proc/self/fd/<n>`` names the inode
-this run created, whatever the directory entry now says) through the host identity into a private
-0700 scratch directory and compared, byte for byte, in this process; the scratch is unlinked; the
-output name must still resolve to the held file (``TARGET_SWAPPED`` otherwise); only then does the
-tool report. On any failure after the file was created, the tool DELETES NOTHING (r3, Daybreak
-P1-3: Linux has no unlink-by-descriptor, every unlink is by name, and a name can be swapped under
-the tool in the instant before the syscall — so no cleanup is bound to the file it made): the
-report's ``created_artifact`` names the created ciphertext's path and device:inode for the owner
-to find and shred, at its name or under a renamed entry. The only things the tool ever removes
-are its own private scratch (the cleartext the proof wrote, and the 0700 directory it made). The
-report never carries the key, nor a digest of it — the ciphertext's sha256, the output path and
-the recipients only::
+``secrets.token_hex(32)`` prints — is refused with nothing written.
+
+K-20261023-003 (escrow = recovery-key-only): the line is encrypted with ``age`` to exactly ONE
+recipient, the owner's ``KEVIN_RECOVERY_RECIPIENT``, read at call time from the restore drill
+where it is pinned in code. The host identity is not a recipient: nothing on this host can open
+the artifact, and the tool reads none of the host's key files and decrypts nothing. What it
+proves before it reports, and only this: the key line was well formed and non-empty; ``age``
+exited 0; the artifact, which age created through the held directory descriptor and which is
+opened ONCE and held from then on, is a non-empty regular file (``ARTIFACT_EMPTY`` otherwise);
+the output name still resolves to the held file before the report (``TARGET_SWAPPED``
+otherwise). It does NOT prove that the artifact decrypts to the key. That proof is the owner's
+decrypt-and-compare, off-host, with his recovery identity, before any local copy is deleted
+(runbook step 6); the report says so (``decrypt_verified: false``).
+
+On any failure after the file was created, the tool DELETES NOTHING (r3, Daybreak P1-3: Linux
+has no unlink-by-descriptor, every unlink is by name, and a name can be swapped under the tool in
+the instant before the syscall — so no cleanup is bound to the file it made): the report's
+``created_artifact`` names the created ciphertext's path and device:inode for the owner to find
+and shred, at its name or under a renamed entry. The tool removes nothing, ever. The report never
+carries the key, nor a digest of it — the ciphertext's sha256, the output path and the one
+recipient only::
 
     python -m chronos.operations.persistence_key_escrow --out chronos-persistence-key.age [--pretty]
 
@@ -32,27 +37,23 @@ Exit 0 with ``"verdict": "ESCROWED"``; exit 2 with a ``code`` otherwise. Runbook
 from __future__ import annotations
 
 import argparse
-import contextlib
 import getpass
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
+from chronos.operations import restore_drill
 from chronos.operations.restore_drill import (
-    _DIR_FLAGS,
-    AgeKeys,
+    AGE_INSTALL_SENTENCE,
     DrillRefused,
     _entry_is_real_file,
-    _open_identity,
     _open_regular_at,
-    _run_age,
     _sha256_fd,
     _walk_directory,
-    load_age_keys,
 )
 
 Outcome = dict[str, object]
@@ -95,14 +96,11 @@ def _read_key(*, from_stdin: bool) -> str:
     return lines[0]
 
 
-def _encrypt(keys: AgeKeys, key: str, dfd: int, name: str) -> None:
-    """``age -r <host> -r <recovery> -o <dir fd>/<name>`` with the key on age's standard input
-    — never an argument, never a file."""
+def _encrypt(age: str, recipient: str, key: str, dfd: int, name: str) -> None:
+    """``age -r <recovery> -o <dir fd>/<name>`` — the one recipient — with the key on age's
+    standard input — never an argument, never a file."""
 
-    argv = [keys.age]
-    for recipient in keys.recipients:
-        argv += ["-r", recipient]
-    argv += ["-o", f"/proc/self/fd/{dfd}/{name}"]
+    argv = [age, "-r", recipient, "-o", f"/proc/self/fd/{dfd}/{name}"]
     try:
         completed = subprocess.run(  # argv list, no shell; the binary was resolved by which()
             argv,
@@ -116,57 +114,6 @@ def _encrypt(keys: AgeKeys, key: str, dfd: int, name: str) -> None:
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", "replace").strip()
         raise EscrowRefused("AGE_FAILED", f"age exited {completed.returncode}: {detail}")
-
-
-def _decrypts_back_to(keys: AgeKeys, key: str, artifact_fd: int) -> None:
-    """Decrypt the new artifact THROUGH THE HELD DESCRIPTOR — ``/proc/self/fd/<n>`` in the
-    child names the inode this run created, whatever the directory entry now says — through
-    the host identity into a private 0700 scratch (a descriptor-bound write), compare in
-    process, unlink the scratch; no printing. A failing decrypt is ``AGE_FAILED``."""
-
-    scratch = Path(tempfile.mkdtemp(prefix=".chronos-escrow-"))  # mode 0700
-    try:
-        scratch_fd = os.open(scratch, _DIR_FLAGS)
-        try:
-            try:
-                identity_fd = _open_identity(keys.identity_path)
-            except DrillRefused as error:
-                raise EscrowRefused("KEYS_REFUSED", str(error)) from None
-            try:
-                try:
-                    _run_age(
-                        [
-                            keys.age,
-                            "-d",
-                            "-i",
-                            f"/proc/self/fd/{identity_fd}",
-                            "-o",
-                            f"/proc/self/fd/{scratch_fd}/key",
-                            f"/proc/self/fd/{artifact_fd}",
-                        ],
-                        what="decrypting the new escrow artifact through the host identity",
-                        pass_fds=(identity_fd, scratch_fd, artifact_fd),
-                    )
-                    fd = _open_regular_at(scratch_fd, "key", "decrypted escrow")
-                except DrillRefused as error:
-                    raise EscrowRefused("AGE_FAILED", str(error)) from None
-            finally:
-                os.close(identity_fd)
-            with os.fdopen(fd, "rb") as handle:
-                recovered = handle.read()
-            if recovered != (key + "\n").encode("utf-8"):
-                raise EscrowRefused(
-                    "ESCROW_MISMATCH",
-                    "the artifact decrypted to something other than the key that was typed — "
-                    "do not keep it; created_artifact says whether this run's file was removed",
-                )
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink("key", dir_fd=scratch_fd)
-            os.close(scratch_fd)
-    finally:
-        with contextlib.suppress(OSError):
-            os.rmdir(scratch)
 
 
 def _report_created(name: str, identity: tuple[int, int], parent_abs: Path) -> Outcome:
@@ -193,10 +140,10 @@ def _report_created(name: str, identity: tuple[int, int], parent_abs: Path) -> O
 
 def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
     out = Path(out)
-    try:
-        keys = load_age_keys()  # every key refusal precedes the prompt
-    except DrillRefused as error:
-        raise EscrowRefused("KEYS_REFUSED", str(error)) from None
+    age = shutil.which("age")  # a missing tool is refused before the prompt
+    if age is None:
+        raise EscrowRefused("AGE_MISSING", AGE_INSTALL_SENTENCE)
+    recipient = restore_drill.KEVIN_RECOVERY_RECIPIENT  # the ONLY recipient (K-20261023-003)
     key = _read_key(from_stdin=from_stdin)
     dfd, parent_abs = _walk_directory(out.parent, "escrow directory", create=False)
     try:
@@ -209,9 +156,9 @@ def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
             raise EscrowRefused(
                 "TARGET_EXISTS", f"{parent_abs / name} already exists; this tool never overwrites"
             )
-        _encrypt(keys, key, dfd, name)
+        _encrypt(age, recipient, key, dfd, name)
         try:
-            fd = _open_regular_at(dfd, name, "escrow artifact")  # held through the proof
+            fd = _open_regular_at(dfd, name, "escrow artifact")  # held until the report
         except DrillRefused as error:
             raise EscrowRefused(
                 "AGE_FAILED", f"age reported success but {parent_abs / name}: {error}"
@@ -228,13 +175,17 @@ def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
                         f"{parent_abs / name} is not the file age wrote (the name was swapped as "
                         "it was written)",
                     )
-                ciphertext_sha256 = _sha256_fd(fd)
-                _decrypts_back_to(keys, key, fd)  # the held inode, whatever the name says now
+                if st.st_size == 0:
+                    raise EscrowRefused(
+                        "ARTIFACT_EMPTY",
+                        f"age exited 0 but {parent_abs / name} is empty; nothing was escrowed",
+                    )
+                ciphertext_sha256 = _sha256_fd(fd)  # the held inode, whatever the name says now
                 if not _entry_is_real_file(dfd, name, identity):
                     raise EscrowRefused(
                         "TARGET_SWAPPED",
-                        f"{parent_abs / name} no longer names the artifact this run created and "
-                        "verified (the name was swapped during the proof)",
+                        f"{parent_abs / name} no longer names the artifact this run created (the "
+                        "name was swapped before the report)",
                     )
                 os.fsync(dfd)
             except BaseException as error:
@@ -248,13 +199,24 @@ def escrow(out: Path, *, from_stdin: bool = False) -> dict[str, object]:
         os.close(dfd)
     return {
         "verdict": "ESCROWED",
-        "verified": True,
+        "decrypt_verified": False,
         "out": str(parent_abs / name),
         "ciphertext_sha256": ciphertext_sha256,
-        "recipients": list(keys.recipients),
+        "recipients": [recipient],
+        "proved_on_host": [
+            "the key line was exactly one line of 64 lowercase hex characters",
+            "age exited 0",
+            "the artifact is a non-empty regular file that age created through the held "
+            "directory descriptor, held open since, and still named by --out",
+        ],
+        "not_proved": (
+            "that the artifact decrypts to the key: its one recipient is your recovery key, "
+            "whose identity never exists on this host"
+        ),
         "next": [
-            f"Move {parent_abs / name} off this host (password manager attachment, or where the "
-            "backup escrow goes), then remove the local copy yourself.",
+            f"Copy {parent_abs / name} off this host and, there, decrypt it with your recovery "
+            f"identity and compare it with the .env value ({RUNBOOK}, step 6). Delete no copy "
+            "of it before that prints MATCH.",
             f"Clear the terminal. The key was never printed; this report holds none of it "
             f"({RUNBOOK}).",
         ],
@@ -266,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m chronos.operations.persistence_key_escrow",
         description=(
             "Escrow one age-encrypted copy of the persistence key, typed into a non-echoing "
-            "prompt, and prove it decrypts back before reporting."
+            "prompt, to the owner's recovery key alone; the decrypt-and-compare is the owner's, "
+            "off-host."
         ),
     )
     parser.add_argument("--out", required=True, type=Path, help="the artifact to create (new)")
