@@ -380,6 +380,82 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
    chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
+   That 200 proves only that the process answers: `/health` says `"status":"ok"` under a
+   recovery hold too. **Steps 8 and 9 wait for the gate below.**
+
+   **Expect the recovery hold, reason `database_replaced` (ADR-0054). It is not an incident.**
+   Step 3 moved only `chronos.db` and its `-wal`/`-shm`. The installation marker
+   `state_generation.json` beside the kill-switch file survives, and a fresh store has no
+   `installation_identity` row. A marker with no row reads as a database replaced beneath
+   surviving state files, so the backend boots held: read-only, unreconciled, no autonomy
+   runtime. Read the hold from `<checkout>`. The token comes from the backend's own token file
+   (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs): the
+   shell puts it in the header, and nothing prints it. The log is your `LOG_FILE`
+   (`logs/chronos.log` by default).
+   ```bash
+   curl -fsS http://127.0.0.1:<port>/health | python -I -c '
+   import json, sys
+   h = json.load(sys.stdin); o = h["observations"]
+   print("startup_faults:", " ".join(o["startup_faults"]) or "none")
+   print("reconciliation:", h["reconciliation_status"])
+   print("tasks:", " ".join(t["name"] + "=" + t["state"] for t in o["tasks"]))
+   '
+   curl -sS -w ' HTTP %{http_code}\n' -H "X-Chronos-Token: $(cat data/backend_api_token)" http://127.0.0.1:<port>/autonomy/alerts
+   grep -F '"event":"recovery_hold_engaged"' logs/chronos.log | tail -n 1
+   ```
+   It must print these four lines, then one log line whose message begins `This boot cannot
+   prove it does not follow a restore (database_replaced)`:
+   ```
+   startup_faults: recovery_unverified
+   reconciliation: PENDING
+   tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=NOT_EXPECTED
+   {"detail":"This backend booted under a recovery hold and is running read-only: the state directory names an installation this database has never witnessed; the database was replaced beneath surviving state files. Acknowledge it with a note at POST /live/recovery/acknowledge and restart."} HTTP 409
+   ```
+   `GET /autonomy/alerts` only reads, but it sits behind the same writer check as every mutating
+   route: its 409 is the hold's refusal, and its 200 later means writes are allowed.
+   **Anything else is not the cutover's state: stop the backend (`systemctl --user stop
+   chronos-backend`), acknowledge nothing, and stop here.** That includes another reason in the
+   log or the 409 (`state_directory_lost`, `marker_unreadable`, `installation_mismatch`,
+   `restore_pending`), another startup fault beside `recovery_unverified`, and no hold at all:
+   `startup_faults: none` here means the marker was not where the backend looks, so the
+   live-safety state this host ran with is missing. `python -m chronos.cli campaign status` and
+   `campaign preflight` cannot show this reason: they report the fresh store's missing
+   `installation_identity` row as UNVERIFIED, before and after the acknowledgement.
+
+   **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
+   database replacement. The same token file, never printed:
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
+     -H "X-Chronos-Token: $(cat data/backend_api_token)" \
+     -H 'Content-Type: application/json' \
+     -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}'
+   ```
+   Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>","effective":"next start"}`.
+   A `reason` other than `database_replaced`: stop. The acknowledgement binds this exact
+   observation and takes effect at the next start, so this process stays held. It does not
+   disengage the kill switch, arm, or activate a mandate.
+
+   **Restart, then prove the hold is gone, before step 8.** `systemctl --user restart
+   chronos-backend`, then `systemctl --user is-active chronos-backend` → `active`, then the
+   `/health` and `/autonomy/alerts` commands above again. They must print:
+   ```
+   startup_faults: none
+   reconciliation: RECONCILED
+   tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=RUNNING
+   [] HTTP 200
+   ```
+   `startup_faults: none`: the hold is cleared. `HTTP 200`: writes are allowed (the body lists
+   unacknowledged alerts; it may hold the mandate alert below instead of `[]`).
+   `reconciliation: RECONCILED` with `reconciliation=RUNNING`: startup reconciliation ran and
+   the refresher runs (`STARTING` in the first seconds: re-run). `autonomy=NOT_EXPECTED` is
+   right until step 9, for one of two reasons: no `AUTONOMY_MANDATE_FILE` is configured, or the
+   configured mandate still carries the unkeyed fingerprint. Then the log says `Persistent
+   mandate is scoped to a different account; autonomy stays inert`, and the alert list holds
+   `"kind":"autonomy.mandate_invalid"`. Step 9 re-authors the mandate; autonomy starts after it.
+   **Anything else (a startup fault, a 409, `reconciliation` not `RECONCILED`,
+   `autonomy=RUNNING`: a grant active before step 8 proved the key) means stop the backend and
+   stop here.** A bare `/health` 200 is not this proof. Steps 8 and 9 start only after it passes.
+
 8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
    `database_scope` row with the KEYED fingerprint. The proof is one comparison: the fingerprint
    computed from `<checkout>/.env`'s key ALONE — the key you escrowed in step 6; never the
@@ -436,7 +512,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    unit (step 5's one-home check names every place to look). Stop the backend; remove the extra
    source; re-archive the fresh store by hand — move `data/chronos.db` and its `-wal`/`-shm`
    aside by name; it was bound under the wrong key and holds nothing worth keeping — then start
-   again and repeat this step. Never change `DATABASE_URL`: a new URL leaves a store bound under
+   again, pass step 7's recovery-hold gate again (the new store holds no acknowledgement, so
+   the hold comes back), and repeat this step.
+   Never change `DATABASE_URL`: a new URL leaves a store bound under
    a key nobody escrowed (that REFUSE text's "choose a new absolute DATABASE_URL" is wrong for
    this case; a follow-up fixes the message). No row, a second row, or a different value:
    stop; the store is not bound to the scope you think.
