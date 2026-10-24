@@ -393,11 +393,20 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    stop; the store is not bound to the scope you think.
 
 9. **Re-author the mandate BEFORE the first start of autonomy — dated window = 0.** The
-   mandate's `account_fingerprint` must be the keyed value (`python -m chronos.cli mandate
-   fingerprint` prints it from the configured key; `mandate check` compares). Its
+   mandate's `account_fingerprint` must be the keyed value:
+   `python -m chronos.cli mandate fingerprint --account-id DU1234567` prints it from the
+   configured key. The argument is required on a demo host: without it the command reads
+   `IB_ACCOUNT_ID` from settings, which a demo host does not set, and stops with
+   `no account id available; pass --account-id or set IB_ACCOUNT_ID` (C1 F7). Its value is the
+   account the backend bound in step 8: `DEMO_ACCOUNT_ID` = `DU1234567` on the demo broker
+   (`src/chronos/broker/demo.py`), your `IB_ACCOUNT_ID` on IBKR paper (there the argument may be
+   left out). Write the printed value into the mandate's `account_fingerprint`; its
    `effective_from` is the first instant anything accepts the keyed value; nothing accepts the
-   old value at any time, so there is no window to close. Only then start the worker and enable
-   autonomy per the shadow-campaign runbook.
+   old value at any time, so there is no window to close. Then
+   `python -m chronos.cli mandate check --file <mandate> --account-id DU1234567` (the same id)
+   must print `STATUS             VALID`, `[NOTE] account-match` and a SUMMARY line that begins
+   `0 blocking` — a BLOCKING `account-mismatch` means the old fingerprint is still in the file.
+   Only then start the worker and enable autonomy per the shadow-campaign runbook.
 
 10. **Retention — 90 days.** The envelope under `--out` is a pre-cutover backup (its manifest
     says `schema_version:17`); the pruner deletes it after 90 days, as the ruling says. Run
