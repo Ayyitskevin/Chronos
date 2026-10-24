@@ -4032,3 +4032,71 @@ def test_c1f_f4_the_sentinel_refusal_wording_matches_what_mv_prints(tmp_path: Pa
     assert "Permission denied" in refused.stderr and "Is a directory" not in refused.stderr
     assert f"{sentinel}/chronos.db.archived-X" in refused.stderr  # it aimed inside the directory
     assert archived.read_bytes() == b"the pre-cutover store" and list(sentinel.iterdir()) == []
+
+
+def test_c1f_f5_the_dry_run_refuses_an_unprotected_restore_target_as_apply_does_and_creates_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F5 (P3): the dry run returned ``DRY_RUN`` before the ``--restore-into`` check, so a
+    ``/tmp`` target passed step 2 and only ``--apply`` refused it (S2-ctl vs S2-ctl-apply): a
+    clean dry run said nothing about the target. The dry run now runs the same read-only check
+    (``_require_protected_absent_target``) and refuses the same way, before anything exists."""
+
+    store = _store(tmp_path, binding="closed")
+    sticky = tmp_path / "sticky-world-writable"  # /tmp-style, made here (see test_5f for why)
+    sticky.mkdir()
+    os.chmod(sticky, 0o1777)
+    target = sticky / "verify"
+    before = _sha256(store.db)
+    argv = [
+        "--db",
+        str(store.db),
+        "--out",
+        str(tmp_path / "backups"),
+        "--restore-into",
+        str(target),
+    ]  # no --apply: the dry run
+    code = cutover.main(argv, clock=_clock(store.now))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["verdict"] == "REFUSED" and report["dry_run"] is True, report
+    assert report["code"] == "RESTORE_TARGET_NOT_PROTECTED", report
+    assert f"{sticky} is writable by its group or by others (mode 1777)" in report["failures"][0]
+    assert not target.exists() and not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+    # --apply refuses identically (the control the rehearsal had): one check, both modes
+    code = cutover.main([*argv, "--apply"], clock=_clock(store.now))
+    applied = json.loads(capsys.readouterr().out)
+    assert code == 2 and applied["code"] == "RESTORE_TARGET_NOT_PROTECTED", applied
+    assert applied["failures"] == report["failures"] and applied["dry_run"] is False
+    assert not target.exists() and not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+
+
+def test_c1f_f5_the_dry_run_refuses_a_restore_target_that_exists_and_leaves_it_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The leaf must be ABSENT (FIX-RT) — for the dry run too. It is read-only: the pre-existing
+    directory keeps its mode and stays empty; nothing under ``--out`` appears."""
+
+    store = _store(tmp_path, binding="closed")
+    target = tmp_path / "restored"  # where _run points --restore-into
+    target.mkdir()
+    os.chmod(target, 0o700)
+    before = _sha256(store.db)
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED" and report["dry_run"] is True, report
+    assert report["code"] == "RESTORE_TARGET_NOT_FRESH", report
+    assert "must not exist" in report["failures"][0]
+    assert list(target.iterdir()) == [] and stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+
+
+def test_c1f_f5_the_module_and_the_runbook_say_the_dry_run_proves_the_restore_target() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step2 = _step(text, "2. **Dry-run", "3. **Apply")
+    assert "`RESTORE_TARGET_NOT_PROTECTED`" in step2 and "`RESTORE_TARGET_NOT_FRESH`" in step2
+    before = text[text.index("## Before you start") : text.index("## Steps")]
+    assert "dry run and `--apply` alike, before any envelope exists" in before
+    module = MODULE.read_text(encoding="utf-8")
+    assert "Gate → restore-target check → (dry-run stops here)" in module
