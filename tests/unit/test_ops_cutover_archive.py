@@ -3820,3 +3820,86 @@ def test_n34_3_the_cutover_runbook_confirms_the_removal_instead_of_asking_for_an
     # the "Before you start" rule says the copy is removed before the report
     before = text.split("## Before you start", 1)[1].split("## Steps", 1)[0]
     assert "restore_copy_removed" in before
+
+
+# ------------------------------------------------------------- (12) C1-F: the rehearsal's findings
+# C1 (out/C1/REHEARSAL.md, 2026-10-24) walked the runbook on synthetic state and found nine things;
+# F2 and F9 went into B2. These pin F1, F3-F8: the runbook says what the host really does, and the
+# dry run proves what a clean dry run is read as proving.
+
+
+def _coreutils_version() -> tuple[int, ...] | None:
+    """``mv --version``'s first line — ``mv (GNU coreutils) 9.7`` → ``(9, 7)`` — or None when
+    ``mv`` is not GNU coreutils (the runbook's forms are GNU's)."""
+
+    completed = subprocess.run(["mv", "--version"], capture_output=True, text=True, check=False)
+    first = completed.stdout.splitlines()[0] if completed.stdout else ""
+    if "GNU coreutils" not in first:
+        return None
+    return tuple(int(part) for part in first.rsplit(" ", 1)[-1].split(".") if part.isdigit())
+
+
+def _rollback() -> str:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    return text[text.index("## Rollback") : text.index("## What the gate's refusal codes mean")]
+
+
+def test_c1f_f3_the_rollback_renames_back_with_a_loud_refusal_and_checks_after() -> None:
+    """C1 F3 (P2): GNU ``mv -n`` onto an existing regular file declines SILENTLY with exit 0
+    (measured on coreutils 9.7, RB2), so a rollback run after the backend has created the keyed
+    store looks done and is not. The runbook's rename is ``mv --update=none-fail`` (coreutils
+    9.5+: ``not replacing``, exit 1), names that version assumption and what an older coreutils
+    does with the flag, and makes the operator check ``ls -la data/`` after the moves."""
+
+    rollback = _rollback()
+    assert "`mv --update=none-fail data/chronos.db.archived-<stamp> data/chronos.db`" in rollback
+    assert "mv -n data/" not in rollback, "the silent form must not be the instruction"
+    assert "not replacing" in rollback  # what the refusal prints
+    assert "coreutils" in rollback and "9.5" in rollback  # the version assumption, stated
+    assert "mv --version" in rollback  # and how to check it
+    assert "no `.archived-<stamp>` name" in rollback  # the after-check
+    assert rollback.index("rmdir") < rollback.index("mv --update=none-fail")  # r3's order holds
+
+
+def test_c1f_f3_measured_the_chosen_mv_form_refuses_an_occupied_live_name_and_the_old_one_did_not(
+    tmp_path: Path,
+) -> None:
+    """The premise, re-measured where the suite runs: ``mv -n`` onto an existing file is silent
+    and exits 0; ``mv --update=none-fail`` prints ``not replacing`` and exits 1; both leave
+    both files untouched; the chosen form still moves when the live name is free."""
+
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"--update=none-fail needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    live.write_bytes(b"keyed store the backend created")
+    archived.write_bytes(b"the pre-cutover store")
+
+    silent = subprocess.run(
+        ["mv", "-n", str(archived), str(live)], capture_output=True, text=True, check=False
+    )
+    assert silent.returncode == 0 and silent.stderr == "" and silent.stdout == ""  # F3
+    assert live.read_bytes() == b"keyed store the backend created"
+    assert archived.read_bytes() == b"the pre-cutover store"
+
+    loud = subprocess.run(
+        ["mv", "--update=none-fail", str(archived), str(live)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert loud.returncode == 1 and "not replacing" in loud.stderr, loud
+    assert live.read_bytes() == b"keyed store the backend created"
+    assert archived.read_bytes() == b"the pre-cutover store"
+
+    live.unlink()  # the live name is free (the sentinel was rmdir'ed, nothing started)
+    moved = subprocess.run(
+        ["mv", "--update=none-fail", str(archived), str(live)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert moved.returncode == 0 and moved.stderr == "", moved
+    assert live.read_bytes() == b"the pre-cutover store" and not archived.exists()
