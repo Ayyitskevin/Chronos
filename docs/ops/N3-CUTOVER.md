@@ -369,16 +369,40 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    line of `python -m chronos.cli b1-preflight`, which reads the file and nothing else:
    `CLEAR [scope] already bound to this paper account`. On a demo host `b1-preflight` cannot
    give it — it refuses before its scope line, and its scope CLEAR is `ibkr`/`paper` by
-   construction (`b1_preflight.py:564`; C1 F1) — so run the same comparison from two existing
-   commands, from `<checkout>`, with the file as the only key source:
+   construction (`b1_preflight.py:564`; C1 F1) — so make the same comparison from `<checkout>`
+   with a command that reads the key from the FILE by construction and never asks the process
+   environment. The `sqlite3` line reads the row. The `python` line reads `.env` with the
+   loader's own `dotenv_values`, takes the one exact `CHRONOS_PERSISTENCE_KEY=` line — `STOP`
+   when it is missing, doubled or present in another form — and prints the fingerprint through
+   the repo's `account_fingerprint`; it never prints the key:
    ```bash
    sqlite3 "file:data/chronos.db?mode=ro" "SELECT broker_mode, environment, account_fingerprint FROM database_scope"
-   env -i BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false "$(command -v python)" -m chronos.cli mandate fingerprint --account-id DU1234567
+   python -I -c '
+   import re, sys
+   from dotenv import dotenv_values
+   from chronos.utils.identifiers import PersistenceKey, account_fingerprint
+   lines = open(".env", encoding="utf-8").read().splitlines()
+   named = [l for l in lines if re.match(r"\s*(export\s+)?chronos_persistence_key\s*=", l, re.I)]
+   if len(named) != 1 or not named[0].startswith("CHRONOS_PERSISTENCE_KEY="):
+       sys.exit(f"STOP: {len(named)} line(s) name the key in .env; want exactly one, in the exact form (step 5). Delete nothing.")
+   try:
+       key = PersistenceKey.from_hex(dotenv_values(".env")["CHRONOS_PERSISTENCE_KEY"])
+   except (KeyError, TypeError, ValueError):
+       sys.exit("STOP: the key line is not CHRONOS_PERSISTENCE_KEY=<64 lowercase hex> (step 5). Delete nothing.")
+   print(account_fingerprint(sys.argv[1], key=key))
+   ' DU1234567
    ```
-   `env -i` empties the environment, so `mandate fingerprint` has exactly one key source left:
-   the `.env` in the cwd (`settings.py:101-102`, `env_file=".env"`) — the file the step-6
-   compare read. Expect exactly one row, `demo|DEMO|<64 hex>`, and the SAME 64 hex as the first
-   line the second command prints. The account id is the one the backend bound: on the demo
+   `python -I` runs isolated — no `PYTHON*` variables, no user site, no cwd on the import path,
+   so a file dropped in the checkout root cannot shadow `dotenv` or `chronos` — and the command
+   reads no environment variable at all, so a value set by a shell, by a unit, or by Python
+   startup code cannot enter it (an `env -i` form did not close that last path: a `.pth` or
+   `sitecustomize` can set the key after `env` emptied the environment, and `Settings` prefers
+   it; C1-F fix round 1, kimi P1-1). Trust root, stated: the checkout's venv and source are the
+   code the backend itself runs — a hostile `.pth` or `sitecustomize` in that venv is outside
+   what any runbook check can defend, and this step depends on the process environment not at
+   all. Expect exactly one row, `demo|DEMO|<64 hex>`, and the SAME 64 hex from the `python` line.
+   A line beginning `STOP:` means `.env` is not one exact key line: fix the file (step 5) and
+   delete nothing. The account id is the one the backend bound: on the demo
    broker `DEMO_ACCOUNT_ID` = `DU1234567` (`src/chronos/broker/demo.py`; a demo host has no
    `IB_ACCOUNT_ID`, so the argument is required); on IBKR paper your `IB_ACCOUNT_ID`.
    **A mismatch right after the first start — a different 64 hex, or `b1-preflight`'s
