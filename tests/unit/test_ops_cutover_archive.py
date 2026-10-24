@@ -45,6 +45,7 @@ import json
 import os
 import pickle
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -65,7 +66,11 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
 
+from chronos.broker.demo import DEMO_ACCOUNT_ID
+from chronos.cli.main import main as cli_main
+from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.operations import cutover_archive as cutover
 from chronos.operations import restore_drill as drill
@@ -90,6 +95,7 @@ from chronos.supervisor.position_management import (
     record_directive_resolution,
     register_position,
 )
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "src" / "chronos" / "operations" / "cutover_archive.py"
@@ -1472,7 +1478,8 @@ def test_7h_the_runbook_states_the_r2_boundaries() -> None:
 
 def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     """r3: the sentinel directories, the owner's rmdir as step 7's first line, the rollback order
-    (rmdir, then mv -n), the new refusal row; the escrow step says the tool deletes nothing."""
+    (rmdir, then the rename back), the new refusal row; the escrow step says the tool deletes
+    nothing."""
 
     text = RUNBOOK.read_text(encoding="utf-8")
     step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
@@ -1485,7 +1492,7 @@ def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     )
     assert "non-regular" in step7  # what every writer says until then
     rollback = text[text.index("## Rollback") :]
-    assert rollback.index("rmdir") < rollback.index("mv -n")
+    assert rollback.index("rmdir") < rollback.index("mv --update=none-fail")  # C1 F3's form
     table = text[text.index("## What the gate's refusal codes mean") :]
     assert "`LIVE_NAME_OCCUPIED`" in table
 
@@ -3820,3 +3827,542 @@ def test_n34_3_the_cutover_runbook_confirms_the_removal_instead_of_asking_for_an
     # the "Before you start" rule says the copy is removed before the report
     before = text.split("## Before you start", 1)[1].split("## Steps", 1)[0]
     assert "restore_copy_removed" in before
+
+
+# ------------------------------------------------------------- (12) C1-F: the rehearsal's findings
+# C1 (out/C1/REHEARSAL.md, 2026-10-24) walked the runbook on synthetic state and found nine things;
+# F2 and F9 went into B2. These pin F1, F3-F8: the runbook says what the host really does, and the
+# dry run proves what a clean dry run is read as proving.
+
+
+def _coreutils_version() -> tuple[int, ...] | None:
+    """``mv --version``'s first line — ``mv (GNU coreutils) 9.7`` → ``(9, 7)`` — or None when
+    ``mv`` is not GNU coreutils (the runbook's forms are GNU's)."""
+
+    completed = subprocess.run(["mv", "--version"], capture_output=True, text=True, check=False)
+    first = completed.stdout.splitlines()[0] if completed.stdout else ""
+    if "GNU coreutils" not in first:
+        return None
+    return tuple(int(part) for part in first.rsplit(" ", 1)[-1].split(".") if part.isdigit())
+
+
+def _rollback() -> str:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    return text[text.index("## Rollback") : text.index("## What the gate's refusal codes mean")]
+
+
+def test_c1f_f3_the_rollback_renames_back_with_a_loud_refusal_and_checks_after() -> None:
+    """C1 F3 (P2): GNU ``mv -n`` onto an existing regular file declines SILENTLY with exit 0
+    (measured on coreutils 9.7, RB2), so a rollback run after the backend has created the keyed
+    store looks done and is not. The runbook's rename is ``mv --update=none-fail`` (coreutils
+    9.5+: ``not replacing``, exit 1), names that version assumption and what an older coreutils
+    does with the flag, and makes the operator check ``ls -la data/`` after the moves."""
+
+    rollback = _rollback()
+    assert "`mv --update=none-fail data/chronos.db.archived-<stamp> data/chronos.db`" in rollback
+    assert "mv -n data/" not in rollback, "the silent form must not be the instruction"
+    assert "not replacing" in rollback  # what the refusal prints
+    assert "coreutils" in rollback and "9.5" in rollback  # the version assumption, stated
+    assert "mv --version" in rollback  # and how to check it
+    assert "no `.archived-<stamp>` name" in rollback  # the after-check
+    assert rollback.index("rmdir") < rollback.index("mv --update=none-fail")  # r3's order holds
+
+
+def test_c1f_f3_measured_the_chosen_mv_form_refuses_an_occupied_live_name_and_the_old_one_did_not(
+    tmp_path: Path,
+) -> None:
+    """The premise, re-measured where the suite runs: ``mv -n`` onto an existing file is silent
+    and exits 0; ``mv --update=none-fail`` prints ``not replacing`` and exits 1; both leave
+    both files untouched; the chosen form still moves when the live name is free."""
+
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"--update=none-fail needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    live.write_bytes(b"keyed store the backend created")
+    archived.write_bytes(b"the pre-cutover store")
+
+    silent = subprocess.run(
+        ["mv", "-n", str(archived), str(live)], capture_output=True, text=True, check=False
+    )
+    assert silent.returncode == 0 and silent.stderr == "" and silent.stdout == ""  # F3
+    assert live.read_bytes() == b"keyed store the backend created"
+    assert archived.read_bytes() == b"the pre-cutover store"
+
+    loud = subprocess.run(
+        ["mv", "--update=none-fail", str(archived), str(live)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert loud.returncode == 1 and "not replacing" in loud.stderr, loud
+    assert live.read_bytes() == b"keyed store the backend created"
+    assert archived.read_bytes() == b"the pre-cutover store"
+
+    live.unlink()  # the live name is free (the sentinel was rmdir'ed, nothing started)
+    moved = subprocess.run(
+        ["mv", "--update=none-fail", str(archived), str(live)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert moved.returncode == 0 and moved.stderr == "", moved
+    assert live.read_bytes() == b"the pre-cutover store" and not archived.exists()
+
+
+def _step8() -> tuple[str, str]:
+    """Step 8's text and its one ```bash block."""
+
+    step8 = _step(RUNBOOK.read_text(encoding="utf-8"), "8. **Bind", "9. **")
+    blocks = re.findall(r"```bash\n(.*?)```", step8, re.S)
+    assert len(blocks) == 1, "step 8 carries one check block"
+    # the fence sits inside a numbered list, so the raw lines carry the list's indent; a reader
+    # copies the rendered block, which is dedented (the one-home pin reads step 5 the same way)
+    return step8, textwrap.dedent(blocks[0])
+
+
+def _step8_fingerprint_body(*, dotenv_name: str) -> str:
+    """The body of step 8's ``python -I -c '…' DU1234567`` line, with the runbook's ``.env``
+    renamed to ``dotenv_name`` (no test creates a ``.env``) and this tree's ``src`` put first on
+    the import path (``-I`` ignores PYTHONPATH; the venv's editable install may point elsewhere).
+    Nothing else changes: the key handling under test is the runbook's own."""
+
+    block = _step8()[1]
+    match = re.search(r"python -I -c '(.*?)' " + re.escape(DEMO_ACCOUNT_ID), block, re.S)
+    assert match, block
+    body = match.group(1)
+    assert body.count('".env"') == 2, body
+    body = body.replace('".env"', f'"{dotenv_name}"')
+    return f"import sys; sys.path.insert(0, {str(ROOT / 'src')!r})\n" + body
+
+
+def _run_step8_fingerprint(
+    cwd: Path, *, isolated: bool, env: dict[str, str], dotenv_name: str = "dotenv-format"
+) -> subprocess.CompletedProcess[str]:
+    argv = [sys.executable, *(["-I"] if isolated else []), "-c"]
+    argv += [_step8_fingerprint_body(dotenv_name=dotenv_name), DEMO_ACCOUNT_ID]
+    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+
+
+def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_by_construction(tmp_path: Path) -> None:
+    """C1 F1 (P2) under the code owner's constraint (out/KEYSRC-ASSESS.md §3) and kimi's P1-1
+    (C1-F review): step 8 is the end-to-end proof that the store bound under the ESCROWED key —
+    the fingerprint computed from ``<checkout>/.env``'s key alone, compared with the bound
+    ``database_scope`` row. On a demo host ``b1-preflight`` cannot give it (it refuses before its
+    scope line, and its scope CLEAR is ``("ibkr", "paper", …)`` by construction,
+    ``b1_preflight.py:564``). ``env -i`` was not a file-only proof either: Python startup code
+    (a ``.pth``, ``sitecustomize``) can set the key in the process environment AFTER ``env`` has
+    emptied it, and Settings then prefers that value (kimi's counterexample). So step 8's demo
+    check reads the file BY CONSTRUCTION: a ``python -I -c`` command over the repo's own
+    functions that loads ``.env`` with ``dotenv_values``, takes the one exact
+    ``CHRONOS_PERSISTENCE_KEY=`` line, computes ``account_fingerprint`` and never consults the
+    environment. The runbook states the trust root (the checkout's venv and source are the code
+    the backend runs). No "or the operator CLI you use"; a mismatch after the first start is named
+    for what it is with the one remedy."""
+
+    step8, block = _step8()
+    assert "or the operator CLI you use" not in step8
+    assert "mode=ro" in block and "FROM database_scope" in block
+    assert "python -I -c" in block and "dotenv_values" in block and "account_fingerprint(" in block
+    assert "CHRONOS_PERSISTENCE_KEY=" in block and "STOP" in block
+    # kimi delta r1 P2-1: dotenv_values interpolates `${VAR}` from os.environ by default, so the
+    # read must be literal; the 64-hex check then refuses a `${…}` line instead of an env value
+    assert 'dotenv_values(".env", interpolate=False)' in block, block
+    assert "FileNotFoundError" in block  # a missing .env is a STOP line, not a traceback
+    for shell_source in ("env -i", "mandate fingerprint", "b1-preflight", "os.environ", "getenv"):
+        assert shell_source not in block, shell_source
+    assert "CLEAR [scope] already bound to this paper account" in step8  # the IBKR-paper check
+    assert "DEMO_ACCOUNT_ID" in step8 and "src/chronos/broker/demo.py" in step8
+    assert "IB_ACCOUNT_ID" in step8
+    flat = " ".join(step8.split())
+    assert ".pth" in flat and "sitecustomize" in flat and "process environment" in flat
+    assert "bound under a key other than the escrowed one" in flat
+    assert "remove the extra source" in flat and "re-archive the fresh store" in flat
+    assert "Never change `DATABASE_URL`" in flat
+    demo_module = (ROOT / "src" / "chronos" / "broker" / "demo.py").read_text(encoding="utf-8")
+    assert f'DEMO_ACCOUNT_ID = "{DEMO_ACCOUNT_ID}"' in demo_module  # the citation holds
+    scope_check = (ROOT / "src" / "chronos" / "cli" / "b1_preflight.py").read_text("utf-8")
+    assert 'tuple(row) == ("ibkr", "paper", account_fingerprint(account, key=key))' in scope_check
+    # the SQL the step gives is valid against the real schema and reads exactly the scope row
+    match = re.search(r'"(SELECT [^"]*FROM database_scope[^"]*)"', block)
+    assert match, block
+    store = _store(tmp_path, binding="closed")
+    with closing(sqlite3.connect(f"{store.db.as_uri()}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(match.group(1)).fetchall()
+    assert len(rows) == 1 and rows[0][0] == "demo" and len(rows[0][2]) == 64, rows
+    sqlite3_cli = shutil.which("sqlite3")
+    if sqlite3_cli is not None:  # the exact shell line, with the store's path substituted
+        line = next(entry.strip() for entry in block.splitlines() if "sqlite3 " in entry)
+        argv = shlex.split(line.replace("data/chronos.db", str(store.db)))
+        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+        assert completed.returncode == 0 and completed.stdout.startswith("demo|"), completed
+
+
+def test_c1f_f1_the_step_8_fingerprint_comes_from_the_file_whatever_the_environment_holds(
+    tmp_path: Path,
+) -> None:
+    """kimi P1-1's counterexample, pinned: a key set in the process environment — by the shell,
+    or by Python startup code after ``env -i`` — must not change the fingerprint step 8 prints.
+    (1) ``-I`` and an exported other key: the file's fingerprint. (2) The exact startup vector
+    kimi used, a ``sitecustomize`` that sets the key (here on PYTHONPATH, without ``-I``, since no
+    test may write into the venv's site-packages): still the file's fingerprint — while the OLD
+    form (``mandate fingerprint``) under the same injection prints the INJECTED key's, the hole.
+    (3) STOP cases: no key line, a doubled line, a second form, a malformed value — exit 1,
+    "STOP" on stderr, nothing on stdout, and the key never printed. (4) kimi delta r1 P2-1: an
+    exact line whose value is ``${VAR}`` must STOP, not print the fingerprint of the environment's
+    VAR — whether VAR comes from the shell or from startup code (``dotenv_values`` interpolates
+    from ``os.environ`` unless told not to). (5) A missing ``.env`` is a ``STOP:`` line, exit 1,
+    never a traceback."""
+
+    file_key = _hex("c1f-fix1: the key the .env holds — never a real key")
+    other_key = _hex("c1f-fix1: a key injected into the process environment — never real")
+    expected = account_fingerprint(DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(file_key))
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    dotenv = checkout / "dotenv-format"  # never a .env: the file the command is pointed at
+    dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={file_key}\n", encoding="utf-8")
+    base_env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CHRONOS_")}
+    base_env.update(SAFE_ENV)
+    # (1) the shell exports another key; -I; the printed fingerprint is the FILE's
+    exported = _run_step8_fingerprint(
+        checkout, isolated=True, env={**base_env, "CHRONOS_PERSISTENCE_KEY": other_key}
+    )
+    assert exported.returncode == 0, exported
+    assert exported.stdout.splitlines() == [expected], exported
+    # (2) kimi's vector: startup code sets the key after the environment was emptied
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        f'import os\nos.environ["CHRONOS_PERSISTENCE_KEY"] = "{other_key}"\n', encoding="utf-8"
+    )
+    injected_env = {**base_env, "PYTHONPATH": f"{site}{os.pathsep}{ROOT / 'src'}"}
+    injected = _run_step8_fingerprint(checkout, isolated=False, env=injected_env)
+    assert injected.returncode == 0 and injected.stdout.splitlines() == [expected], injected
+    old_argv = [sys.executable, "-m", "chronos.cli", "mandate", "fingerprint"]
+    old_argv += ["--account-id", DEMO_ACCOUNT_ID]
+    old_form = subprocess.run(  # the control: the form the review broke takes the injected key
+        old_argv,
+        cwd=checkout,
+        env=injected_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert old_form.returncode == 0, old_form
+    assert old_form.stdout.splitlines()[0] == account_fingerprint(
+        DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(other_key)
+    )
+    # (3) STOP cases — exit 1, STOP on stderr, nothing printed, the key never echoed
+    stops = {
+        "missing": "OTHER=1\n",
+        "doubled": f"CHRONOS_PERSISTENCE_KEY={file_key}\nCHRONOS_PERSISTENCE_KEY={file_key}\n",
+        "second-form": (
+            f"CHRONOS_PERSISTENCE_KEY={file_key}\nexport CHRONOS_PERSISTENCE_KEY={other_key}\n"
+        ),
+        "lower-case": f"CHRONOS_PERSISTENCE_KEY={file_key}\nchronos_persistence_key={other_key}\n",
+        "malformed": f"CHRONOS_PERSISTENCE_KEY={file_key[:63]}\n",
+    }
+    for case, text in stops.items():
+        dotenv.write_text(text, encoding="utf-8")
+        stopped = _run_step8_fingerprint(checkout, isolated=True, env=base_env)
+        assert stopped.returncode == 1, (case, stopped)
+        assert stopped.stdout == "" and stopped.stderr.startswith("STOP"), (case, stopped)
+        assert file_key[:20] not in stopped.stderr and other_key[:20] not in stopped.stderr, case
+    # (4) interpolation: the file's exact line is `${VAR}`; VAR holds a well-formed key in the
+    # environment (the shell, then kimi's startup vector) — the file is read literally, so STOP
+    dotenv.write_text("CHRONOS_PERSISTENCE_KEY=${C1F_TEST_VAR}\n", encoding="utf-8")
+    interpolated = _run_step8_fingerprint(
+        checkout, isolated=True, env={**base_env, "C1F_TEST_VAR": other_key}
+    )
+    assert interpolated.returncode == 1, interpolated
+    assert interpolated.stdout == "" and interpolated.stderr.startswith("STOP"), interpolated
+    (site / "sitecustomize.py").write_text(
+        f'import os\nos.environ["C1F_TEST_VAR"] = "{other_key}"\n', encoding="utf-8"
+    )
+    via_startup = _run_step8_fingerprint(checkout, isolated=False, env=injected_env)
+    assert via_startup.returncode == 1, via_startup
+    assert via_startup.stdout == "" and via_startup.stderr.startswith("STOP"), via_startup
+    # (5) no .env at all: a STOP line, exit 1, no traceback (fail-closed AND clear)
+    dotenv.unlink()
+    absent = _run_step8_fingerprint(checkout, isolated=True, env=base_env)
+    assert absent.returncode == 1 and absent.stdout == "", absent
+    assert absent.stderr.startswith("STOP") and "Traceback" not in absent.stderr, absent
+
+
+def test_c1f_f4_the_sentinel_refusal_wording_matches_what_mv_prints(tmp_path: Path) -> None:
+    """C1 F4 (P3): a ``mv`` onto a sentinel directory does not say ``Is a directory``: ``mv``
+    aims INSIDE the directory (``data/chronos.db/chronos.db.archived-<stamp>``) and the
+    sentinel's 0500 mode refuses it with ``Permission denied`` (RB1a). The runbook says what
+    ``mv`` really prints — in step 3 and in Rollback — and the measurement is repeated here."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "Is a directory" not in text
+    assert "Permission denied" in _rollback()
+    assert "Permission denied" in text[text.index("3. **Apply") : text.index("4. **Remove")]
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses the sentinel's 0500 mode")
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"the runbook's mv form needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    sentinel = data / "chronos.db"
+    sentinel.mkdir()
+    os.chmod(sentinel, 0o500)
+    archived = data / "chronos.db.archived-X"
+    archived.write_bytes(b"the pre-cutover store")
+    try:
+        refused = subprocess.run(
+            ["mv", "--update=none-fail", str(archived), str(sentinel)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.chmod(sentinel, 0o700)
+    assert refused.returncode == 1, refused
+    assert "Permission denied" in refused.stderr and "Is a directory" not in refused.stderr
+    assert f"{sentinel}/chronos.db.archived-X" in refused.stderr  # it aimed inside the directory
+    assert archived.read_bytes() == b"the pre-cutover store" and list(sentinel.iterdir()) == []
+
+
+def test_c1f_f5_the_dry_run_refuses_an_unprotected_restore_target_as_apply_does_and_creates_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F5 (P3): the dry run returned ``DRY_RUN`` before the ``--restore-into`` check, so a
+    ``/tmp`` target passed step 2 and only ``--apply`` refused it (S2-ctl vs S2-ctl-apply): a
+    clean dry run said nothing about the target. The dry run now runs the same read-only check
+    (``_require_protected_absent_target``) and refuses the same way, before anything exists."""
+
+    store = _store(tmp_path, binding="closed")
+    sticky = tmp_path / "sticky-world-writable"  # /tmp-style, made here (see test_5f for why)
+    sticky.mkdir()
+    os.chmod(sticky, 0o1777)
+    target = sticky / "verify"
+    before = _sha256(store.db)
+    argv = [
+        "--db",
+        str(store.db),
+        "--out",
+        str(tmp_path / "backups"),
+        "--restore-into",
+        str(target),
+    ]  # no --apply: the dry run
+    code = cutover.main(argv, clock=_clock(store.now))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2 and report["verdict"] == "REFUSED" and report["dry_run"] is True, report
+    assert report["code"] == "RESTORE_TARGET_NOT_PROTECTED", report
+    assert f"{sticky} is writable by its group or by others (mode 1777)" in report["failures"][0]
+    assert not target.exists() and not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+    # --apply refuses identically (the control the rehearsal had): one check, both modes
+    code = cutover.main([*argv, "--apply"], clock=_clock(store.now))
+    applied = json.loads(capsys.readouterr().out)
+    assert code == 2 and applied["code"] == "RESTORE_TARGET_NOT_PROTECTED", applied
+    assert applied["failures"] == report["failures"] and applied["dry_run"] is False
+    assert not target.exists() and not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+
+
+def test_c1f_f5_the_dry_run_refuses_a_restore_target_that_exists_and_leaves_it_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The leaf must be ABSENT (FIX-RT) — for the dry run too. It is read-only: the pre-existing
+    directory keeps its mode and stays empty; nothing under ``--out`` appears."""
+
+    store = _store(tmp_path, binding="closed")
+    target = tmp_path / "restored"  # where _run points --restore-into
+    target.mkdir()
+    os.chmod(target, 0o700)
+    before = _sha256(store.db)
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 2 and report["verdict"] == "REFUSED" and report["dry_run"] is True, report
+    assert report["code"] == "RESTORE_TARGET_NOT_FRESH", report
+    assert "must not exist" in report["failures"][0]
+    assert list(target.iterdir()) == [] and stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert not (tmp_path / "backups").exists()
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+
+
+def test_c1f_f5_the_module_and_the_runbook_say_the_dry_run_proves_the_restore_target() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step2 = _step(text, "2. **Dry-run", "3. **Apply")
+    assert "`RESTORE_TARGET_NOT_PROTECTED`" in step2 and "`RESTORE_TARGET_NOT_FRESH`" in step2
+    before = text[text.index("## Before you start") : text.index("## Steps")]
+    assert "dry run and `--apply` alike, before any envelope exists" in before
+    module = MODULE.read_text(encoding="utf-8")
+    assert "Gate → restore-target check → (dry-run stops here)" in module
+
+
+def test_c1f_f6_the_dry_run_s_next_steps_say_what_apply_will_do_not_what_it_did(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F6 (P3): the DRY_RUN report's ``next_manual_steps`` spoke in the past tense of an apply
+    ("this run removed the CLEARTEXT copy it verified…", "printed above") while its ``drill``
+    and ``envelope`` were null (S2-dryrun). A dry run's steps describe what ``--apply`` WILL do;
+    the apply report keeps the wording the N3-4 pin reads; the tense-free steps are shared."""
+
+    store = _store(tmp_path, binding="closed")
+    code, report = _run(store, tmp_path, capsys=capsys)
+    assert code == 0 and report["verdict"] == "DRY_RUN", report
+    assert report["drill"] is None and report["envelope"] is None
+    steps = report["next_manual_steps"]
+    assert len(steps) == 7, steps
+    assert steps[0].startswith("--apply will"), steps[0]
+    for step in steps:
+        assert "this run" not in step and "printed above" not in step, step
+        assert "above is true" not in step and "rm -r" not in step, step
+    assert "ls -ld" in steps[0] and str(tmp_path / "restored") in steps[0]
+    assert "--apply will" in steps[1] and "record" in steps[1]
+    assert any("rmdir" in step and "--apply will leave" in step for step in steps), steps
+    assert "--apply makes" in steps[6]
+    # the apply report says what it did, as test_n34_1 pins; the tense-free steps are the same
+    code, applied = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and applied["verdict"] == "ARCHIVED", applied
+    done = applied["next_manual_steps"]
+    assert len(done) == len(steps)
+    assert "this run removed" in done[0] and "restore_copy_removed" in done[0]
+    assert all("--apply will" not in step for step in done), done
+    assert done[2:4] == steps[2:4] and done[5] == steps[5]
+
+
+def test_c1f_f7_step_9_names_the_account_id_argument_and_where_its_value_comes_from(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F7 (P3): on a demo host ``mandate fingerprint`` without ``--account-id`` stops with
+    ``no account id available; pass --account-id or set IB_ACCOUNT_ID`` (S9a); with the demo
+    account id it prints the keyed value that equals the bound scope row (S9b). Step 9 names the
+    argument for both commands and where its value comes from on each broker; the premise is
+    re-measured in-process against the CLI."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step9 = _step(text, "9. **Re-author", "10. **Retention")
+    flat = " ".join(step9.split())
+    assert f"mandate fingerprint --account-id {DEMO_ACCOUNT_ID}" in flat
+    assert f"mandate check --file <mandate> --account-id {DEMO_ACCOUNT_ID}" in flat
+    assert "DEMO_ACCOUNT_ID" in step9 and "src/chronos/broker/demo.py" in step9
+    assert "IB_ACCOUNT_ID" in step9  # the IBKR-paper source, and what the bare command reads
+    assert "no account id available; pass --account-id or set IB_ACCOUNT_ID" in step9
+    assert "account-match" in step9 and "0 blocking" in step9 and "STATUS" in step9
+    # the premise: the bare command fails on a host without IB_ACCOUNT_ID; --account-id works
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", TEST_PERSISTENCE_KEY_HEX)
+    monkeypatch.delenv("IB_ACCOUNT_ID", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert cli_main(["mandate", "fingerprint"]) == 1
+        bare = capsys.readouterr().out
+        assert "no account id available; pass --account-id or set IB_ACCOUNT_ID" in bare
+        assert cli_main(["mandate", "fingerprint", "--account-id", DEMO_ACCOUNT_ID]) == 0
+        printed = capsys.readouterr().out.splitlines()
+    finally:
+        get_settings.cache_clear()
+    assert re.fullmatch(r"[0-9a-f]{64}", printed[0]), printed
+    assert printed[1].startswith("# derived from --account-id")
+    assert DEMO_ACCOUNT_ID not in printed[1]  # the id is masked, never echoed whole
+
+
+_ROLLBACK_FALLBACK = (
+    "ln -T data/chronos.db.archived-<stamp> data/chronos.db && rm data/chronos.db.archived-<stamp>"
+)
+
+
+def test_c1f_fix1_the_rollback_has_no_check_then_move_and_its_fallback_links_atomically(
+    tmp_path: Path,
+) -> None:
+    """kimi P1-2 (C1-F review): the older-coreutils fallback ``test ! -e … && mv …`` was a
+    check-then-move — a live name created between the test and the move is overwritten by the
+    plain ``mv`` (kimi's interleaving). The Rollback carries no check-then-move anywhere now: the
+    primary form stays ``mv --update=none-fail`` (one ``renameat2(RENAME_NOREPLACE)``) and the
+    fallback is ``ln -T <archived> <live> && rm <archived>`` — ``link(2)`` refuses an existing
+    name inside the one call, nothing is renamed or unlinked over the live name, ``-T`` refuses a
+    directory at the live name instead of linking inside it, and the ``&&`` keeps the archived
+    name on any refusal. Measured here with the runbook's own line."""
+
+    rollback = _rollback()
+    for check in ("test ! -e", "test -e", "[ ! -e", "[ -e", "-e data/chronos.db ]"):
+        assert check not in rollback, check
+    assert f"`{_ROLLBACK_FALLBACK}`" in rollback
+    assert "RENAME_NOREPLACE" in rollback and "link(2)" in rollback
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    line = _ROLLBACK_FALLBACK.replace("<stamp>", "X")
+    # kimi's interleaving: the live name exists by the time the operation runs — after any check
+    # it could have made — so the link refuses, the && keeps the archived name, nothing changes
+    live.write_bytes(b"fresh keyed store")
+    archived.write_bytes(b"the pre-cutover store")
+    refused = subprocess.run(
+        ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert refused.returncode != 0 and "exists" in refused.stderr.lower(), refused
+    assert live.read_bytes() == b"fresh keyed store"
+    assert archived.read_bytes() == b"the pre-cutover store"
+    # a sentinel directory at the live name: refused, never linked inside, archived name kept
+    live.unlink()
+    live.mkdir()
+    os.chmod(live, 0o500)
+    try:
+        sentinel = subprocess.run(
+            ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+        )
+    finally:
+        os.chmod(live, 0o700)
+    assert sentinel.returncode != 0, sentinel
+    assert list(live.iterdir()) == [] and archived.read_bytes() == b"the pre-cutover store"
+    # the live name free: linked, then the archived name removed — one file, the archived bytes
+    live.rmdir()
+    moved = subprocess.run(
+        ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert moved.returncode == 0 and moved.stderr == "", moved
+    assert sorted(entry.name for entry in data.iterdir()) == ["chronos.db"]
+    assert live.read_bytes() == b"the pre-cutover store"
+
+
+def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
+    tmp_path: Path,
+) -> None:
+    """Why neither rollback form can overwrite: on an occupied live name ``mv --update=none-fail``
+    issues ONE ``renameat2`` with ``RENAME_NOREPLACE`` and ``ln -T`` ONE ``link``/``linkat`` —
+    the kernel refuses the existing name inside that call (EEXIST) and neither issues a rename
+    or unlink of the live name, so there is no check a concurrent creator could race. Measured
+    with strace; skipped where strace or coreutils 9.5+ is absent."""
+
+    strace = shutil.which("strace")
+    if strace is None:
+        pytest.skip("strace is not on PATH")
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"--update=none-fail needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    live.write_bytes(b"fresh keyed store")
+    archived.write_bytes(b"the pre-cutover store")
+    calls = "trace=rename,renameat,renameat2,link,linkat,unlink,unlinkat"
+
+    def traced(*argv: str) -> list[str]:
+        trace = tmp_path / "trace"
+        subprocess.run(
+            [strace, "-f", "-qq", "-e", calls, "-o", str(trace), *argv],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return [
+            entry
+            for entry in trace.read_text(encoding="utf-8").splitlines()
+            if "chronos.db" in entry
+        ]
+
+    mv_calls = traced("mv", "--update=none-fail", str(archived), str(live))
+    assert len(mv_calls) == 1, mv_calls
+    assert "renameat2(" in mv_calls[0] and "RENAME_NOREPLACE" in mv_calls[0], mv_calls
+    assert "EEXIST" in mv_calls[0], mv_calls
+    ln_calls = traced("ln", "-T", str(archived), str(live))
+    assert len(ln_calls) == 1 and "link" in ln_calls[0] and "EEXIST" in ln_calls[0], ln_calls
+    assert live.read_bytes() == b"fresh keyed store"
+    assert archived.read_bytes() == b"the pre-cutover store"

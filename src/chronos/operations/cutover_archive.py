@@ -6,8 +6,10 @@ One command, owner-run, with every Chronos process stopped::
         --out /var/backups/chronos \\
         --restore-into /var/backups/chronos/n3-verify [--apply] [--pretty]
 
-Dry-run (the default) runs the gate below, prints what ``--apply`` would do, writes nothing
-to the store and creates no envelope. One directory effect is SQLite's, not the command's: a
+Dry-run (the default) runs the gate below, proves ``--restore-into`` by the same read-only
+check ``--apply`` uses (a protected chain, an absent leaf — a ``/tmp`` target is refused at the
+dry run, C1 F5), prints what ``--apply`` would do, writes nothing to the store and creates no
+envelope. One directory effect is SQLite's, not the command's: a
 read-only connection on a WAL-mode store leaves its reader bookkeeping beside it — an empty
 ``chronos.db-wal`` and a ``chronos.db-shm`` — and nothing else; ``--apply`` moves them aside
 with the store. ``--apply`` runs, in this order, each step a typed stop:
@@ -1425,29 +1427,78 @@ def _live_names_of(db_abs: Path) -> tuple[str, ...]:
 
 
 def _next_manual_steps(
-    restore_dir: str, schema_head_value: str, live_names: tuple[str, ...]
+    restore_dir: str,
+    schema_head_value: str,
+    live_names: tuple[str, ...],
+    *,
+    planned: bool = False,
 ) -> tuple[str, ...]:
+    """The runbook's manual steps after this report. ``planned`` is the dry run's: it says what
+    ``--apply`` WILL do (C1 F6 — a dry run's ``drill`` and ``envelope`` are null, so its steps
+    must not read as an apply that ran); otherwise the steps say what this run did. The steps
+    that carry no tense (the key, the escrow, the start) are the same in both."""
+
+    names = " ".join(live_names)
+    if planned:
+        copy = (
+            f"--apply will restore the archive into {restore_dir} to verify it, then remove that "
+            "CLEARTEXT copy and the directory before it prints its report (its "
+            "drill.restore_copy_removed will be true; drill.removed will name what went) — after "
+            f"--apply, `ls -ld {restore_dir}` must say no such file. Nothing of it will be left "
+            "for you to delete; this dry run created nothing there."
+        )
+        record = (
+            "--apply will print the envelope path, manifest_sha256 and ciphertext_sha256: record "
+            f"them in the cutover log ({RUNBOOK} step 3)."
+        )
+        vacate = (
+            "After --apply, vacate the live names YOURSELF, only when you are ready to start: "
+            f"rmdir {names} — the four sentinel directories --apply will leave; until your rmdir "
+            "the backend, db-preflight and any sqlite3 shell refuse them (a directory is not a "
+            "database), so nothing but your hand can create a fresh store there "
+            f"({RUNBOOK} step 7)."
+        )
+        retention = (
+            f"Retention: the envelope --apply makes is a pre-cutover backup ({schema_head_value}); "
+            "the pruner deletes it after 90 days. Keep the moved-aside files until you are "
+            "satisfied, then the same 90 days."
+        )
+    else:
+        copy = (
+            "Confirm the restore copy is gone: this run removed the CLEARTEXT copy it verified "
+            f"under {restore_dir}, and that directory, before printing this report "
+            "(drill.restore_copy_removed above is true; drill.removed names what went) — "
+            f"`ls -ld {restore_dir}` must say no such file. Nothing of it is left for you to "
+            "delete."
+        )
+        record = (
+            "Record the envelope path, manifest_sha256 and ciphertext_sha256 printed above in the "
+            f"cutover log ({RUNBOOK} step 3)."
+        )
+        vacate = (
+            "Vacate the live names YOURSELF, only when you are ready to start: rmdir "
+            f"{names} — the four sentinel directories this run left; until your rmdir "
+            "the backend, db-preflight and any sqlite3 shell refuse them (a directory is not a "
+            "database), so nothing but your hand can create a fresh store there "
+            f"({RUNBOOK} step 7)."
+        )
+        retention = (
+            f"Retention: the envelope is a pre-cutover backup ({schema_head_value}); the pruner "
+            "deletes it after 90 days. Keep the moved-aside files until you are satisfied, then "
+            "the same 90 days."
+        )
     return (
-        f"Confirm the restore copy is gone: this run removed the CLEARTEXT copy it verified under "
-        f"{restore_dir}, and that directory, before printing this report "
-        "(drill.restore_copy_removed above is true; drill.removed names what went) — "
-        f"`ls -ld {restore_dir}` must say no such file. Nothing of it is left for you to delete.",
-        "Record the envelope path, manifest_sha256 and ciphertext_sha256 printed above in the "
-        f"cutover log ({RUNBOOK} step 3).",
+        copy,
+        record,
         "Generate the persistence key YOURSELF: python -c 'import secrets; "
         "print(secrets.token_hex(32))' — paste it into the host's 0600 .env as "
         "CHRONOS_PERSISTENCE_KEY. Nobody and nothing else generates, sees or handles it.",
         "Age-encrypt ONE escrow copy of that key off-host to your recovery key "
         f"({RUNBOOK} step 6).",
-        "Vacate the live names YOURSELF, only when you are ready to start: rmdir "
-        f"{' '.join(live_names)} — the four sentinel directories this run left; until your rmdir "
-        "the backend, db-preflight and any sqlite3 shell refuse them (a directory is not a "
-        f"database), so nothing but your hand can create a fresh store there ({RUNBOOK} step 7).",
+        vacate,
         "Start the backend: a fresh database initializes at the running schema. Bind it. "
         "Re-author the mandate BEFORE the first start of autonomy (dated window = 0).",
-        f"Retention: the envelope is a pre-cutover backup ({schema_head_value}); the pruner "
-        "deletes it after 90 days. Keep the moved-aside files until you are satisfied, then "
-        "the same 90 days.",
+        retention,
     )
 
 
@@ -1460,7 +1511,8 @@ def archive(
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
 ) -> ArchiveReport:
-    """Gate → (dry-run stops here) → drill → VERIFIED required → move aside → report.
+    """Gate → restore-target check → (dry-run stops here) → drill → VERIFIED required → move
+    aside → report.
 
     Refusals BEFORE the drill raise :class:`CutoverRefused` (nothing exists); after the
     drill they are returned as reports that name the envelope (the drill's cleartext restore
@@ -1537,6 +1589,10 @@ def _archive_admitted(
 ) -> ArchiveReport:
     db_path = source.path
     _require_excluded(source, "after the gate")
+    # C1 F5: the restore target — a protected chain, the leaf absent (FIX-RT) — is proved HERE,
+    # dry run and --apply alike, read-only (nothing is created until --apply's _fresh_directory
+    # below), so a clean dry run also proves --restore-into and a /tmp target refuses at step 2
+    _require_protected_absent_target(restore_into)
     if not apply:
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
         out_abs = out_dir if out_dir.is_absolute() else Path.cwd() / out_dir
@@ -1562,15 +1618,14 @@ def _archive_admitted(
             schema_head=gate.schema_head,
             restore_dir=str(restore_into),
             next_manual_steps=_next_manual_steps(
-                str(restore_into), gate.schema_head, _live_names_of(db_abs)
+                str(restore_into), gate.schema_head, _live_names_of(db_abs), planned=True
             ),
         )
     try:
         # the drill's own rule, applied BEFORE the envelope exists: a reused --restore-into
         # would otherwise publish an envelope and then refuse the restore, leaving an orphan.
-        # FIX-RT: first a protected chain with the leaf absent; then the drill creates it 0700
-        # and verifies uid and mode by fstat
-        _require_protected_absent_target(restore_into)
+        # FIX-RT: the protected chain and the absent leaf were proved above; now the drill
+        # creates the leaf 0700 and verifies uid and mode by fstat
         for descriptor in _fresh_directory(restore_into, "restore target"):
             os.close(descriptor)
     except DrillRefused as error:

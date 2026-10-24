@@ -56,7 +56,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   - Its parent must be owned by you, and every directory from `/` down to it must be owned by
     root or by you, with no group or other write bit. This is the same rule as for `data/`
     below, and the same check. Use `ls -ld / /var /var/backups /var/backups/chronos`.
-  - The command refuses otherwise, before any envelope exists:
+  - The command refuses otherwise — dry run and `--apply` alike, before any envelope exists:
     - `RESTORE_TARGET_NOT_PROTECTED`: the chain, `/tmp` included;
     - `RESTORE_TARGET_NOT_FRESH`: the leaf already exists, empty or not.
   - A different name under `/tmp` is not a fix: any predictable name there can be prepared
@@ -119,10 +119,12 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    ```
    Run the `is-active` line twice, a few seconds apart. Both units `inactive`, or stop here.
 
-2. **Dry-run the command** (the default). It runs the whole gate, writes nothing to the store
-   and creates no envelope; its one directory effect is SQLite's reader bookkeeping beside a
-   WAL-mode store — an empty `chronos.db-wal` and a `chronos.db-shm` — which `--apply` later
-   moves aside with the store:
+2. **Dry-run the command** (the default). It runs the whole gate and the restore-target check
+   (`RESTORE_TARGET_NOT_PROTECTED`, `RESTORE_TARGET_NOT_FRESH` refuse the dry run exactly as
+   they refuse `--apply`, so a clean dry run also proves `--restore-into`; C1 F5), writes
+   nothing to the store and creates no envelope; its one directory effect is SQLite's
+   reader bookkeeping beside a WAL-mode store — an empty `chronos.db-wal` and a
+   `chronos.db-shm` — which `--apply` later moves aside with the store:
    ```bash
    BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
    python -m chronos.operations.cutover_archive \
@@ -158,8 +160,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    file for, `-journal` above all, got theirs by a plain `mkdir`). Until **your own `rmdir`** in
    step 7 nothing can put a store the gate never saw at those names: the backend, `db-preflight`
    and every Chronos writer refuse a directory (`Refusing non-regular SQLite path`) and create
-   nothing, a `sqlite3` shell gets `unable to open database file`, a `mv` over a directory gets
-   `Is a directory`. The command's process may exit; the sentinels stay. What `ls -la data/`
+   nothing, a `sqlite3` shell gets `unable to open database file`, and a `mv` onto a sentinel
+   aims inside the directory and gets `Permission denied` from its 0500 mode. The command's
+   process may exit; the sentinels stay. What `ls -la data/`
    must show now: the four sentinel directories (`dr-x------`), the three `.archived-<stamp>`
    files, and the siblings that were there before (`keys/`, the audit pair, locks, logs).
    Anything else — a file at a live name, a missing sentinel — **stop here** and find out what
@@ -359,16 +362,82 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
    chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
-8. **Bind.** The first bound run writes the `database_scope` row with the KEYED fingerprint;
-   confirm the scope line of `python -m chronos.cli b1-preflight` (or the operator CLI you use
-   for the account scope) reports the bound scope and no refusal.
+8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
+   `database_scope` row with the KEYED fingerprint. The proof is one comparison: the fingerprint
+   computed from `<checkout>/.env`'s key ALONE — the key you escrowed in step 6; never the
+   shell's, never the unit's — against the bound row. On an IBKR-paper host that is the scope
+   line of `python -m chronos.cli b1-preflight`, which reads the file and nothing else:
+   `CLEAR [scope] already bound to this paper account`. On a demo host `b1-preflight` cannot
+   give it — it refuses before its scope line, and its scope CLEAR is `ibkr`/`paper` by
+   construction (`b1_preflight.py:564`; C1 F1) — so make the same comparison from `<checkout>`
+   with a command that reads the key from the FILE by construction and never asks the process
+   environment. The `sqlite3` line reads the row. The `python` line reads `.env` with the
+   loader's own `dotenv_values`, takes the one exact `CHRONOS_PERSISTENCE_KEY=` line — `STOP`
+   when it is missing, doubled or present in another form — and prints the fingerprint through
+   the repo's `account_fingerprint`; it never prints the key. It reads the file LITERALLY
+   (`interpolate=False`): a value written as `${VAR}` stays the text `${VAR}` and fails the
+   64-hex check, instead of becoming whatever the environment holds under that name, which is
+   what `dotenv_values` does by default (C1-F fix round 2, kimi delta r1 P2-1):
+   ```bash
+   sqlite3 "file:data/chronos.db?mode=ro" "SELECT broker_mode, environment, account_fingerprint FROM database_scope"
+   python -I -c '
+   import re, sys
+   from dotenv import dotenv_values
+   from chronos.utils.identifiers import PersistenceKey, account_fingerprint
+   try:
+       lines = open(".env", encoding="utf-8").read().splitlines()
+   except FileNotFoundError:
+       sys.exit("STOP: no .env here; run this from <checkout>, where step 5 wrote it. Delete nothing.")
+   named = [l for l in lines if re.match(r"\s*(export\s+)?chronos_persistence_key\s*=", l, re.I)]
+   if len(named) != 1 or not named[0].startswith("CHRONOS_PERSISTENCE_KEY="):
+       sys.exit(f"STOP: {len(named)} line(s) name the key in .env; want exactly one, in the exact form (step 5). Delete nothing.")
+   try:
+       key = PersistenceKey.from_hex(dotenv_values(".env", interpolate=False)["CHRONOS_PERSISTENCE_KEY"])
+   except (KeyError, TypeError, ValueError):
+       sys.exit("STOP: the key line is not CHRONOS_PERSISTENCE_KEY=<64 lowercase hex> (step 5). Delete nothing.")
+   print(account_fingerprint(sys.argv[1], key=key))
+   ' DU1234567
+   ```
+   `python -I` runs isolated — no `PYTHON*` variables, no user site, no cwd on the import path,
+   so a file dropped in the checkout root cannot shadow `dotenv` or `chronos` — and the command
+   reads no environment variable at all, so a value set by a shell, by a unit, or by Python
+   startup code cannot enter it (an `env -i` form did not close that last path: a `.pth` or
+   `sitecustomize` can set the key after `env` emptied the environment, and `Settings` prefers
+   it; C1-F fix round 1, kimi P1-1). Trust root, stated: the checkout's venv and source are the
+   code the backend itself runs — a hostile `.pth` or `sitecustomize` in that venv is outside
+   what any runbook check can defend, and this step depends on the process environment not at
+   all. Expect exactly one row, `demo|DEMO|<64 hex>`, and the SAME 64 hex from the `python` line.
+   A line beginning `STOP:` means `.env` is not one exact `CHRONOS_PERSISTENCE_KEY=<64 hex>`
+   line — or is not in this directory at all: fix the file (step 5), run from `<checkout>`, and
+   delete nothing. The account id is the one the backend bound: on the demo
+   broker `DEMO_ACCOUNT_ID` = `DU1234567` (`src/chronos/broker/demo.py`; a demo host has no
+   `IB_ACCOUNT_ID`, so the argument is required); on IBKR paper your `IB_ACCOUNT_ID`.
+   **A mismatch right after the first start — a different 64 hex, or `b1-preflight`'s
+   `REFUSE [scope] this database is already bound to a different broker scope` — means the
+   backend bound under a key other than the escrowed one**: a second key source reached the
+   unit (step 5's one-home check names every place to look). Stop the backend; remove the extra
+   source; re-archive the fresh store by hand — move `data/chronos.db` and its `-wal`/`-shm`
+   aside by name; it was bound under the wrong key and holds nothing worth keeping — then start
+   again and repeat this step. Never change `DATABASE_URL`: a new URL leaves a store bound under
+   a key nobody escrowed (that REFUSE text's "choose a new absolute DATABASE_URL" is wrong for
+   this case; a follow-up fixes the message). No row, a second row, or a different value:
+   stop; the store is not bound to the scope you think.
 
 9. **Re-author the mandate BEFORE the first start of autonomy — dated window = 0.** The
-   mandate's `account_fingerprint` must be the keyed value (`python -m chronos.cli mandate
-   fingerprint` prints it from the configured key; `mandate check` compares). Its
+   mandate's `account_fingerprint` must be the keyed value:
+   `python -m chronos.cli mandate fingerprint --account-id DU1234567` prints it from the
+   configured key. The argument is required on a demo host: without it the command reads
+   `IB_ACCOUNT_ID` from settings, which a demo host does not set, and stops with
+   `no account id available; pass --account-id or set IB_ACCOUNT_ID` (C1 F7). Its value is the
+   account the backend bound in step 8: `DEMO_ACCOUNT_ID` = `DU1234567` on the demo broker
+   (`src/chronos/broker/demo.py`), your `IB_ACCOUNT_ID` on IBKR paper (there the argument may be
+   left out). Write the printed value into the mandate's `account_fingerprint`; its
    `effective_from` is the first instant anything accepts the keyed value; nothing accepts the
-   old value at any time, so there is no window to close. Only then start the worker and enable
-   autonomy per the shadow-campaign runbook.
+   old value at any time, so there is no window to close. Then
+   `python -m chronos.cli mandate check --file <mandate> --account-id DU1234567` (the same id)
+   must print `STATUS             VALID`, `[NOTE] account-match` and a SUMMARY line that begins
+   `0 blocking` — a BLOCKING `account-mismatch` means the old fingerprint is still in the file.
+   Only then start the worker and enable autonomy per the shadow-campaign runbook.
 
 10. **Retention — 90 days.** The envelope under `--out` is a pre-cutover backup (its manifest
     says `schema_version:17`); the pruner deletes it after 90 days, as the ruling says. Run
@@ -386,12 +455,34 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal` (and any
   sentinel the report's `sentinels` lists at an `.archived-<stamp>` name after a refusal); if
   the backend already ran, the fresh keyed `chronos.db` sits at the live name instead and you
-  are in the next bullet; then rename the moved-aside files back by name —
-  `mv -n data/chronos.db.archived-<stamp> data/chronos.db` and the same for the `-wal`/`-shm`
-  siblings that were moved — check out the pre-cutover code (`git checkout <pre-cutover sha>`,
-  the sha you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by
-  design); start. `mv -n` refuses if the live name exists (a sentinel still there says so with
-  `Is a directory`); never force it.
+  are in the next bullet; then rename the moved-aside files back by name, with the form that
+  REFUSES an occupied live name out loud —
+  `mv --update=none-fail data/chronos.db.archived-<stamp> data/chronos.db` and the same for the
+  `-wal`/`-shm` siblings that were moved. GNU coreutils 9.5 or newer (`mv --version`; the
+  rehearsal host runs 9.7): on an occupied name it prints `mv: not replacing 'data/chronos.db'`,
+  exits 1 and moves nothing. Never `mv -n`: measured on 9.7 it declines an occupied name
+  SILENTLY with exit 0, so a rollback onto a keyed `chronos.db` the backend already created
+  looks done and is not (C1 F3). An older coreutils rejects the flag itself (`invalid argument`,
+  exit 1, nothing moved); there — and never with a check-then-move, which a live name created
+  between the check and the move would defeat — link the archived file to the live name and
+  remove the archived name only after the link succeeded:
+  `ln -T data/chronos.db.archived-<stamp> data/chronos.db && rm data/chronos.db.archived-<stamp>`
+  and the same for `-wal`/`-shm`. `link(2)` refuses an existing name inside the one call
+  (`Already exists`, exit 1, nothing changed): nothing is renamed or unlinked over the live
+  name, so a store that appeared there a moment earlier is never overwritten; `-T` makes a
+  directory at the live name a refusal too, never a link inside it; the two names share
+  `data/`, one filesystem. Both forms are one no-clobber kernel call each — on an occupied name
+  `mv --update=none-fail` issues a single `renameat2(RENAME_NOREPLACE)` and `ln -T` a single
+  `link(2)`, measured with strace (C1-F fix round 1, kimi P1-2). Then
+  **check**: `ls -la data/` must show no `.archived-<stamp>` name and the three regular files at
+  the live names; a `not replacing` or `Already exists` line means a live name was occupied —
+  stop and look before anything else. Then check out the pre-cutover code (`git checkout
+  <pre-cutover sha>`, the sha
+  you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by design);
+  start. The move refuses if the live name exists; a sentinel still there says
+  `mv: cannot move 'data/chronos.db.archived-<stamp>' to
+  'data/chronos.db/chronos.db.archived-<stamp>': Permission denied` — `mv` aims inside the
+  directory and its 0500 mode refuses (C1 F4); `rmdir` the sentinel first. Never force it.
 - **After new rows exist in the keyed store:** going back drops them. Decide that explicitly;
   the archive and the moved-aside files restore the pre-cutover state at any time, with the
   pre-cutover code.

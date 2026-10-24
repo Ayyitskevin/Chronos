@@ -25,8 +25,11 @@ SCHEMA_VERSION = 18
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "
-    "`alembic upgrade head` (see alembic.ini); a drifted or unversioned schema cannot — "
-    "configure a fresh DATABASE_URL instead. Chronos never modifies such a database itself."
+    "`alembic upgrade head` (see alembic.ini) — except a store bound before N3 (schema 17 with a "
+    "database_scope row), which migration 0017 refuses by design: archive it and start a fresh "
+    "keyed store following docs/ops/N3-CUTOVER.md. A drifted or unversioned schema cannot be "
+    "upgraded — configure a fresh DATABASE_URL instead. Chronos never modifies such a database "
+    "itself."
 )
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 #: Session.info slot that carries the persistence key a database was bound under (N3).
