@@ -1737,7 +1737,7 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
 
 
 def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_verifies_it(
-    tmp_path: Path,
+    tmp_path: Path, age_keys: KeyMaterial
 ) -> None:
     """Daybreak r3 P1-2, the exact counterexample and its generalisation. A retired store the gate
     refuses (no reconciliation run) gets an envelope through the PUBLIC ``backup``; then the
@@ -1765,6 +1765,23 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
         envelope = Path(manifest.backup_path).parent
         restored = drill.restore(manifest, tmp_path / "restored-once")
         assert not restored.verified and restored.acceptance == "repository"
+        # N3-4: the drill removed that copy and its directory; the pool below needs a cleartext
+        # copy of the refused store at that path — the by-hand decrypt (the runbook's step 4)
+        assert AGE is not None and not Path(restored.target_dir).exists()
+        Path(restored.target_dir).mkdir(0o700)
+        subprocess.run(
+            [
+                AGE,
+                "-d",
+                "-i",
+                str(age_keys.identity),
+                "-o",
+                str(Path(restored.target_dir) / drill.DB_NAME),
+                manifest.backup_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
         counter = itertools.count()
 
         def fresh(prefix: str) -> Path:

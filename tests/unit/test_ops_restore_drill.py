@@ -858,9 +858,14 @@ def test_r1_3c_destination_directories_are_fsynced(
     manifest = backup(db, tmp_path / "out")
     assert os.stat(tmp_path / "out").st_ino in synced_dirs, "the backup directory was not fsynced"
     synced_dirs.clear()
+    # N3-4: the target is gone when restore() returns; its inode is read at the instant the
+    # removal begins, and the parent must be fsynced after the rmdir
+    target_ino: list[int] = []
+    _before_removal(monkeypatch, lambda t: target_ino.append(os.stat(t).st_ino))
     restore(manifest, tmp_path / "restored")
-    assert os.stat(tmp_path / "restored").st_ino in synced_dirs, (
-        "the restore target was not fsynced"
+    assert target_ino and target_ino[0] in synced_dirs, "the restore target was not fsynced"
+    assert synced_dirs and synced_dirs[-1] == os.stat(tmp_path).st_ino, (
+        "the parent was not fsynced after the target's removal"
     )
 
 
@@ -2126,12 +2131,18 @@ def test_t3_1a_a_descriptor_to_the_copied_inode_is_held_through_the_acceptance_c
         return real_check(dfd, name, identity)
 
     monkeypatch.setattr(drill, "_entry_is_real_file", observing_check)
+    identity: list[tuple[int, int]] = []
+
+    def remember(t: Path) -> None:  # N3-4: read at the instant the removal begins
+        st = os.stat(t / "chronos.db")
+        identity.append((st.st_dev, st.st_ino))
+
+    _before_removal(monkeypatch, remember)
     report = restore(manifest, target)
     assert report.verified, report.failures
     assert seen == [1, 1], seen  # exactly one descriptor, at both comparisons
     # and none after restore() returns: the held descriptor is closed in a finally
-    copy = os.stat(target / "chronos.db")
-    assert _descriptors_to((copy.st_dev, copy.st_ino)) == []
+    assert identity and _descriptors_to(identity[0]) == []
 
 
 def test_t3_1b_a_fresh_file_planted_at_the_name_during_the_acceptance_check_is_never_verified(
@@ -2558,7 +2569,9 @@ def test_n34_2c_a_different_inode_at_the_copy_s_name_is_never_removed(
         and "not the copy this drill verified" in f
         for f in report.failures
     ), report.failures
-    assert any("still holds aside, chronos.db" in f for f in report.failures), report.failures
+    assert any("still holds aside, which this run did not write" in f for f in report.failures), (
+        report.failures
+    )
 
 
 def test_n34_2d_the_runbook_states_the_self_cleaning_and_its_typed_failure() -> None:
