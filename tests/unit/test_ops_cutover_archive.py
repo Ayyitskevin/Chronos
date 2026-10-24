@@ -1043,7 +1043,7 @@ def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps(
     assert c1f in banner_flat, "the banner must carry the C1-F condition"
     assert "K-20261023-002" in banner and "K-20261023-003" in banner  # Kevin's two rulings
     assert "K-20261024-001" in banner  # the ruling that admitted C1-F
-    assert "all five" in banner_flat and "If any of them prints nothing" in banner_flat
+    assert "all six" in banner_flat and "If any of them prints nothing" in banner_flat
     # the two original checks stay
     for old in (
         "git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py",
@@ -1062,12 +1062,33 @@ def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps(
         assert f"`git grep -n '{pattern}' origin/main -- {path}`" in banner_flat, (path, pattern)
         regex = re.compile(pattern, re.MULTILINE)
         assert regex.search((ROOT / path).read_text(encoding="utf-8")), (path, pattern)
-    # the C1-F check: the rollback's atomic-link fallback, which only the fix round introduces.
-    # It reads the runbook itself, so the bracket keeps the banner's own text from matching it.
-    c1f_path, c1f_pattern = "docs/ops/N3-CUTOVER.md", "ln -[T] data/chronos.db.archived-"
-    assert f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`" in banner_flat
-    assert re.search(c1f_pattern, text), "the C1-F marker must match the fixed rollback"
-    assert not re.search(c1f_pattern, banner), "the banner's own text must not satisfy its marker"
+    # the C1-F checks: two independent markers in the runbook, one per reviewed fix. Each reads the
+    # runbook itself, so a bracket keeps the banner's own text from matching it. The rollback marker
+    # is the atomic-link fallback (fix round 1); the step-8 marker is the literal `.env` read (fix
+    # round 2). A half-landed C1-F (one fix without the other) must fail at least one of them.
+    c1f_path = "docs/ops/N3-CUTOVER.md"
+    c1f_patterns = (
+        "ln -[T] data/chronos.db.archived-",
+        'dotenv_values(".env", interpolate=[F]alse)',
+    )
+    for c1f_pattern in c1f_patterns:
+        assert f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`" in banner_flat, c1f_pattern
+        assert re.search(c1f_pattern, text), "a C1-F marker must match the fixed runbook"
+        assert not re.search(c1f_pattern, banner), "the banner's own text must not satisfy its marker"
+
+    def clears(runbook: str) -> bool:
+        """Would every runbook-targeted grep in the banner print something on this runbook text?"""
+        return all(re.search(pat, runbook) for pat in c1f_patterns)
+
+    assert clears(text)
+    # the half-landed mutants: the rollback fix without step 8's literal read (fix round 1's step 8,
+    # and the original `env -i` form), and step 8 fixed with the rollback fix missing
+    no_literal = text.replace('dotenv_values(".env", interpolate=False)', 'dotenv_values(".env")')
+    assert no_literal != text and not clears(no_literal)
+    env_i = no_literal.replace("python -I -c '", "env -i python -c '")
+    assert env_i != no_literal and not clears(env_i)
+    no_link = text.replace("ln -T data/chronos.db.archived-", "mv data/chronos.db.archived-")
+    assert no_link != text and not clears(no_link)
     assert not re.search(r"<[^>\n]*(marker|ruling)[^>\n]*>", text), "an unfilled placeholder"
     # both echoes say the same, and both still point at the STOP
     before = flat[flat.index("## Before you start") : flat.index("## Steps")]
