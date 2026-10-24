@@ -212,8 +212,15 @@ def gather(config: WorkerConfig, client: httpx.Client) -> EvidenceSnapshot | Non
     headers = {TOKEN_HEADER: config.api_token}
     payload: dict[str, Any] = {}
     try:
-        payload["account"] = _read(client, config.backend_url, "/account/summary", headers)
-        payload["positions"] = _read(client, config.backend_url, "/account/positions", headers)
+        payload["account"] = _project_fact(
+            _read(client, config.backend_url, "/account/summary", headers), ACCOUNT_FACT_FIELDS
+        )
+        raw_positions = _read(client, config.backend_url, "/account/positions", headers)
+        if not isinstance(raw_positions, list):
+            raise _EvidenceUnavailable("/account/positions: not a list")
+        payload["positions"] = [
+            _project_fact(position, POSITION_FACT_FIELDS) for position in raw_positions
+        ]
         payload["open_orders"] = _read(client, config.backend_url, "/orders", headers)
         bars: dict[str, Any] = {}
         for symbol in config.symbols:
@@ -238,6 +245,35 @@ def gather(config: WorkerConfig, client: httpx.Client) -> EvidenceSnapshot | Non
         digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         as_of=as_of,
     )
+
+
+#: The only account and position fields the snapshot (and so the prompt) may carry. The raw
+#: broker ``account_id`` is not among them: account identity reaches a model only as a
+#: pseudonymous fingerprint, and the worker holds no key to derive one. Restated, not imported
+#: (the worker imports nothing from ``chronos``); pinned equal to the backend's lists by
+#: ``tests/safety/test_served_evidence_redaction.py``.
+ACCOUNT_FACT_FIELDS: tuple[str, ...] = (
+    "net_liquidation",
+    "total_cash",
+    "buying_power",
+    "currency",
+    "as_of",
+)
+POSITION_FACT_FIELDS: tuple[str, ...] = (
+    "contract",
+    "quantity",
+    "average_cost",
+    "market_price",
+    "unrealized_pnl",
+)
+
+
+def _project_fact(fact: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    """The named fields of one fetched fact, and nothing else; a non-object is unavailable."""
+
+    if not isinstance(fact, dict):
+        raise _EvidenceUnavailable("account fact: not an object")
+    return {name: fact[name] for name in fields if name in fact}
 
 
 class _EvidenceUnavailable(RuntimeError):
