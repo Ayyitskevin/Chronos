@@ -1578,6 +1578,16 @@ def test_7p_the_process_environment_beats_the_dotenv_file_case_insensitively(
     monkeypatch.setenv("chronos_persistence_key", in_environment)
     loaded = Settings(_env_file=dotenv).chronos_persistence_key
     assert loaded is not None and loaded.get_secret_value() == in_environment
+    # inside the dotenv file a later second form of the name wins over the exact line the
+    # step-6 compare reads — why the check also counts every line that names the key
+    monkeypatch.delenv("chronos_persistence_key")
+    for second in (
+        f"chronos_persistence_key={in_environment}",
+        f"export CHRONOS_PERSISTENCE_KEY={in_environment}",
+    ):
+        dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={in_file}\n{second}\n", encoding="utf-8")
+        loaded = Settings(_env_file=dotenv).chronos_persistence_key
+        assert loaded is not None and loaded.get_secret_value() == in_environment, second
 
 
 def _run_one_home_check(
@@ -1674,6 +1684,26 @@ _FIX1_OTHER = _hex("b2-fix1 TEST other key — never a real one")
                     "dotenv": (
                         f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\nCHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"
                     ),
+                },
+                False,
+            ),
+            (
+                "exact-line-plus-a-lower-case-line-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+                        f"chronos_persistence_key={_FIX1_OTHER}\n"
+                    )
+                },
+                False,
+            ),
+            (
+                "exact-line-plus-an-export-line-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+                        f"export CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"
+                    )
                 },
                 False,
             ),
