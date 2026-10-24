@@ -34,10 +34,15 @@ if [ "$base" != "$main" ]; then
 fi
 # D-32 (#270 at df4a960): GitHub keeps baseRefOid equal to the live base tip, so the check above
 # passes for any open PR after a merge. The checked-out head must also CONTAIN origin/main.
-# Replacement refs, grafts and commit-graph acceleration are all disabled for this decision (a
-# forged commit-graph in the lane or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store can rewrite
-# parent edges), so the ancestry is read from the commit objects themselves; any merge-base
-# failure other than "not an ancestor" is its own named FAIL.
+# Replacement refs, grafts and commit-graph acceleration are all disabled for this decision, so
+# none of them can rewrite the parent edges it walks: not a refs/replace entry, not an info/grafts
+# line, and not a forged commit-graph in the lane or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store.
+# That closes graph forgery, not object forgery. The lane's refs and the commit objects as stored
+# are trusted (D-39, Kevin 2026-09-30: accepted as a stated boundary, no integrity check added).
+# Git does not re-hash an object when the walk parses it, and this gate verifies no object hash,
+# so a forged commit object under a valid name in the lane's object store, or in an alternate
+# store the lane reads, still fakes the answer.
+# Any merge-base failure other than "not an ancestor" is its own named FAIL.
 if ! head="$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" || [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
   echo "FAIL: base-fresh — could not resolve the checked-out HEAD commit; check the checkout, then re-run" >&2
   exit 1
