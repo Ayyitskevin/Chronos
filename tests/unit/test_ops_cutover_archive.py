@@ -4452,11 +4452,38 @@ def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
 #: the last schema-17 commit on main: the first parent of #309's merge (N3-1 brought schema 18)
 _LAST_SCHEMA17_MAIN = "8093176"
 _SCHEMA18_MERGE = "f0a3446"
-#: "Before you start"'s check that the recorded rollback commit is schema-17 code
-_SCHEMA17_CHECK = (
+#: "Before you start"'s check that the recorded rollback commit is schema-17 code: it parses the
+#: file and never runs it, and prints the line only for ONE plain top-level ``= 17`` (fix round 1)
+_SCHEMA17_CHECK = """\
+git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
+import ast, sys
+tree = ast.parse(sys.stdin.buffer.read())
+name = "SCHEMA_VERSION"
+sets = [  # every node that may set it: bind, delete, import, name it in a string, import *
+    n for n in ast.walk(tree)
+    if name in (getattr(n, "id", None), getattr(n, "attr", None))
+    and not isinstance(n.ctx, ast.Load)
+    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "rest", None))
+    or name in getattr(n, "names", ())
+    or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+    or isinstance(n, ast.alias) and n.name == "*"
+]
+top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
+if len(top) != 1:
+    sys.exit(f"STOP: {len(sets)} place(s) may set SCHEMA_VERSION, not one plain assignment.")
+value = top[0].value
+if not (isinstance(value, ast.Constant) and type(value.value) is int and value.value == 17):
+    sys.exit(f"STOP: SCHEMA_VERSION = {ast.unparse(value)}, not 17.")
+print("SCHEMA_VERSION = 17")
+'
+"""
+#: the 10486a9 form (kimi C1R-F HOLD P1): it tests that one LINE is present, not the value the
+#: module ends with, so ``SCHEMA_VERSION = 17`` then ``SCHEMA_VERSION = 18`` passed it
+_SCHEMA17_LINE_CHECK = (
     "git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py"
     " | grep -x 'SCHEMA_VERSION = 17'"
 )
+_DATABASE_PY = "src/chronos/persistence/database.py"
 #: the pre-C1R-F instruction: HEAD of a checkout this page requires to be post-N3 already
 _N1_OLD_RECORD = (
     "Write down the pre-cutover commit of the running code before you change anything — the "
@@ -4466,6 +4493,23 @@ _N1_OLD_RECORD = (
 
 def _section(text: str, start: str, end: str) -> str:
     return " ".join(text[text.index(start) : text.index(end)].split())
+
+
+def _schema17_checks(runbook: str) -> list[str]:
+    """Every rollback-commit check under "Before you start", as an operator copies it: each
+    fenced ``bash`` block dedented as a renderer shows it, and each inline ``git -C <checkout>
+    show <pre-cutover sha>:…`` span (the 10486a9 form, so a revert to it is still found and run)."""
+
+    before = runbook[runbook.index("## Before you start") : runbook.index("## Steps")]
+    fenced = re.findall(r"^( *)```bash\n(.*?)^\1```$", before, re.S | re.M)
+    inline = re.findall(r"`(git -C <checkout> show <pre-cutover sha>:[^`]*)`", before)
+    return [textwrap.dedent(block) for _, block in fenced] + inline
+
+
+def _the_runbook_s_schema17_check() -> str:
+    checks = _schema17_checks(RUNBOOK.read_text(encoding="utf-8"))
+    assert len(checks) == 1, checks
+    return checks[0]
 
 
 def _n1_offences(runbook: str) -> list[str]:
@@ -4483,10 +4527,19 @@ def _n1_offences(runbook: str) -> list[str]:
         "`git -C <checkout> reflog` shows just before the deploy.",
         f"If you cannot establish it, use `{_LAST_SCHEMA17_MAIN}`, the last schema-17 commit on "
         f"main (`{_SCHEMA18_MERGE}^1`, the first parent of the merge that brought schema 18).",
-        "Then check it — this must print exactly `SCHEMA_VERSION = 17`; if it prints nothing, "
-        f"that commit is not the rollback code, so stop: `{_SCHEMA17_CHECK}`",
+        "Then check it. The check parses that commit's `database.py` with `ast` and never "
+        "imports or runs it: it prints `SCHEMA_VERSION = 17` only when the file sets "
+        "`SCHEMA_VERSION` in exactly one place, a plain top-level assignment of 17.",
+        "Two assignments, an annotated or augmented one, a binding anywhere else, a string that "
+        "names it, or a `*` import each print a line beginning `STOP:` instead (C1R-F fix round "
+        "1, kimi P1).",
+        "This must print exactly one line, `SCHEMA_VERSION = 17`; anything else — a `STOP:` "
+        "line, an error, or nothing — means that commit is not the rollback code, so stop:",
     )
     offences = [f"Before you start lacks: {w}" for w in wanted_before if w not in before]
+    checks = _schema17_checks(runbook)
+    if checks != [_SCHEMA17_CHECK]:
+        offences.append(f"Before you start's check is not exactly the pinned one: {checks!r}")
     if _N1_OLD_RECORD in before:
         offences.append("Before you start still records the post-N3 HEAD as the rollback commit")
     wanted_rollback = (
@@ -4510,10 +4563,15 @@ def test_c1rf_n1_the_rollback_commit_is_the_pre_deploy_schema_17_one_and_is_chec
     assert _n1_offences(text) == []
     # negative controls: the check removed, the fallback removed, the old record restored, the
     # Rollback's pointer back to "the sha you wrote down before step 1" — each is caught
-    flat_check = f"`{_SCHEMA17_CHECK}`"
-    raw_check = next(line for line in text.splitlines() if "grep -x 'SCHEMA_VERSION = 17'" in line)
-    no_check = text.replace(raw_check, "")
-    assert no_check != text and any(flat_check in o for o in _n1_offences(no_check))
+    block = "  ```bash\n" + textwrap.indent(_SCHEMA17_CHECK, "  ") + "  ```\n"
+    assert text.count(block) == 1
+    no_check = _n1_offences(text.replace(block, ""))
+    assert no_check == ["Before you start's check is not exactly the pinned one: []"]
+    # the 10486a9 one-liner back in its place (kimi P1) is found, and is not the pinned check
+    line_check = _n1_offences(text.replace(block, f"  `{_SCHEMA17_LINE_CHECK}`\n"))
+    assert line_check == [
+        f"Before you start's check is not exactly the pinned one: {[_SCHEMA17_LINE_CHECK]!r}"
+    ]
     no_fallback = text.replace(f"`{_LAST_SCHEMA17_MAIN}`", "`<a commit>`")
     assert no_fallback != text and _n1_offences(no_fallback)
     old = _n1_offences(text.replace("## Steps", f"- {_N1_OLD_RECORD}\n\n## Steps", 1))
@@ -4527,12 +4585,36 @@ def _git(*argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_c1rf_n1_measured_the_check_passes_the_fallback_and_refuses_the_post_n3_code() -> None:
+def _python_on_path(tmp_path: Path) -> dict[str, str]:
+    """The environment for a pasted check: ``python`` on PATH is this test's interpreter."""
+
+    shim = tmp_path / "bin" / "python"
+    if not shim.exists():
+        shim.parent.mkdir()
+        shim.symlink_to(sys.executable)
+    return {**os.environ, "PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def _run_schema17_check(
+    command: str, checkout: Path, sha: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """``command`` exactly as the runbook gives it, ``<checkout>`` and ``<pre-cutover sha>``
+    filled in the way the operator fills them."""
+
+    line = command.replace("<checkout>", str(checkout)).replace("<pre-cutover sha>", sha)
+    return subprocess.run(
+        ["bash", "-c", line], capture_output=True, text=True, check=False, env=env
+    )
+
+
+def test_c1rf_n1_measured_the_check_passes_the_fallback_and_refuses_the_post_n3_code(
+    tmp_path: Path,
+) -> None:
     """The runbook's own check, run against this repository's history: it prints exactly
-    ``SCHEMA_VERSION = 17`` for 8093176 (the named fallback) and nothing, exit 1, for this tree's
-    HEAD (post-N3, schema 18) and for #309's merge. 8093176 is that merge's first parent, so it
-    is the last schema-17 commit on main's first-parent line. Independent of the check, git
-    itself shows the two SCHEMA_VERSION lines."""
+    ``SCHEMA_VERSION = 17`` for 8093176 (the named fallback) and nothing on stdout, exit 1, and a
+    ``STOP:`` line on stderr, for this tree's HEAD (post-N3, schema 18) and for #309's merge.
+    8093176 is that merge's first parent, so it is the last schema-17 commit on main's
+    first-parent line. Independent of the check, git itself shows the two SCHEMA_VERSION lines."""
 
     head = _git("rev-parse", "HEAD").stdout.strip()
     assert _git("rev-parse", f"{_SCHEMA18_MERGE}^1").stdout == (
@@ -4546,15 +4628,153 @@ def test_c1rf_n1_measured_the_check_passes_the_fallback_and_refuses_the_post_n3_
     }
     assert versions == {_LAST_SCHEMA17_MAIN: ["17"], _SCHEMA18_MERGE: ["18"], head: ["18"]}
 
+    command, env = _the_runbook_s_schema17_check(), _python_on_path(tmp_path)
+
     def check(sha: str) -> subprocess.CompletedProcess[str]:
-        line = _SCHEMA17_CHECK.replace("<checkout>", str(ROOT)).replace("<pre-cutover sha>", sha)
-        return subprocess.run(["bash", "-c", line], capture_output=True, text=True, check=False)
+        return _run_schema17_check(command, ROOT, sha, env)
 
     passed = check(_LAST_SCHEMA17_MAIN)
     assert (passed.returncode, passed.stdout) == (0, "SCHEMA_VERSION = 17\n"), passed
     for refused_sha in (head, _SCHEMA18_MERGE):
         refused = check(refused_sha)
         assert (refused.returncode, refused.stdout) == (1, ""), (refused_sha, refused)
+        assert refused.stderr == "STOP: SCHEMA_VERSION = 18, not 17.\n", (refused_sha, refused)
+
+
+_TEXT_OUT: dict[str, Any] = {"capture_output": True, "text": True, "check": True}
+
+
+def _synthetic_checkout(tmp_path: Path, *sources: str | None) -> tuple[Path, list[str]]:
+    """A throwaway repository with one commit per source: ``database.py`` holds that source, or
+    is absent for ``None``. Returns the repository and the commit shas, in order."""
+
+    repo = tmp_path / "checkout"
+    git = ("git", "-C", str(repo), "-c", "user.name=Chronos Test")
+    git += ("-c", "user.email=chronos-test@example.invalid", "-c", "commit.gpgsign=false")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    target = repo / _DATABASE_PY
+    shas = []
+    for number, source in enumerate(sources):
+        if source is None:
+            target.unlink(missing_ok=True)
+            (repo / "README").write_text(f"commit {number}\n", encoding="utf-8")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source, encoding="utf-8")
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "--no-verify", "-m", f"c{number}"], check=True)
+        shas.append(subprocess.run([*git, "rev-parse", "HEAD"], **_TEXT_OUT).stdout.strip())
+    return repo, shas
+
+
+#: (base commit, the one exact text replaced — None appends —, the replacement, accepted?)
+_SCHEMA17_VARIANTS: dict[str, tuple[str, str | None, str, bool]] = {
+    # kimi's negative control: a schema-18 module that still carries the schema-17 line
+    "kimi_dual_17_then_18": (
+        "HEAD",
+        "SCHEMA_VERSION = 18\n",
+        "SCHEMA_VERSION = 17\nSCHEMA_VERSION = 18\n",
+        False,
+    ),
+    "annotated_18": ("HEAD", "SCHEMA_VERSION = 18\n", "SCHEMA_VERSION: int = 18\n", False),
+    "no_space_18": ("HEAD", "SCHEMA_VERSION = 18\n", "SCHEMA_VERSION=18\n", False),
+    # fail closed: 17, but not in the one plain form the check reads
+    "annotated_17": (
+        _LAST_SCHEMA17_MAIN,
+        "SCHEMA_VERSION = 17\n",
+        "SCHEMA_VERSION: int = 17\n",
+        False,
+    ),
+    "17_then_rebound_inside_an_if": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "if True:\n    SCHEMA_VERSION = 18\n",
+        False,
+    ),
+    "17_then_augmented": (_LAST_SCHEMA17_MAIN, None, "SCHEMA_VERSION += 1\n", False),
+    "17_then_set_through_a_string": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'globals()["SCHEMA_VERSION"] = 18\n',
+        False,
+    ),
+    "17_then_a_star_import": (_LAST_SCHEMA17_MAIN, None, "from os.path import *\n", False),
+    # accepted: the fallback's own bytes, and the same value without the spaces
+    "8093176_unchanged": (_LAST_SCHEMA17_MAIN, None, "", True),
+    "no_space_17": (_LAST_SCHEMA17_MAIN, "SCHEMA_VERSION = 17\n", "SCHEMA_VERSION=17\n", True),
+}
+
+
+def _variant(base: str, old: str | None, new: str) -> str:
+    source = _git("show", f"{base}:{_DATABASE_PY}").stdout
+    assert source.count("\nSCHEMA_VERSION = ") == 1, base
+    if old is None:
+        return source + new
+    assert source.count(old) == 1, (base, old)
+    return source.replace(old, new)
+
+
+@pytest.mark.parametrize("variant", list(_SCHEMA17_VARIANTS))
+def test_c1rf_fix1_n1_the_check_reads_the_effective_value_and_stops_on_an_ambiguous_one(
+    tmp_path: Path, variant: str
+) -> None:
+    """kimi C1R-F HOLD P1: the 10486a9 check (``… | grep -x 'SCHEMA_VERSION = 17'``) tested that
+    one line was present, so a schema-18 commit that ALSO carried that line passed it, and the
+    Rollback would start code that refuses the restored schema-17 store. The runbook's check,
+    run verbatim on a synthetic commit of each variant, prints ``SCHEMA_VERSION = 17`` (rc 0,
+    nothing on stderr) only for one plain top-level assignment of 17; every other variant
+    prints nothing on stdout, a ``STOP:`` line on stderr, and exits non-zero."""
+
+    base, old, new, accepted = _SCHEMA17_VARIANTS[variant]
+    repo, (sha,) = _synthetic_checkout(tmp_path, _variant(base, old, new))
+    result = _run_schema17_check(
+        _the_runbook_s_schema17_check(), repo, sha, _python_on_path(tmp_path)
+    )
+    if accepted:
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "SCHEMA_VERSION = 17\n",
+            "",
+        ), result
+    else:
+        assert result.returncode != 0 and result.stdout == "", result
+        assert result.stderr.startswith("STOP: ") and result.stderr.count("\n") == 1, result
+
+
+def test_c1rf_fix1_n1_control_the_10486a9_line_check_passed_kimi_s_dual_assignment(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the variant test: the synthetic dual-assignment commit really is
+    the P1 — the 10486a9 one-liner prints ``SCHEMA_VERSION = 17``, rc 0, for it — and that
+    commit's module really ends at 18 (git shows the two lines; the last one wins)."""
+
+    repo, (sha,) = _synthetic_checkout(
+        tmp_path, _variant(*_SCHEMA17_VARIANTS["kimi_dual_17_then_18"][:3])
+    )
+    shown = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{sha}:{_DATABASE_PY}"], **_TEXT_OUT
+    ).stdout
+    assert re.findall(r"^SCHEMA_VERSION = (\d+)$", shown, re.M) == ["17", "18"]
+    old = _run_schema17_check(_SCHEMA17_LINE_CHECK, repo, sha, _python_on_path(tmp_path))
+    assert (old.returncode, old.stdout) == (0, "SCHEMA_VERSION = 17\n"), old
+
+
+def test_c1rf_fix1_n1_the_check_stops_on_a_bad_sha_and_a_missing_path(tmp_path: Path) -> None:
+    """The check fails closed when git has nothing to show: a sha that names no commit, and a
+    commit without ``database.py``. Each prints nothing on stdout, git's own ``fatal:`` line and
+    a ``STOP:`` line on stderr, and exits non-zero; the commit that has the fallback's bytes, in
+    the same repository, passes (so the refusals are not the harness)."""
+
+    fallback = _git("show", f"{_LAST_SCHEMA17_MAIN}:{_DATABASE_PY}").stdout
+    repo, (with_file, without_file) = _synthetic_checkout(tmp_path, fallback, None)
+    command, env = _the_runbook_s_schema17_check(), _python_on_path(tmp_path)
+    passed = _run_schema17_check(command, repo, with_file, env)
+    assert (passed.returncode, passed.stdout, passed.stderr) == (0, "SCHEMA_VERSION = 17\n", "")
+    for sha in ("0" * 40, without_file):
+        refused = _run_schema17_check(command, repo, sha, env)
+        assert refused.returncode != 0 and refused.stdout == "", (sha, refused)
+        lines = refused.stderr.splitlines()
+        assert lines[0].startswith("fatal: ") and lines[-1].startswith("STOP: "), (sha, refused)
 
 
 def _fence_offences(text: str) -> list[str]:
