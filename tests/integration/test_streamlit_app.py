@@ -246,7 +246,7 @@ def test_explicit_candidate_evaluation_renders_locked_eligible_and_clears_stale_
         assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
         assert _CANDIDATE_EVALUATION_STATE_KEY in app.session_state
         assert "DU1234567" not in str(app)
-        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in str(app.session_state.to_dict())
 
         app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL"]
@@ -391,7 +391,7 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         assert all("USD" in value for value in scenario_table["Modeled expiration P&L"])
         assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
         assert "DU1234567" not in str(app)
-        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in str(app.session_state.to_dict())
         assert any("historical display only" in caption.value for caption in app.caption)
         assert any("EDT" in caption.value for caption in app.caption)
 
@@ -552,7 +552,7 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
         assert set(what_if_table["Submission"]) == {"LOCKED"}
         assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
         assert "DU1234567" not in str(app)
-        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in str(app.session_state.to_dict())
         assert "DU1234567" not in (tmp_path / "chronos.log").read_text(encoding="utf-8")
         assert not any(
             "confirm" in button.label.lower() or "submit" in button.label.lower()
@@ -866,7 +866,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert not app.text_input
         assert not app.checkbox
         assert "DU1234567" not in str(app)
-        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in str(app.session_state.to_dict())
         assert "DU1234567" not in (tmp_path / "chronos.log").read_text(encoding="utf-8")
         assert not any(
             "confirm" in button.label.lower() or "submit" in button.label.lower()
@@ -1163,7 +1163,7 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
         )
         assert any("failed refresh was cleared" in caption.value for caption in app.caption)
         assert "DU1234567" not in str(app)
-        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in str(app.session_state.to_dict())
 
         app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
