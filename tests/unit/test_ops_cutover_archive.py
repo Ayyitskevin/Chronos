@@ -1071,14 +1071,17 @@ def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps(
         "ln -[T] data/chronos.db.archived-",
         'dotenv_values(".env", interpolate=[F]alse)',
     )
+    # git grep's default regex is basic: a parenthesis is literal. Python's is extended.
+    rx = {pat: pat.replace("(", r"\(").replace(")", r"\)") for pat in c1f_patterns}
     for c1f_pattern in c1f_patterns:
-        assert f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`" in banner_flat, c1f_pattern
-        assert re.search(c1f_pattern, text), "a C1-F marker must match the fixed runbook"
-        assert not re.search(c1f_pattern, banner), "the banner's own text must not satisfy its marker"
+        grep_line = f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`"
+        assert grep_line in banner_flat, c1f_pattern
+        assert re.search(rx[c1f_pattern], text), "a C1-F marker must match the fixed runbook"
+        assert not re.search(rx[c1f_pattern], banner), "the banner must not satisfy its own marker"
 
     def clears(runbook: str) -> bool:
         """Would every runbook-targeted grep in the banner print something on this runbook text?"""
-        return all(re.search(pat, runbook) for pat in c1f_patterns)
+        return all(re.search(rx[pat], runbook) for pat in c1f_patterns)
 
     assert clears(text)
     # the half-landed mutants: the rollback fix without step 8's literal read (fix round 1's step 8,

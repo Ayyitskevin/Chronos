@@ -15,7 +15,7 @@
 >   check could take the key from the environment, not only from the file, and that the
 >   rollback's fallback was a check-then-move that could overwrite a live name. C1-F fixes both
 >   in this runbook; until it has merged, the steps below still carry those defects.
-> - **How to check, on the host's checkout:** first refresh `origin/main`, then all five
+> - **How to check, on the host's checkout:** first refresh `origin/main`, then all six
 >   `git grep` commands must print something and exit zero. They read the current tip, so a later
 >   removal or revert shows as a failure; a `git log -- <path>` would still print history.
 >   - `git fetch origin main`
@@ -27,7 +27,9 @@
 >   - `git grep -n 'recipient = restore_drill.KEVIN_RECOVERY_RECIPIENT' origin/main -- src/chronos/operations/persistence_key_escrow.py`
 >     (escrow)
 >   - `git grep -n 'ln -[T] data/chronos.db.archived-' origin/main -- docs/ops/N3-CUTOVER.md`
->     (C1-F; the bracket keeps this line from matching itself)
+>     (C1-F, the rollback fix; the bracket keeps this line from matching itself)
+>   - `git grep -n 'dotenv_values(".env", interpolate=[F]alse)' origin/main -- docs/ops/N3-CUTOVER.md`
+>     (C1-F, step 8's literal `.env` read; a landed C1-F has both, a half-landed one fails this check or the one above)
 > - **If any of them prints nothing or exits non-zero,** stop here. This notice is removed
 >   only by a reviewed change, once all of them have merged.
 
