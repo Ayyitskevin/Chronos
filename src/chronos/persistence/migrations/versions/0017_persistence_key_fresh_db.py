@@ -30,7 +30,7 @@ branch_labels = None
 depends_on = None
 
 _SCHEMA_VERSION = 18
-#: Written by N3-2 (the archive and cutover procedure); forthcoming until that slice lands.
+#: The archive and cutover procedure (N3-2).
 _ARCHIVE_RUNBOOK = "docs/ops/N3-CUTOVER.md"
 
 
@@ -43,7 +43,7 @@ def upgrade() -> None:
                 "Refusing schema 18: this database has a database_scope row, so its account "
                 "fingerprints are the pre-N3 unkeyed values and cannot be re-keyed in place. "
                 "Nothing was changed. Archive it and start a fresh keyed database following "
-                f"{_ARCHIVE_RUNBOOK} (forthcoming: the N3-2 cutover runbook)."
+                f"{_ARCHIVE_RUNBOOK} (the N3 cutover runbook)."
             )
     bind.execute(
         sa.insert(schema.SchemaVersionRow).values(
