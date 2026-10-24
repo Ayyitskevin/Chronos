@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import copy
+import errno
 import hashlib
 import inspect
 import io
@@ -3213,3 +3214,107 @@ def test_12e_the_move_never_re_walks_the_path_by_name() -> None:
     source = MODULE.read_text(encoding="utf-8")
     assert "_walk_directory" not in source
     assert "dir_fd=protected.leaf_fd" in source  # the source open, relative to the held leaf
+
+
+# ------------------------------------------------------------- N3-4: the drill's copy is gone
+# Kevin's ruling K-20261023-002 (P2-4 option B): the verify copy under --restore-into does not
+# outlive the command. The drill removes it through the descriptors it held; the command reports
+# it (``drill.restore_copy_removed``, ``drill.removed``) and, when the drill could not, refuses
+# before anything moves — the envelope stays and is named.
+
+
+def _refuse_removal_unlink_once(monkeypatch: pytest.MonkeyPatch, target: Path) -> list[str]:
+    """``os.unlink`` as the drill sees it refuses ``chronos.db`` (EPERM) the first time its
+    ``dir_fd`` designates ``target`` — the removal's own unlink; everything else, the rpo scratch
+    included, keeps working. Returns the list the refusal is recorded in."""
+
+    real_unlink = os.unlink
+    refused: list[str] = []
+
+    def unlink(path: str, *, dir_fd: int | None = None) -> None:
+        if dir_fd is not None and path == "chronos.db" and not refused and target.exists():
+            held, by_path = os.fstat(dir_fd), os.stat(target)
+            if (held.st_dev, held.st_ino) == (by_path.st_dev, by_path.st_ino):
+                refused.append(path)
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(drill.os, "unlink", unlink)
+    return refused
+
+
+def test_n34_1_apply_leaves_no_restore_copy_and_the_report_and_the_next_steps_say_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    monkeypatch.setattr(socket, "socket", _NoSocket)  # no broker, no network: proven, not said
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    assert report["drill"]["verdict"] == "ARCHIVE_VERIFIED"
+    assert report["drill"]["restore_copy_removed"] is True
+    assert report["drill"]["removed"] == ["chronos.db"]  # no audit pair travels with this store
+    assert report["restore_dir"] == str(tmp_path / "restored")  # where it was
+    assert not (tmp_path / "restored").exists()
+    assert Path(report["envelope"]).is_dir()  # the envelope stays
+    first = report["next_manual_steps"][0]
+    assert "restore_copy_removed" in first and "ls -ld" in first
+    assert not any("rm -r" in step for step in report["next_manual_steps"])
+
+
+def test_n34_2_a_copy_the_drill_could_not_remove_refuses_typed_before_anything_moves(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    before = _sha256(store.db)
+    target = tmp_path / "restored"
+    refused = _refuse_removal_unlink_once(monkeypatch, target)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert refused == ["chronos.db"]
+    assert code == 2 and report["verdict"] == "REFUSED", report
+    assert report["code"] == "RESTORE_COPY_NOT_REMOVED"
+    assert len(report["failures"]) == 1
+    assert report["failures"][0].startswith("drill: RESTORE_COPY_NOT_REMOVED: chronos.db")
+    # the archive is good and named, the drill's verifiers passed, the copy is still there
+    assert Path(report["envelope"]).is_dir() and report["manifest_sha256"]
+    assert report["drill"]["acceptance"] == f"archive:schema_version:{SCHEMA_VERSION - 1}"
+    assert report["drill"]["restore_copy_removed"] is False and report["drill"]["removed"] == []
+    assert sorted(p.name for p in target.iterdir()) == ["chronos.db"]
+    # nothing moved, no sentinel, the live store untouched
+    assert report["moved_aside"] == [] and report["sentinels"] == []
+    _assert_only_reader_bookkeeping(store, ["chronos.db"], before)
+    # the runbook's instruction: remove the copy by hand, re-run — the next run makes a new
+    # envelope and stamp, the leaf being absent again
+    shutil.rmtree(target)
+    later = store.now + timedelta(minutes=1)
+    argv = [
+        "--db",
+        str(store.db),
+        "--out",
+        str(tmp_path / "backups"),
+        "--restore-into",
+        str(target),
+        "--apply",
+    ]
+    code = cutover.main(argv, clock=_clock(later))
+    again = json.loads(capsys.readouterr().out)
+    assert code == 0 and again["verdict"] == "ARCHIVED", again
+    assert again["drill"]["restore_copy_removed"] is True and not target.exists()
+    envelopes = sorted(
+        p.name for p in (tmp_path / "backups").iterdir() if not p.name.startswith(".")
+    )
+    assert len(envelopes) == 2 and Path(report["envelope"]).name in envelopes
+
+
+def test_n34_3_the_cutover_runbook_confirms_the_removal_instead_of_asking_for_an_rm() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    steps = text.split("## Steps", 1)[1]
+    step4 = steps.split("\n4. **", 1)[1].split("\n5. **", 1)[0]
+    assert "restore_copy_removed" in step4 and "ls -ld /var/backups/chronos/n3-verify" in step4
+    assert "rm -r /var/backups/chronos/n3-verify" not in step4
+    assert "the command never deletes" not in step4
+    assert "`RESTORE_COPY_NOT_REMOVED`" in steps  # step 3's bullet and the refusal table
+    table = text.split("## What the gate's refusal codes mean", 1)[1]
+    assert "| `RESTORE_COPY_NOT_REMOVED` |" in table
+    # the "Before you start" rule says the copy is removed before the report
+    before = text.split("## Before you start", 1)[1].split("## Steps", 1)[0]
+    assert "restore_copy_removed" in before
