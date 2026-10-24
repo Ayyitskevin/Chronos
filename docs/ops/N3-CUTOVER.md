@@ -359,9 +359,35 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
    chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
-8. **Bind.** The first bound run writes the `database_scope` row with the KEYED fingerprint;
-   confirm the scope line of `python -m chronos.cli b1-preflight` (or the operator CLI you use
-   for the account scope) reports the bound scope and no refusal.
+8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
+   `database_scope` row with the KEYED fingerprint. The proof is one comparison: the fingerprint
+   computed from `<checkout>/.env`'s key ALONE — the key you escrowed in step 6; never the
+   shell's, never the unit's — against the bound row. On an IBKR-paper host that is the scope
+   line of `python -m chronos.cli b1-preflight`, which reads the file and nothing else:
+   `CLEAR [scope] already bound to this paper account`. On a demo host `b1-preflight` cannot
+   give it — it refuses before its scope line, and its scope CLEAR is `ibkr`/`paper` by
+   construction (`b1_preflight.py:564`; C1 F1) — so run the same comparison from two existing
+   commands, from `<checkout>`, with the file as the only key source:
+   ```bash
+   sqlite3 "file:data/chronos.db?mode=ro" "SELECT broker_mode, environment, account_fingerprint FROM database_scope"
+   env -i BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false "$(command -v python)" -m chronos.cli mandate fingerprint --account-id DU1234567
+   ```
+   `env -i` empties the environment, so `mandate fingerprint` has exactly one key source left:
+   the `.env` in the cwd (`settings.py:101-102`, `env_file=".env"`) — the file the step-6
+   compare read. Expect exactly one row, `demo|DEMO|<64 hex>`, and the SAME 64 hex as the first
+   line the second command prints. The account id is the one the backend bound: on the demo
+   broker `DEMO_ACCOUNT_ID` = `DU1234567` (`src/chronos/broker/demo.py`; a demo host has no
+   `IB_ACCOUNT_ID`, so the argument is required); on IBKR paper your `IB_ACCOUNT_ID`.
+   **A mismatch right after the first start — a different 64 hex, or `b1-preflight`'s
+   `REFUSE [scope] this database is already bound to a different broker scope` — means the
+   backend bound under a key other than the escrowed one**: a second key source reached the
+   unit (step 5's one-home check names every place to look). Stop the backend; remove the extra
+   source; re-archive the fresh store by hand — move `data/chronos.db` and its `-wal`/`-shm`
+   aside by name; it was bound under the wrong key and holds nothing worth keeping — then start
+   again and repeat this step. Never change `DATABASE_URL`: a new URL leaves a store bound under
+   a key nobody escrowed (that REFUSE text's "choose a new absolute DATABASE_URL" is wrong for
+   this case; a follow-up fixes the message). No row, a second row, or a different value:
+   stop; the store is not bound to the scope you think.
 
 9. **Re-author the mandate BEFORE the first start of autonomy — dated window = 0.** The
    mandate's `account_fingerprint` must be the keyed value (`python -m chronos.cli mandate
