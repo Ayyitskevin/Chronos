@@ -3912,35 +3912,68 @@ def test_c1f_f3_measured_the_chosen_mv_form_refuses_an_occupied_live_name_and_th
     assert live.read_bytes() == b"the pre-cutover store" and not archived.exists()
 
 
-def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_alone_on_the_host_it_runs_on(
-    tmp_path: Path,
-) -> None:
-    """C1 F1 (P2) under the code owner's constraint (out/KEYSRC-ASSESS.md §3): step 8 is the
-    end-to-end proof that the store bound under the ESCROWED key — the fingerprint computed from
-    ``<checkout>/.env``'s key alone, compared with the bound ``database_scope`` row. On a demo
-    host ``b1-preflight`` cannot give it: it refuses before its scope line (S8), and its scope
-    CLEAR is ``("ibkr", "paper", …)`` by construction (``b1_preflight.py:564``), so even its scope
-    line alone reads REFUSE against a demo-bound store whatever the key. Step 8 therefore composes
-    two existing commands with the file as the only key source: ``env -i`` strips every shell
-    source before ``mandate fingerprint --account-id``, whose settings then read the key from the
-    cwd's ``.env`` (``settings.py:101-102``) and nothing else; ``sqlite3`` reads the row. No "or
-    the operator CLI you use" (§3 weakness 1); a mismatch right after the first start is named
-    for what it is — bound under a key other than the escrowed one — with the one remedy (§3
-    weakness 3)."""
+def _step8() -> tuple[str, str]:
+    """Step 8's text and its one ```bash block."""
 
     step8 = _step(RUNBOOK.read_text(encoding="utf-8"), "8. **Bind", "9. **")
-    assert "or the operator CLI you use" not in step8
     blocks = re.findall(r"```bash\n(.*?)```", step8, re.S)
     assert len(blocks) == 1, "step 8 carries one check block"
-    block = blocks[0]
+    # the fence sits inside a numbered list, so the raw lines carry the list's indent; a reader
+    # copies the rendered block, which is dedented (the one-home pin reads step 5 the same way)
+    return step8, textwrap.dedent(blocks[0])
+
+
+def _step8_fingerprint_body(*, dotenv_name: str) -> str:
+    """The body of step 8's ``python -I -c '…' DU1234567`` line, with the runbook's ``.env``
+    renamed to ``dotenv_name`` (no test creates a ``.env``) and this tree's ``src`` put first on
+    the import path (``-I`` ignores PYTHONPATH; the venv's editable install may point elsewhere).
+    Nothing else changes: the key handling under test is the runbook's own."""
+
+    block = _step8()[1]
+    match = re.search(r"python -I -c '(.*?)' " + re.escape(DEMO_ACCOUNT_ID), block, re.S)
+    assert match, block
+    body = match.group(1)
+    assert body.count('".env"') == 2, body
+    body = body.replace('".env"', f'"{dotenv_name}"')
+    return f"import sys; sys.path.insert(0, {str(ROOT / 'src')!r})\n" + body
+
+
+def _run_step8_fingerprint(
+    cwd: Path, *, isolated: bool, env: dict[str, str], dotenv_name: str = "dotenv-format"
+) -> subprocess.CompletedProcess[str]:
+    argv = [sys.executable, *(["-I"] if isolated else []), "-c"]
+    argv += [_step8_fingerprint_body(dotenv_name=dotenv_name), DEMO_ACCOUNT_ID]
+    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+
+
+def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_by_construction(tmp_path: Path) -> None:
+    """C1 F1 (P2) under the code owner's constraint (out/KEYSRC-ASSESS.md §3) and kimi's P1-1
+    (C1-F review): step 8 is the end-to-end proof that the store bound under the ESCROWED key —
+    the fingerprint computed from ``<checkout>/.env``'s key alone, compared with the bound
+    ``database_scope`` row. On a demo host ``b1-preflight`` cannot give it (it refuses before its
+    scope line, and its scope CLEAR is ``("ibkr", "paper", …)`` by construction,
+    ``b1_preflight.py:564``). ``env -i`` was not a file-only proof either: Python startup code
+    (a ``.pth``, ``sitecustomize``) can set the key in the process environment AFTER ``env`` has
+    emptied it, and Settings then prefers that value (kimi's counterexample). So step 8's demo
+    check reads the file BY CONSTRUCTION: a ``python -I -c`` command over the repo's own
+    functions that loads ``.env`` with ``dotenv_values``, takes the one exact
+    ``CHRONOS_PERSISTENCE_KEY=`` line, computes ``account_fingerprint`` and never consults the
+    environment. The runbook states the trust root (the checkout's venv and source are the code
+    the backend runs). No "or the operator CLI you use"; a mismatch after the first start is named
+    for what it is with the one remedy."""
+
+    step8, block = _step8()
+    assert "or the operator CLI you use" not in step8
     assert "mode=ro" in block and "FROM database_scope" in block
-    assert "env -i " in block and f"mandate fingerprint --account-id {DEMO_ACCOUNT_ID}" in block
-    assert "CHRONOS_PERSISTENCE_KEY" not in block  # the key is never passed in: the file is it
-    assert "b1-preflight" not in block  # on a demo host it is not the check: REFUSE by design
+    assert "python -I -c" in block and "dotenv_values" in block and "account_fingerprint(" in block
+    assert "CHRONOS_PERSISTENCE_KEY=" in block and "STOP" in block
+    for shell_source in ("env -i", "mandate fingerprint", "b1-preflight", "os.environ", "getenv"):
+        assert shell_source not in block, shell_source
     assert "CLEAR [scope] already bound to this paper account" in step8  # the IBKR-paper check
     assert "DEMO_ACCOUNT_ID" in step8 and "src/chronos/broker/demo.py" in step8
     assert "IB_ACCOUNT_ID" in step8
     flat = " ".join(step8.split())
+    assert ".pth" in flat and "sitecustomize" in flat and "process environment" in flat
     assert "bound under a key other than the escrowed one" in flat
     assert "remove the extra source" in flat and "re-archive the fresh store" in flat
     assert "Never change `DATABASE_URL`" in flat
@@ -3963,41 +3996,72 @@ def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_alone_on_the_host_it_ru
         assert completed.returncode == 0 and completed.stdout.startswith("demo|"), completed
 
 
-def test_c1f_f1_measured_env_i_leaves_mandate_fingerprint_no_key_source_but_the_cwd_dotenv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_c1f_f1_the_step_8_fingerprint_comes_from_the_file_whatever_the_environment_holds(
+    tmp_path: Path,
 ) -> None:
-    """The premise of step 8's form: with the shell's environment stripped (``env -i``) and no
-    ``.env`` in the cwd, ``mandate fingerprint`` has no key at all even though this process
-    exports one — so no shell source reaches it; with a key supplied inside ``env -i`` the
-    pseudonym is the library's. The dotenv leg — Settings reads the key from the cwd's ``.env``
-    when the environment holds none — is test_7p's first assertion (a dotenv-format file; no
-    test ever creates a ``.env``)."""
+    """kimi P1-1's counterexample, pinned: a key set in the process environment — by the shell,
+    or by Python startup code after ``env -i`` — must not change the fingerprint step 8 prints.
+    (1) ``-I`` and an exported other key: the file's fingerprint. (2) The exact startup vector
+    kimi used, a ``sitecustomize`` that sets the key (here on PYTHONPATH, without ``-I``, since no
+    test may write into the venv's site-packages): still the file's fingerprint — while the OLD
+    form (``mandate fingerprint``) under the same injection prints the INJECTED key's, the hole.
+    (3) STOP cases: no key line, a doubled line, a second form, a malformed value — exit 1,
+    "STOP" on stderr, nothing on stdout, and the key never printed."""
 
-    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", _hex("c1f: the operator shell's exported key"))
-    cwd = tmp_path / "checkout-without-dotenv"
-    cwd.mkdir()
-    command = [
-        "env",
-        "-i",
-        *(f"{name}={value}" for name, value in SAFE_ENV.items()),
-        f"PYTHONPATH={ROOT / 'src'}",
-        sys.executable,
-        "-m",
-        "chronos.cli",
-        "mandate",
-        "fingerprint",
-        "--account-id",
-        DEMO_ACCOUNT_ID,
-    ]
-    stripped = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
-    assert stripped.returncode == 1, stripped
-    assert "no persistence key available" in stripped.stdout, stripped
-    file_key = _hex("c1f: the key the .env would hold — never a real key")
-    supplied = [*command[:2], f"CHRONOS_PERSISTENCE_KEY={file_key}", *command[2:]]
-    with_key = subprocess.run(supplied, cwd=cwd, capture_output=True, text=True, check=False)
-    assert with_key.returncode == 0, with_key
+    file_key = _hex("c1f-fix1: the key the .env holds — never a real key")
+    other_key = _hex("c1f-fix1: a key injected into the process environment — never real")
     expected = account_fingerprint(DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(file_key))
-    assert with_key.stdout.splitlines()[0] == expected
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    dotenv = checkout / "dotenv-format"  # never a .env: the file the command is pointed at
+    dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={file_key}\n", encoding="utf-8")
+    base_env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CHRONOS_")}
+    base_env.update(SAFE_ENV)
+    # (1) the shell exports another key; -I; the printed fingerprint is the FILE's
+    exported = _run_step8_fingerprint(
+        checkout, isolated=True, env={**base_env, "CHRONOS_PERSISTENCE_KEY": other_key}
+    )
+    assert exported.returncode == 0, exported
+    assert exported.stdout.splitlines() == [expected], exported
+    # (2) kimi's vector: startup code sets the key after the environment was emptied
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        f'import os\nos.environ["CHRONOS_PERSISTENCE_KEY"] = "{other_key}"\n', encoding="utf-8"
+    )
+    injected_env = {**base_env, "PYTHONPATH": f"{site}{os.pathsep}{ROOT / 'src'}"}
+    injected = _run_step8_fingerprint(checkout, isolated=False, env=injected_env)
+    assert injected.returncode == 0 and injected.stdout.splitlines() == [expected], injected
+    old_argv = [sys.executable, "-m", "chronos.cli", "mandate", "fingerprint"]
+    old_argv += ["--account-id", DEMO_ACCOUNT_ID]
+    old_form = subprocess.run(  # the control: the form the review broke takes the injected key
+        old_argv,
+        cwd=checkout,
+        env=injected_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert old_form.returncode == 0, old_form
+    assert old_form.stdout.splitlines()[0] == account_fingerprint(
+        DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(other_key)
+    )
+    # (3) STOP cases — exit 1, STOP on stderr, nothing printed, the key never echoed
+    stops = {
+        "missing": "OTHER=1\n",
+        "doubled": f"CHRONOS_PERSISTENCE_KEY={file_key}\nCHRONOS_PERSISTENCE_KEY={file_key}\n",
+        "second-form": (
+            f"CHRONOS_PERSISTENCE_KEY={file_key}\nexport CHRONOS_PERSISTENCE_KEY={other_key}\n"
+        ),
+        "lower-case": f"CHRONOS_PERSISTENCE_KEY={file_key}\nchronos_persistence_key={other_key}\n",
+        "malformed": f"CHRONOS_PERSISTENCE_KEY={file_key[:63]}\n",
+    }
+    for case, text in stops.items():
+        dotenv.write_text(text, encoding="utf-8")
+        stopped = _run_step8_fingerprint(checkout, isolated=True, env=base_env)
+        assert stopped.returncode == 1, (case, stopped)
+        assert stopped.stdout == "" and stopped.stderr.startswith("STOP"), (case, stopped)
+        assert file_key[:20] not in stopped.stderr and other_key[:20] not in stopped.stderr, case
 
 
 def test_c1f_f4_the_sentinel_refusal_wording_matches_what_mv_prints(tmp_path: Path) -> None:
