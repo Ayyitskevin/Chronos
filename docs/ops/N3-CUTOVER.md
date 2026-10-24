@@ -158,8 +158,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    file for, `-journal` above all, got theirs by a plain `mkdir`). Until **your own `rmdir`** in
    step 7 nothing can put a store the gate never saw at those names: the backend, `db-preflight`
    and every Chronos writer refuse a directory (`Refusing non-regular SQLite path`) and create
-   nothing, a `sqlite3` shell gets `unable to open database file`, a `mv` over a directory gets
-   `Is a directory`. The command's process may exit; the sentinels stay. What `ls -la data/`
+   nothing, a `sqlite3` shell gets `unable to open database file`, and a `mv` onto a sentinel
+   aims inside the directory and gets `Permission denied` from its 0500 mode. The command's
+   process may exit; the sentinels stay. What `ls -la data/`
    must show now: the four sentinel directories (`dr-x------`), the three `.archived-<stamp>`
    files, and the siblings that were there before (`keys/`, the audit pair, locks, logs).
    Anything else — a file at a live name, a missing sentinel — **stop here** and find out what
@@ -426,8 +427,10 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   the live names; a `not replacing` line means a live name was occupied — stop and look before
   anything else. Then check out the pre-cutover code (`git checkout <pre-cutover sha>`, the sha
   you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by design);
-  start. The move refuses if the live name exists (a sentinel still there says so with
-  `Is a directory`); never force it.
+  start. The move refuses if the live name exists; a sentinel still there says
+  `mv: cannot move 'data/chronos.db.archived-<stamp>' to
+  'data/chronos.db/chronos.db.archived-<stamp>': Permission denied` — `mv` aims inside the
+  directory and its 0500 mode refuses (C1 F4); `rmdir` the sentinel first. Never force it.
 - **After new rows exist in the keyed store:** going back drops them. Decide that explicitly;
   the archive and the moved-aside files restore the pre-cutover state at any time, with the
   pre-cutover code.
