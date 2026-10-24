@@ -1904,9 +1904,16 @@ def _remove_restore_copy(
         return failures, tuple(removed)
     try:
         os.rmdir(staged.leaf, dir_fd=staged.parent_fd)
-        os.fsync(staged.parent_fd)
     except OSError as error:
         failures.append(f"{code}: {where}: {error.strerror}; the emptied directory remains")
+        return failures, tuple(removed)
+    try:
+        os.fsync(staged.parent_fd)
+    except OSError as error:  # the directory IS gone; only its durability is unproven (Kimi P3-1)
+        failures.append(
+            f"{code}: {where} was removed, but the parent directory's fsync failed "
+            f"({error.strerror}); the removal is not proven durable"
+        )
     return failures, tuple(removed)
 
 

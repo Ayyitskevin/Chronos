@@ -2574,6 +2574,42 @@ def test_n34_2c_a_different_inode_at_the_copy_s_name_is_never_removed(
     )
 
 
+def test_n34_2e_a_parent_fsync_failure_after_the_rmdir_says_removed_not_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi's P3-1 on ca0e42b: the rmdir succeeded and only the parent's fsync failed — the
+    directory is gone, so the typed line must not say it remains; the verdict stays FAILED and
+    ``restore_copy_removed`` False, because the removal is not proven durable."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    parent = os.stat(tmp_path)
+    armed: list[bool] = []
+    _before_removal(monkeypatch, lambda t: armed.append(True))  # arm at the removal, not before
+    real_fsync = os.fsync
+    refused: list[bool] = []
+
+    def failing_parent_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if armed and (st.st_dev, st.st_ino) == (parent.st_dev, parent.st_ino):
+            refused.append(not target.exists())  # True iff the rmdir had already happened
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(drill.os, "fsync", failing_parent_fsync)
+    report = restore(manifest, target)
+    assert refused == [True], "the parent's fsync after the rmdir is the one that failed"
+    assert not target.exists()  # the rmdir did happen
+    assert report.sha256_ok and report.schema_head_ok and report.row_counts_ok
+    assert report.verified is False and report.restore_copy_removed is False
+    assert report.removed == ("chronos.db",)
+    typed = [f for f in report.failures if f.startswith("RESTORE_COPY_NOT_REMOVED:")]
+    assert len(typed) == 1, report.failures
+    assert "was removed" in typed[0] and "not proven durable" in typed[0], typed
+    assert "remains" not in typed[0], typed
+
+
 def test_n34_2d_the_runbook_states_the_self_cleaning_and_its_typed_failure() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     prose = " ".join(text.split())
