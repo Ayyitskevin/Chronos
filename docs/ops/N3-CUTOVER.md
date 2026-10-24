@@ -228,24 +228,32 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
    would be the key the backend runs on, and step 6's compare would never see it.
 
    **The one-home check** prints counts, never the value. Run it from `<checkout>` now, before
-   step 6, and again in step 6 before you delete any copy. The two private files are the units'
-   template names: if `systemctl --user show -p EnvironmentFiles chronos-backend chronos-worker`
-   names any other file, add it to the `for` list.
+   step 6, and again in step 6 before you delete any copy. It asks systemd which environment files
+   the two units load, drop-ins included (`systemctl --user show -p EnvironmentFiles`), and counts
+   the key in every one. It stops if that list is not exactly the two private files the units'
+   templates name, so a drop-in `EnvironmentFile=` at another path stops it too. Write
+   `<PRIVATE_ENV_DIR>` as the absolute path, as systemd prints it (`%h` expanded).
    ```bash
    k=CHRONOS_PERSISTENCE_KEY; bad=0
    n=$(grep -c "^$k=" .env); echo ".env, exact line: $n (must be 1)"; [ "$n" = 1 ] || bad=1
    n=$(grep -v '^[[:space:]]*#' .env | grep -ic "$k"); echo ".env, any line naming it: $n (must be 1)"; [ "$n" = 1 ] || bad=1
-   for f in <PRIVATE_ENV_DIR>/chronos-backend.env <PRIVATE_ENV_DIR>/chronos-worker.env; do
+   want=$(printf '%s\n' <PRIVATE_ENV_DIR>/chronos-backend.env <PRIVATE_ENV_DIR>/chronos-worker.env | sort -u)
+   got=$(systemctl --user show -p EnvironmentFiles --value chronos-backend chronos-worker | sed -n 's/ (ignore_errors=[a-z]*)$//p')
+   [ "$(printf '%s\n' "$got" | sort -u)" = "$want" ] || { echo "the units' environment files are not the two named here:"; printf '%s\n' "${got:-(none)}" | sed 's/^/  /'; bad=1; }
+   while IFS= read -r f; do
+     [ -n "$f" ] || continue
      [ -r "$f" ] || { echo "$f: not readable (fix the path)"; bad=1; continue; }
      n=$(grep -v '^[[:space:]]*#' "$f" | grep -ic "$k"); echo "$f: $n (must be 0)"; [ "$n" = 0 ] || bad=1
-   done
+   done <<EOF
+   $got
+   EOF
    u=$(systemctl --user cat chronos-backend chronos-worker) || bad=1
    n=$(printf '%s\n' "$u" | grep -v '^[[:space:]]*#' | grep -ic "$k"); echo "unit files: $n (must be 0)"; [ "$n" = 0 ] || bad=1
    m=$(systemctl --user show-environment) || bad=1
    n=$(printf '%s\n' "$m" | grep -ic "$k"); echo "user manager environment: $n (must be 0)"; [ "$n" = 0 ] || bad=1
    n=$(env | grep -ic "$k"); echo "this shell's environment: $n (must be 0)"; [ "$n" = 0 ] || bad=1
    [ "$bad" = 0 ] && echo 'ONE HOME: OK' || echo 'STOP: the key is not in exactly one place'
-   unset k n f u m bad
+   unset k n f u m bad want got
    ```
    The check must end `ONE HOME: OK`. `STOP: …` means a line above is not what it must be. Leave
    the key line in `.env` and remove every other one (or fix the path the check could not read),
