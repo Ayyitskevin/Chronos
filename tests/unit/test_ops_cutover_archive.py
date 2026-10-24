@@ -4445,3 +4445,220 @@ def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
     assert len(ln_calls) == 1 and "link" in ln_calls[0] and "EEXIST" in ln_calls[0], ln_calls
     assert live.read_bytes() == b"fresh keyed store"
     assert archived.read_bytes() == b"the pre-cutover store"
+
+
+# ------------------------------------------------- C1R-F (the C1 re-run's runbook findings)
+
+#: the last schema-17 commit on main: the first parent of #309's merge (N3-1 brought schema 18)
+_LAST_SCHEMA17_MAIN = "8093176"
+_SCHEMA18_MERGE = "f0a3446"
+#: "Before you start"'s check that the recorded rollback commit is schema-17 code
+_SCHEMA17_CHECK = (
+    "git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py"
+    " | grep -x 'SCHEMA_VERSION = 17'"
+)
+#: the pre-C1R-F instruction: HEAD of a checkout this page requires to be post-N3 already
+_N1_OLD_RECORD = (
+    "Write down the pre-cutover commit of the running code before you change anything — the "
+    "Rollback section needs it: `git -C <checkout> rev-parse HEAD` → `<pre-cutover sha>`."
+)
+
+
+def _section(text: str, start: str, end: str) -> str:
+    return " ".join(text[text.index(start) : text.index(end)].split())
+
+
+def _n1_offences(runbook: str) -> list[str]:
+    """What "Before you start" and the Rollback must say about the rollback commit (C1R N1)."""
+
+    before = _section(runbook, "## Before you start", "## Steps")
+    rollback = _section(runbook, "## Rollback", "## What the gate's refusal codes mean")
+    wanted_before = (
+        "The code on this host is the post-N3 checkout (`SCHEMA_VERSION` 18). The Rollback "
+        "section needs the commit the host ran **before** the post-N3 deploy, not the post-N3 "
+        "`HEAD`: only schema-17 code starts the restored schema-17 store, and the post-N3 code "
+        "refuses it, by design (`Unsupported Chronos schema version 17; expected 18`).",
+        "Write that commit down as `<pre-cutover sha>`: before the deploy it is "
+        "`git -C <checkout> rev-parse HEAD`; after the deploy, it is the entry "
+        "`git -C <checkout> reflog` shows just before the deploy.",
+        f"If you cannot establish it, use `{_LAST_SCHEMA17_MAIN}`, the last schema-17 commit on "
+        f"main (`{_SCHEMA18_MERGE}^1`, the first parent of the merge that brought schema 18).",
+        "Then check it — this must print exactly `SCHEMA_VERSION = 17`; if it prints nothing, "
+        f"that commit is not the rollback code, so stop: `{_SCHEMA17_CHECK}`",
+    )
+    offences = [f"Before you start lacks: {w}" for w in wanted_before if w not in before]
+    if _N1_OLD_RECORD in before:
+        offences.append("Before you start still records the post-N3 HEAD as the rollback commit")
+    wanted_rollback = (
+        "`git checkout <pre-cutover sha>`, the schema-17 commit you wrote down and checked under "
+        '"Before you start" — never the post-N3 `HEAD`'
+    )
+    if wanted_rollback not in rollback:
+        offences.append(f"Rollback lacks: {wanted_rollback}")
+    return offences
+
+
+def test_c1rf_n1_the_rollback_commit_is_the_pre_deploy_schema_17_one_and_is_checked() -> None:
+    """C1R N1 (P2): "Before you start" had Kevin record ``git rev-parse HEAD`` of a checkout the
+    same bullet requires to be post-N3 already, so ``<pre-cutover sha>`` was a schema-18 commit
+    and the Rollback's ``git checkout <pre-cutover sha>`` started code that refuses the restored
+    schema-17 store (rehearsed: ``REFUSE … version 17; expected 18``, rc 78). The page now asks
+    for the commit the host ran BEFORE the post-N3 deploy, names 8093176 as the fallback, checks
+    the recorded commit is schema-17 code, and the Rollback checks out that commit."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert _n1_offences(text) == []
+    # negative controls: the check removed, the fallback removed, the old record restored, the
+    # Rollback's pointer back to "the sha you wrote down before step 1" — each is caught
+    flat_check = f"`{_SCHEMA17_CHECK}`"
+    raw_check = next(line for line in text.splitlines() if "grep -x 'SCHEMA_VERSION = 17'" in line)
+    no_check = text.replace(raw_check, "")
+    assert no_check != text and any(flat_check in o for o in _n1_offences(no_check))
+    no_fallback = text.replace(f"`{_LAST_SCHEMA17_MAIN}`", "`<a commit>`")
+    assert no_fallback != text and _n1_offences(no_fallback)
+    old = _n1_offences(text.replace("## Steps", f"- {_N1_OLD_RECORD}\n\n## Steps", 1))
+    assert old == ["Before you start still records the post-N3 HEAD as the rollback commit"]
+    assert "the sha you wrote down before step 1" not in " ".join(_rollback().split())
+
+
+def _git(*argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), *argv], capture_output=True, text=True, check=False
+    )
+
+
+def test_c1rf_n1_measured_the_check_passes_the_fallback_and_refuses_the_post_n3_code() -> None:
+    """The runbook's own check, run against this repository's history: it prints exactly
+    ``SCHEMA_VERSION = 17`` for 8093176 (the named fallback) and nothing, exit 1, for this tree's
+    HEAD (post-N3, schema 18) and for #309's merge. 8093176 is that merge's first parent, so it
+    is the last schema-17 commit on main's first-parent line. Independent of the check, git
+    itself shows the two SCHEMA_VERSION lines."""
+
+    head = _git("rev-parse", "HEAD").stdout.strip()
+    assert _git("rev-parse", f"{_SCHEMA18_MERGE}^1").stdout == (
+        _git("rev-parse", _LAST_SCHEMA17_MAIN).stdout
+    ), "8093176 must be the first parent of the merge that brought schema 18"
+    assert _git("merge-base", "--is-ancestor", _SCHEMA18_MERGE, head).returncode == 0
+    path = "src/chronos/persistence/database.py"
+    versions = {
+        rev: re.findall(r"^SCHEMA_VERSION = (\d+)$", _git("show", f"{rev}:{path}").stdout, re.M)
+        for rev in (_LAST_SCHEMA17_MAIN, _SCHEMA18_MERGE, head)
+    }
+    assert versions == {_LAST_SCHEMA17_MAIN: ["17"], _SCHEMA18_MERGE: ["18"], head: ["18"]}
+
+    def check(sha: str) -> subprocess.CompletedProcess[str]:
+        line = _SCHEMA17_CHECK.replace("<checkout>", str(ROOT)).replace("<pre-cutover sha>", sha)
+        return subprocess.run(["bash", "-c", line], capture_output=True, text=True, check=False)
+
+    passed = check(_LAST_SCHEMA17_MAIN)
+    assert (passed.returncode, passed.stdout) == (0, "SCHEMA_VERSION = 17\n"), passed
+    for refused_sha in (head, _SCHEMA18_MERGE):
+        refused = check(refused_sha)
+        assert (refused.returncode, refused.stdout) == (1, ""), (refused_sha, refused)
+
+
+def _fence_offences(text: str) -> list[str]:
+    """CommonMark's backtick fences, line by line: a fence opens with three or more backticks
+    (an info string may follow) and closes with at least as many backticks and NOTHING else on
+    the line but spaces. A backtick run followed by text inside a block is not a closing fence:
+    the block runs on (C1R N2). A block still open at the end of the file is unbalanced."""
+
+    offences: list[str] = []
+    opening: tuple[int, int] | None = None  # (line number, backtick count)
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        run = len(stripped) - len(stripped.lstrip("`"))
+        if run < 3:
+            continue
+        if opening is None:
+            opening = (number, run)
+        elif run < opening[1]:
+            continue  # a shorter backtick run is the block's content
+        elif re.fullmatch(r"`+", stripped):
+            opening = None
+        else:
+            offences.append(f"line {number}: text after a closing fence: {stripped!r}")
+            opening = None
+    if opening is not None:
+        offences.append(f"line {opening[0]}: a fence that never closes")
+    return offences
+
+
+def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
+    """C1R N2 (P3): step 6's shred block closed with ```` ``` One escrow copy, exactly; …````, which
+    CommonMark does not read as a closing fence, so the rendered block ran on into the prose and
+    a whole-block copy left an unmatched backtick at the shell. Every fence in the runbook is now
+    balanced and closes alone on its line, and the shred block is the one command."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert _fence_offences(text) == []
+    step6 = _step(text, "6. **Escrow", "7. **Vacate")
+    shred = [b for b in re.findall(r"```bash\n(.*?)```", step6, re.S) if "shred -u" in b]
+    assert [textwrap.dedent(b) for b in shred] == [
+        "shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow\n"
+    ]
+    assert "One escrow copy, exactly; the `.env` on the host is the only working copy." in (
+        " ".join(step6.split())
+    )
+    # negative controls: the N2 defect, a dropped closing fence, an over-short closing fence
+    n2 = "   ```\n   One escrow copy"
+    assert n2 in text
+    run_on = _fence_offences(text.replace(n2, "   ``` One escrow copy", 1))
+    assert len(run_on) == 1 and "text after a closing fence: '``` One escrow copy" in run_on[0]
+    unclosed = text.rstrip("\n") + "\n```bash\necho never closed\n"
+    last = len(text.rstrip("\n").splitlines()) + 1
+    assert _fence_offences(unclosed) == [f"line {last}: a fence that never closes"]
+    assert _fence_offences("````bash\nx\n```\n") == ["line 1: a fence that never closes"]
+
+
+def test_c1rf_n2_a_commonmark_renderer_ends_the_shred_block_at_its_one_command() -> None:
+    """The same claim through an independent CommonMark parser (markdown-it-py, locked in
+    requirements-dev.lock): no rendered fence in the runbook holds a line that starts with
+    backticks, and the rendered shred block is the one command."""
+
+    markdown_it = pytest.importorskip("markdown_it")
+    text = RUNBOOK.read_text(encoding="utf-8")
+    fences = [t for t in markdown_it.MarkdownIt("commonmark").parse(text) if t.type == "fence"]
+    assert fences, "the runbook carries fenced blocks"
+    for fence in fences:
+        assert not any(line.lstrip().startswith("```") for line in fence.content.splitlines())
+    shred = [f.content for f in fences if "shred -u" in f.content]
+    assert shred == [
+        "shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow\n"
+    ]
+
+
+def test_c1rf_n3_step_6_says_the_units_can_read_the_escrow_directory_not_write_it() -> None:
+    """C1R N3 (P3): ``ProtectHome=read-only`` makes ``/home`` read-only for the units, not
+    invisible, and each unit's ``ReadWritePaths=`` names only its checkout (and the backend's
+    state directory), never the escrow directory. So the units can READ ``~/chronos-escrow`` but
+    cannot write it; step 6 said they were kept "out of" it. Checked against both shipped units."""
+
+    step6 = " ".join(
+        _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **Vacate").split()
+    )
+    assert "keeps the units out of" not in step6
+    assert (
+        "`ProtectHome=read-only` lets the units read `~/chronos-escrow` but not write it "
+        "(no `ReadWritePaths=` entry covers it); what they could read is ciphertext that only "
+        "your recovery key opens. `mkdir` fails if the directory already exists"
+    ) in step6
+    for unit in ("chronos-backend.service", "chronos-worker.service"):
+        lines = (ROOT / "docs" / "ops" / unit).read_text(encoding="utf-8").splitlines()
+        # read-only, not hidden: exactly this ProtectHome=, and nothing that would hide ~
+        assert [line for line in lines if line.startswith("ProtectHome=")] == [
+            "ProtectHome=read-only"
+        ], unit
+        assert not any(
+            line.startswith(("InaccessiblePaths=", "TemporaryFileSystem=")) for line in lines
+        ), unit
+        writable = [
+            path
+            for line in lines
+            if line.startswith("ReadWritePaths=")
+            for path in line.removeprefix("ReadWritePaths=").split()
+        ]
+        assert writable and all(re.fullmatch(r"%h/<CHRONOS_[A-Z_]+>", p) for p in writable), (
+            unit,
+            writable,
+        )
