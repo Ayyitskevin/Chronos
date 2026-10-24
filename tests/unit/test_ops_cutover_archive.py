@@ -4234,3 +4234,108 @@ def test_c1f_f7_step_9_names_the_account_id_argument_and_where_its_value_comes_f
     assert re.fullmatch(r"[0-9a-f]{64}", printed[0]), printed
     assert printed[1].startswith("# derived from --account-id")
     assert DEMO_ACCOUNT_ID not in printed[1]  # the id is masked, never echoed whole
+
+
+_ROLLBACK_FALLBACK = (
+    "ln -T data/chronos.db.archived-<stamp> data/chronos.db && rm data/chronos.db.archived-<stamp>"
+)
+
+
+def test_c1f_fix1_the_rollback_has_no_check_then_move_and_its_fallback_links_atomically(
+    tmp_path: Path,
+) -> None:
+    """kimi P1-2 (C1-F review): the older-coreutils fallback ``test ! -e … && mv …`` was a
+    check-then-move — a live name created between the test and the move is overwritten by the
+    plain ``mv`` (kimi's interleaving). The Rollback carries no check-then-move anywhere now: the
+    primary form stays ``mv --update=none-fail`` (one ``renameat2(RENAME_NOREPLACE)``) and the
+    fallback is ``ln -T <archived> <live> && rm <archived>`` — ``link(2)`` refuses an existing
+    name inside the one call, nothing is renamed or unlinked over the live name, ``-T`` refuses a
+    directory at the live name instead of linking inside it, and the ``&&`` keeps the archived
+    name on any refusal. Measured here with the runbook's own line."""
+
+    rollback = _rollback()
+    for check in ("test ! -e", "test -e", "[ ! -e", "[ -e", "-e data/chronos.db ]"):
+        assert check not in rollback, check
+    assert f"`{_ROLLBACK_FALLBACK}`" in rollback
+    assert "RENAME_NOREPLACE" in rollback and "link(2)" in rollback
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    line = _ROLLBACK_FALLBACK.replace("<stamp>", "X")
+    # kimi's interleaving: the live name exists by the time the operation runs — after any check
+    # it could have made — so the link refuses, the && keeps the archived name, nothing changes
+    live.write_bytes(b"fresh keyed store")
+    archived.write_bytes(b"the pre-cutover store")
+    refused = subprocess.run(
+        ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert refused.returncode != 0 and "exists" in refused.stderr.lower(), refused
+    assert live.read_bytes() == b"fresh keyed store"
+    assert archived.read_bytes() == b"the pre-cutover store"
+    # a sentinel directory at the live name: refused, never linked inside, archived name kept
+    live.unlink()
+    live.mkdir()
+    os.chmod(live, 0o500)
+    try:
+        sentinel = subprocess.run(
+            ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+        )
+    finally:
+        os.chmod(live, 0o700)
+    assert sentinel.returncode != 0, sentinel
+    assert list(live.iterdir()) == [] and archived.read_bytes() == b"the pre-cutover store"
+    # the live name free: linked, then the archived name removed — one file, the archived bytes
+    live.rmdir()
+    moved = subprocess.run(
+        ["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert moved.returncode == 0 and moved.stderr == "", moved
+    assert sorted(entry.name for entry in data.iterdir()) == ["chronos.db"]
+    assert live.read_bytes() == b"the pre-cutover store"
+
+
+def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
+    tmp_path: Path,
+) -> None:
+    """Why neither rollback form can overwrite: on an occupied live name ``mv --update=none-fail``
+    issues ONE ``renameat2`` with ``RENAME_NOREPLACE`` and ``ln -T`` ONE ``link``/``linkat`` —
+    the kernel refuses the existing name inside that call (EEXIST) and neither issues a rename
+    or unlink of the live name, so there is no check a concurrent creator could race. Measured
+    with strace; skipped where strace or coreutils 9.5+ is absent."""
+
+    strace = shutil.which("strace")
+    if strace is None:
+        pytest.skip("strace is not on PATH")
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"--update=none-fail needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    live, archived = data / "chronos.db", data / "chronos.db.archived-X"
+    live.write_bytes(b"fresh keyed store")
+    archived.write_bytes(b"the pre-cutover store")
+    calls = "trace=rename,renameat,renameat2,link,linkat,unlink,unlinkat"
+
+    def traced(*argv: str) -> list[str]:
+        trace = tmp_path / "trace"
+        subprocess.run(
+            [strace, "-f", "-qq", "-e", calls, "-o", str(trace), *argv],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return [
+            entry
+            for entry in trace.read_text(encoding="utf-8").splitlines()
+            if "chronos.db" in entry
+        ]
+
+    mv_calls = traced("mv", "--update=none-fail", str(archived), str(live))
+    assert len(mv_calls) == 1, mv_calls
+    assert "renameat2(" in mv_calls[0] and "RENAME_NOREPLACE" in mv_calls[0], mv_calls
+    assert "EEXIST" in mv_calls[0], mv_calls
+    ln_calls = traced("ln", "-T", str(archived), str(live))
+    assert len(ln_calls) == 1 and "link" in ln_calls[0] and "EEXIST" in ln_calls[0], ln_calls
+    assert live.read_bytes() == b"fresh keyed store"
+    assert archived.read_bytes() == b"the pre-cutover store"
