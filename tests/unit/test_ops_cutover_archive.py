@@ -4990,30 +4990,44 @@ def test_c1rf_fix2_n1_control_the_be60be2_check_passed_kimi_s_bytes_exec(tmp_pat
 
 
 def _fence_scan(text: str) -> tuple[list[tuple[int, int]], list[str]]:
-    """CommonMark's backtick fences, line by line: a fence opens with three or more backticks
-    (an info string may follow) and closes with at least as many backticks and NOTHING else on
-    the line but spaces. A backtick run followed by text inside a block is not a closing fence:
-    the block runs on (C1R N2). A block still open at the end of the file is unbalanced. Returns
-    the closed fences as (opening line, closing line) and the offences."""
+    """CommonMark's backtick fences, line by line. A fence opens with three or more backticks and
+    an info string with no backtick in it. Inside it, only a backtick run at least as long as the
+    opener's, indented at most three spaces past the opener and with nothing else on the line but
+    spaces, closes it; every other line is the block's content, even one that starts with a long
+    backtick run (fix round 3, kimi P2). So a fence must close on a line of its own. One still
+    open at the end of the file, or when its list item ends (a non-blank line indented less than
+    the opener), never closes. That is how the C1R N2 defect reads: text on the shred block's
+    close makes that line content, and the block runs on until step 7 ends its list item.
+    Bounded to this runbook's shape: each fence's opener sits at its list item's content column,
+    and the file has no tabs (the renderer test checks both readers find the same fences).
+    Returns the closed fences as (opening line, closing line) and the offences."""
 
     spans: list[tuple[int, int]] = []
     offences: list[str] = []
-    opening: tuple[int, int] | None = None  # (line number, backtick count)
+    opening: tuple[int, int, int] | None = None  # (line number, indent, backtick count)
     for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        run = len(stripped) - len(stripped.lstrip("`"))
-        if run < 3:
-            continue
-        if opening is None:
-            opening = (number, run)
-        elif run < opening[1]:
-            continue  # a shorter backtick run is the block's content
-        elif re.fullmatch(r"`+", stripped):
-            spans.append((opening[0], number))
-            opening = None
-        else:
-            offences.append(f"line {number}: text after a closing fence: {stripped!r}")
-            opening = None
+        indent = len(line) - len(line.lstrip(" "))
+        if opening is not None:
+            if stripped and indent < opening[1]:
+                offences.append(
+                    f"line {opening[0]}: a fence that never closes"
+                    f" (its list item ends at line {number})"
+                )
+                opening = None
+            elif (
+                re.fullmatch(r"`+", stripped)
+                and len(stripped) >= opening[2]
+                and indent - opening[1] <= 3
+            ):
+                spans.append((opening[0], number))
+                opening = None
+                continue
+            else:
+                continue  # the block's content
+        fence = re.fullmatch(r"(`{3,})[^`]*", stripped)
+        if fence:
+            opening = (number, indent, len(fence[1]))
     if opening is not None:
         offences.append(f"line {opening[0]}: a fence that never closes")
     return spans, offences
@@ -5025,8 +5039,12 @@ def _fence_offences(text: str) -> list[str]:
 
 def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]], list[str]]:
     """The same reading through markdown-it-py's ``commonmark`` preset: the fences it renders, as
-    (opening line, closing line) from each token's line map, and the offences: a rendered fence
-    that holds a line starting with backticks."""
+    (opening line, closing line) from each token's line map, and the offences. The renderer
+    itself says whether a fence closed on a line of its own: a closed fence's map spans its
+    opener, its content and its closing line, so the content is two lines shorter than the map.
+    A fence the renderer ended because the file or its list item ended has no closing line, so it
+    never closes. What the block holds is not judged: a content line may start with backticks
+    (fix round 3, kimi P2)."""
 
     spans: list[tuple[int, int]] = []
     offences: list[str] = []
@@ -5034,10 +5052,10 @@ def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]]
         if fence.type != "fence":
             continue
         start, end = fence.map
-        if any(line.lstrip().startswith("```") for line in fence.content.splitlines()):
-            offences.append(f"line {start + 1}: a rendered fence holds a line that starts with ```")
-        else:
+        if fence.content.count("\n") == end - start - 2:
             spans.append((start + 1, end))
+        else:
+            offences.append(f"line {start + 1}: a fence that never closes")
     return spans, offences
 
 
