@@ -56,7 +56,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   - Its parent must be owned by you, and every directory from `/` down to it must be owned by
     root or by you, with no group or other write bit. This is the same rule as for `data/`
     below, and the same check. Use `ls -ld / /var /var/backups /var/backups/chronos`.
-  - The command refuses otherwise, before any envelope exists:
+  - The command refuses otherwise — dry run and `--apply` alike, before any envelope exists:
     - `RESTORE_TARGET_NOT_PROTECTED`: the chain, `/tmp` included;
     - `RESTORE_TARGET_NOT_FRESH`: the leaf already exists, empty or not.
   - A different name under `/tmp` is not a fix: any predictable name there can be prepared
@@ -119,10 +119,12 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    ```
    Run the `is-active` line twice, a few seconds apart. Both units `inactive`, or stop here.
 
-2. **Dry-run the command** (the default). It runs the whole gate, writes nothing to the store
-   and creates no envelope; its one directory effect is SQLite's reader bookkeeping beside a
-   WAL-mode store — an empty `chronos.db-wal` and a `chronos.db-shm` — which `--apply` later
-   moves aside with the store:
+2. **Dry-run the command** (the default). It runs the whole gate and the restore-target check
+   (`RESTORE_TARGET_NOT_PROTECTED`, `RESTORE_TARGET_NOT_FRESH` refuse the dry run exactly as
+   they refuse `--apply`, so a clean dry run also proves `--restore-into`; C1 F5), writes
+   nothing to the store and creates no envelope; its one directory effect is SQLite's
+   reader bookkeeping beside a WAL-mode store — an empty `chronos.db-wal` and a
+   `chronos.db-shm` — which `--apply` later moves aside with the store:
    ```bash
    BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
    python -m chronos.operations.cutover_archive \

@@ -6,8 +6,10 @@ One command, owner-run, with every Chronos process stopped::
         --out /var/backups/chronos \\
         --restore-into /var/backups/chronos/n3-verify [--apply] [--pretty]
 
-Dry-run (the default) runs the gate below, prints what ``--apply`` would do, writes nothing
-to the store and creates no envelope. One directory effect is SQLite's, not the command's: a
+Dry-run (the default) runs the gate below, proves ``--restore-into`` by the same read-only
+check ``--apply`` uses (a protected chain, an absent leaf — a ``/tmp`` target is refused at the
+dry run, C1 F5), prints what ``--apply`` would do, writes nothing to the store and creates no
+envelope. One directory effect is SQLite's, not the command's: a
 read-only connection on a WAL-mode store leaves its reader bookkeeping beside it — an empty
 ``chronos.db-wal`` and a ``chronos.db-shm`` — and nothing else; ``--apply`` moves them aside
 with the store. ``--apply`` runs, in this order, each step a typed stop:
@@ -1460,7 +1462,8 @@ def archive(
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
 ) -> ArchiveReport:
-    """Gate → (dry-run stops here) → drill → VERIFIED required → move aside → report.
+    """Gate → restore-target check → (dry-run stops here) → drill → VERIFIED required → move
+    aside → report.
 
     Refusals BEFORE the drill raise :class:`CutoverRefused` (nothing exists); after the
     drill they are returned as reports that name the envelope (the drill's cleartext restore
@@ -1537,6 +1540,10 @@ def _archive_admitted(
 ) -> ArchiveReport:
     db_path = source.path
     _require_excluded(source, "after the gate")
+    # C1 F5: the restore target — a protected chain, the leaf absent (FIX-RT) — is proved HERE,
+    # dry run and --apply alike, read-only (nothing is created until --apply's _fresh_directory
+    # below), so a clean dry run also proves --restore-into and a /tmp target refuses at step 2
+    _require_protected_absent_target(restore_into)
     if not apply:
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
         out_abs = out_dir if out_dir.is_absolute() else Path.cwd() / out_dir
@@ -1568,9 +1575,8 @@ def _archive_admitted(
     try:
         # the drill's own rule, applied BEFORE the envelope exists: a reused --restore-into
         # would otherwise publish an envelope and then refuse the restore, leaving an orphan.
-        # FIX-RT: first a protected chain with the leaf absent; then the drill creates it 0700
-        # and verifies uid and mode by fstat
-        _require_protected_absent_target(restore_into)
+        # FIX-RT: the protected chain and the absent leaf were proved above; now the drill
+        # creates the leaf 0700 and verifies uid and mode by fstat
         for descriptor in _fresh_directory(restore_into, "restore target"):
             os.close(descriptor)
     except DrillRefused as error:
