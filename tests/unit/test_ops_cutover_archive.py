@@ -1035,9 +1035,15 @@ def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps(
         "**And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) "
         "AND the recovery-key-only escrow change have merged to main too.**"
     )
+    c1f = (
+        "**And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 "
+        "rehearsal) has merged to main too.**"
+    )
     assert added in banner_flat, "the banner must carry the N3-4 + escrow condition"
+    assert c1f in banner_flat, "the banner must carry the C1-F condition"
     assert "K-20261023-002" in banner and "K-20261023-003" in banner  # Kevin's two rulings
-    assert "all four" in banner_flat and "If any of them prints nothing" in banner_flat
+    assert "K-20261024-001" in banner  # the ruling that admitted C1-F
+    assert "all five" in banner_flat and "If any of them prints nothing" in banner_flat
     # the two original checks stay
     for old in (
         "git grep -n '^def prune(' origin/main -- src/chronos/operations/backup_pruner.py",
@@ -1056,13 +1062,19 @@ def test_5h_b3_the_stop_banner_names_n3_4_and_the_escrow_change_and_their_greps(
         assert f"`git grep -n '{pattern}' origin/main -- {path}`" in banner_flat, (path, pattern)
         regex = re.compile(pattern, re.MULTILINE)
         assert regex.search((ROOT / path).read_text(encoding="utf-8")), (path, pattern)
+    # the C1-F check: the rollback's atomic-link fallback, which only the fix round introduces.
+    # It reads the runbook itself, so the bracket keeps the banner's own text from matching it.
+    c1f_path, c1f_pattern = "docs/ops/N3-CUTOVER.md", "ln -[T] data/chronos.db.archived-"
+    assert f"`git grep -n '{c1f_pattern}' origin/main -- {c1f_path}`" in banner_flat
+    assert re.search(c1f_pattern, text), "the C1-F marker must match the fixed rollback"
+    assert not re.search(c1f_pattern, banner), "the banner's own text must not satisfy its marker"
     assert not re.search(r"<[^>\n]*(marker|ruling)[^>\n]*>", text), "an unfilled placeholder"
     # both echoes say the same, and both still point at the STOP
     before = flat[flat.index("## Before you start") : flat.index("## Steps")]
     steps = flat.index("## Steps")
     step1 = flat[flat.index("1. **", steps) : flat.index("2. **", steps)]
     for echo in (before, step1):
-        assert added in echo and "STOP at the top of this page" in echo
+        assert added in echo and c1f in echo and "STOP at the top of this page" in echo
 
 
 # ------------------------------------------------------------- (6) pins
