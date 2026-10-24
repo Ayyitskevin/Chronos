@@ -4459,12 +4459,12 @@ git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | p
 import ast, sys
 tree = ast.parse(sys.stdin.buffer.read())
 name = "SCHEMA_VERSION"
-sets = [  # every node that may set it: bind, delete, import, name it in a string, import *
+sets = [  # every node that may set it: bind, delete, import, keyword, string, import *
     n for n in ast.walk(tree)
     if name in (getattr(n, "id", None), getattr(n, "attr", None))
     and not isinstance(n.ctx, ast.Load)
-    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "rest", None))
-    or name in getattr(n, "names", ())
+    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "arg", None))
+    or name in (getattr(n, "rest", None), *getattr(n, "names", ()))
     or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
     or isinstance(n, ast.alias) and n.name == "*"
 ]
@@ -4530,9 +4530,9 @@ def _n1_offences(runbook: str) -> list[str]:
         "Then check it. The check parses that commit's `database.py` with `ast` and never "
         "imports or runs it: it prints `SCHEMA_VERSION = 17` only when the file sets "
         "`SCHEMA_VERSION` in exactly one place, a plain top-level assignment of 17.",
-        "Two assignments, an annotated or augmented one, a binding anywhere else, a string that "
-        "names it, or a `*` import each print a line beginning `STOP:` instead (C1R-F fix round "
-        "1, kimi P1).",
+        "Two assignments, an annotated or augmented one, a binding anywhere else, a string or a "
+        "keyword argument that names it, or a `*` import each print a line beginning `STOP:` "
+        "instead (C1R-F fix round 1, kimi P1).",
         "This must print exactly one line, `SCHEMA_VERSION = 17`; anything else — a `STOP:` "
         "line, an error, or nothing — means that commit is not the rollback code, so stop:",
     )
@@ -4699,6 +4699,24 @@ _SCHEMA17_VARIANTS: dict[str, tuple[str, str | None, str, bool]] = {
         False,
     ),
     "17_then_a_star_import": (_LAST_SCHEMA17_MAIN, None, "from os.path import *\n", False),
+    "17_then_set_through_a_keyword": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "globals().update(SCHEMA_VERSION=18)\n",
+        False,
+    ),
+    "17_then_imported_under_its_name": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "from os import sep as SCHEMA_VERSION\n",
+        False,
+    ),
+    "17_then_declared_global_in_a_function": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "def _rebind():\n    global SCHEMA_VERSION\n",
+        False,
+    ),
     # accepted: the fallback's own bytes, and the same value without the spaces
     "8093176_unchanged": (_LAST_SCHEMA17_MAIN, None, "", True),
     "no_space_17": (_LAST_SCHEMA17_MAIN, "SCHEMA_VERSION = 17\n", "SCHEMA_VERSION=17\n", True),
