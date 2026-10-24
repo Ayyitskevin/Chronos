@@ -3995,3 +3995,40 @@ def test_c1f_f1_measured_env_i_leaves_mandate_fingerprint_no_key_source_but_the_
     assert with_key.returncode == 0, with_key
     expected = account_fingerprint(DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(file_key))
     assert with_key.stdout.splitlines()[0] == expected
+
+
+def test_c1f_f4_the_sentinel_refusal_wording_matches_what_mv_prints(tmp_path: Path) -> None:
+    """C1 F4 (P3): a ``mv`` onto a sentinel directory does not say ``Is a directory``: ``mv``
+    aims INSIDE the directory (``data/chronos.db/chronos.db.archived-<stamp>``) and the
+    sentinel's 0500 mode refuses it with ``Permission denied`` (RB1a). The runbook says what
+    ``mv`` really prints — in step 3 and in Rollback — and the measurement is repeated here."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "Is a directory" not in text
+    assert "Permission denied" in _rollback()
+    assert "Permission denied" in text[text.index("3. **Apply") : text.index("4. **Remove")]
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses the sentinel's 0500 mode")
+    version = _coreutils_version()
+    if version is None or version < (9, 5):
+        pytest.skip(f"the runbook's mv form needs GNU coreutils 9.5+ (mv --version: {version})")
+    data = tmp_path / "data"
+    data.mkdir()
+    sentinel = data / "chronos.db"
+    sentinel.mkdir()
+    os.chmod(sentinel, 0o500)
+    archived = data / "chronos.db.archived-X"
+    archived.write_bytes(b"the pre-cutover store")
+    try:
+        refused = subprocess.run(
+            ["mv", "--update=none-fail", str(archived), str(sentinel)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.chmod(sentinel, 0o700)
+    assert refused.returncode == 1, refused
+    assert "Permission denied" in refused.stderr and "Is a directory" not in refused.stderr
+    assert f"{sentinel}/chronos.db.archived-X" in refused.stderr  # it aimed inside the directory
+    assert archived.read_bytes() == b"the pre-cutover store" and list(sentinel.iterdir()) == []
