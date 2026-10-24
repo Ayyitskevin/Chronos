@@ -4989,12 +4989,14 @@ def test_c1rf_fix2_n1_control_the_be60be2_check_passed_kimi_s_bytes_exec(tmp_pat
     assert (new.returncode, new.stdout, new.stderr) == (0, "SCHEMA_VERSION = 17\n", ""), new
 
 
-def _fence_offences(text: str) -> list[str]:
+def _fence_scan(text: str) -> tuple[list[tuple[int, int]], list[str]]:
     """CommonMark's backtick fences, line by line: a fence opens with three or more backticks
     (an info string may follow) and closes with at least as many backticks and NOTHING else on
     the line but spaces. A backtick run followed by text inside a block is not a closing fence:
-    the block runs on (C1R N2). A block still open at the end of the file is unbalanced."""
+    the block runs on (C1R N2). A block still open at the end of the file is unbalanced. Returns
+    the closed fences as (opening line, closing line) and the offences."""
 
+    spans: list[tuple[int, int]] = []
     offences: list[str] = []
     opening: tuple[int, int] | None = None  # (line number, backtick count)
     for number, line in enumerate(text.splitlines(), start=1):
@@ -5007,13 +5009,99 @@ def _fence_offences(text: str) -> list[str]:
         elif run < opening[1]:
             continue  # a shorter backtick run is the block's content
         elif re.fullmatch(r"`+", stripped):
+            spans.append((opening[0], number))
             opening = None
         else:
             offences.append(f"line {number}: text after a closing fence: {stripped!r}")
             opening = None
     if opening is not None:
         offences.append(f"line {opening[0]}: a fence that never closes")
-    return offences
+    return spans, offences
+
+
+def _fence_offences(text: str) -> list[str]:
+    return _fence_scan(text)[1]
+
+
+def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]], list[str]]:
+    """The same reading through markdown-it-py's ``commonmark`` preset: the fences it renders, as
+    (opening line, closing line) from each token's line map, and the offences: a rendered fence
+    that holds a line starting with backticks."""
+
+    spans: list[tuple[int, int]] = []
+    offences: list[str] = []
+    for fence in markdown_it.MarkdownIt("commonmark").parse(text):
+        if fence.type != "fence":
+            continue
+        start, end = fence.map
+        if any(line.lstrip().startswith("```") for line in fence.content.splitlines()):
+            offences.append(f"line {start + 1}: a rendered fence holds a line that starts with ```")
+        else:
+            spans.append((start + 1, end))
+    return spans, offences
+
+
+# (markdown, the line checker's offences, how many fences a CommonMark renderer shows). Fix round 3
+# (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's, alone on
+# its line, closes it; any other line is content. The first three are legitimate CommonMark.
+_FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
+    "kimi_a_content_line_starts_with_the_opener": (
+        "```bash\necho one\n```bash\necho two\n```\n",
+        [],
+        1,
+    ),
+    "trailing_whitespace_after_the_close": ("```bash\nx\n```   \n", [], 1),
+    "a_longer_fence_holds_a_shorter_one": ("````md\n```bash\nx\n```\n````\n", [], 1),
+    "a_blank_line_inside_a_list_item_fence": (
+        "1. one\n   ```bash\n   x\n\n   y\n   ```\n2. two\n",
+        [],
+        1,
+    ),
+    "a_backtick_in_the_info_string_opens_no_fence": ("``` not `a fence`\ntext\n", [], 0),
+    "four_backticks_closed_by_three": (
+        "````bash\nx\n```\n",
+        ["line 1: a fence that never closes"],
+        1,
+    ),
+    "unclosed_at_the_end_of_the_file": ("```bash\nx\n", ["line 1: a fence that never closes"], 1),
+    "text_on_the_last_close_line": (
+        "```bash\nx\n```bash\n",
+        ["line 1: a fence that never closes"],
+        1,
+    ),
+    "an_opener_alone_on_the_last_line": ("text\n\n```\n", ["line 3: a fence that never closes"], 1),
+    "n2_text_on_a_list_item_fence_s_close": (
+        "1. one\n   ```bash\n   x\n   ``` then prose\n   more\n\n2. two\n",
+        ["line 2: a fence that never closes (its list item ends at line 7)"],
+        1,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FENCE_CONTROLS))
+def test_c1rf_fix3_n2_the_fence_checker_reads_fences_as_commonmark_does(name: str) -> None:
+    """Fix round 3 (kimi P2 @ 11fecfa): the line checker follows CommonMark. A line that starts
+    with a long enough backtick run but carries text is the block's content, not a bad close; a
+    fence that does not close on a line of its own (the file ends, or its list item does) never
+    closes. kimi's input is the first control: one valid fence, no offence."""
+
+    text, expected, _ = _FENCE_CONTROLS[name]
+    assert _fence_offences(text) == expected
+
+
+@pytest.mark.parametrize("name", sorted(_FENCE_CONTROLS))
+def test_c1rf_fix3_n2_a_commonmark_renderer_agrees_with_the_line_checker(name: str) -> None:
+    """The renderer is the independent oracle for each control: it shows the expected number of
+    fences, it finds the same fences that never close, and every fence both readers close has the
+    same opening and closing line."""
+
+    markdown_it = pytest.importorskip("markdown_it")
+    text, expected, count = _FENCE_CONTROLS[name]
+    tokens = markdown_it.MarkdownIt("commonmark").parse(text)
+    assert len([t for t in tokens if t.type == "fence"]) == count
+    spans, offences = _rendered_fences(markdown_it, text)
+    assert offences == [re.sub(r" \(.*\)$", "", o) for o in expected]
+    assert spans == _fence_scan(text)[0]
 
 
 def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
@@ -5032,11 +5120,19 @@ def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
     assert "One escrow copy, exactly; the `.env` on the host is the only working copy." in (
         " ".join(step6.split())
     )
-    # negative controls: the N2 defect, a dropped closing fence, an over-short closing fence
+    # negative controls: the N2 defect, a dropped closing fence, an over-short closing fence.
+    # With text on its close, the shred block's last line is content: the block runs on until
+    # step 7 ends its list item (fix round 3: the line is no longer misread as a bad close).
     n2 = "   ```\n   One escrow copy"
     assert n2 in text
-    run_on = _fence_offences(text.replace(n2, "   ``` One escrow copy", 1))
-    assert len(run_on) == 1 and "text after a closing fence: '``` One escrow copy" in run_on[0]
+    defect = text.replace(n2, "   ``` One escrow copy", 1).splitlines()
+    shred_open = defect.index(
+        "   shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow"
+    )
+    step7 = next(i for i, line in enumerate(defect) if line.startswith("7. **Vacate")) + 1
+    assert _fence_offences("\n".join(defect) + "\n") == [
+        f"line {shred_open}: a fence that never closes (its list item ends at line {step7})"
+    ]
     unclosed = text.rstrip("\n") + "\n```bash\necho never closed\n"
     last = len(text.rstrip("\n").splitlines()) + 1
     assert _fence_offences(unclosed) == [f"line {last}: a fence that never closes"]
@@ -5045,18 +5141,26 @@ def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
 
 def test_c1rf_n2_a_commonmark_renderer_ends_the_shred_block_at_its_one_command() -> None:
     """The same claim through an independent CommonMark parser (markdown-it-py, locked in
-    requirements-dev.lock): no rendered fence in the runbook holds a line that starts with
-    backticks, and the rendered shred block is the one command."""
+    requirements-dev.lock): every rendered fence in the runbook closes on a line of its own, the
+    two readers find the same fences, and the rendered shred block is the one command. With the
+    N2 defect put back, the renderer finds that the shred block never closes, as the line
+    checker does."""
 
     markdown_it = pytest.importorskip("markdown_it")
     text = RUNBOOK.read_text(encoding="utf-8")
     fences = [t for t in markdown_it.MarkdownIt("commonmark").parse(text) if t.type == "fence"]
     assert fences, "the runbook carries fenced blocks"
-    for fence in fences:
-        assert not any(line.lstrip().startswith("```") for line in fence.content.splitlines())
+    spans, offences = _rendered_fences(markdown_it, text)
+    assert offences == []
+    assert spans == _fence_scan(text)[0] and len(spans) == len(fences)
     shred = [f.content for f in fences if "shred -u" in f.content]
     assert shred == [
         "shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow\n"
+    ]
+    defect = text.replace("   ```\n   One escrow copy", "   ``` One escrow copy", 1)
+    shred_open = next(s for s, _ in spans if "shred -u" in defect.splitlines()[s])
+    assert _rendered_fences(markdown_it, defect)[1] == [
+        f"line {shred_open}: a fence that never closes"
     ]
 
 
