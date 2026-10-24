@@ -4451,6 +4451,7 @@ def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
 
 #: the last schema-17 commit on main: the first parent of #309's merge (N3-1 brought schema 18)
 _LAST_SCHEMA17_MAIN = "8093176"
+_N2_DEFECT_MAIN = "1bcd424"  # main before C1R-F: the runbook with the real N2 defect
 _SCHEMA18_MERGE = "f0a3446"
 #: "Before you start"'s check that the recorded rollback commit is schema-17 code: it parses the
 #: file and never runs it, and prints the line only for ONE plain top-level ``= 17`` (fix round 1)
@@ -5059,55 +5060,75 @@ def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]]
     return spans, offences
 
 
-# (markdown, the line checker's offences, how many fences a CommonMark renderer shows). Fix round 3
-# (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's, alone on
-# its line, closes it; any other line is content. The first seven are legitimate CommonMark.
-_FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
+# (markdown, the fences that close as (opening line, closing line), the fences that never close).
+# The expected values are read off CommonMark 0.31.2 §4.5 by hand, not from either reader. Fix
+# round 3 (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's,
+# alone on its line, closes it; any other line is content. Fix round 4 (kimi P2 @ 5327d66): at the
+# top level an opener and its close are each indented up to three spaces, independently, and a
+# content line may be indented less than the opener; a close indented four is content. The first
+# nine are legitimate CommonMark.
+_FENCE_CONTROLS: dict[str, tuple[str, list[tuple[int, int]], list[str]]] = {
     "kimi_a_content_line_starts_with_the_opener": (
         "```bash\nprintf 'x'\n```bash\necho still-code\n```\n",
+        [(1, 5)],
         [],
-        1,
     ),
     "text_after_a_long_run_at_the_top_level_is_content": (
         "```bash\nx\n``` trailing\n```\n",
+        [(1, 4)],
         [],
-        1,
     ),
-    "trailing_whitespace_after_the_close": ("```bash\nx\n```   \n", [], 1),
-    "a_longer_fence_holds_a_shorter_one": ("````md\n```bash\nx\n```\n````\n", [], 1),
+    "trailing_whitespace_after_the_close": ("```bash\nx\n```   \n", [(1, 3)], []),
+    "a_longer_fence_holds_a_shorter_one": ("````md\n```bash\nx\n```\n````\n", [(1, 5)], []),
     "a_blank_line_inside_a_list_item_fence": (
         "1. one\n   ```bash\n   x\n\n   y\n   ```\n2. two\n",
+        [(2, 6)],
         [],
-        1,
     ),
-    "a_backtick_in_the_info_string_opens_no_fence": ("``` not `a fence`\ntext\n", [], 0),
-    "a_close_indented_three_closes": ("```bash\nx\n   ```\n", [], 1),
+    "a_backtick_in_the_info_string_opens_no_fence": ("``` not `a fence`\ntext\n", [], []),
+    "a_close_indented_three_closes": ("```bash\nx\n   ```\n", [(1, 3)], []),
+    "kimi_an_indented_opener_closes_at_the_margin": ("  ```bash\n  x\n```\n", [(1, 3)], []),
+    "kimi_an_indented_fence_holds_an_unindented_line": ("  ```bash\nx\n  ```\n", [(1, 3)], []),
     "four_backticks_closed_by_three": (
         "````bash\nx\n```\n",
+        [],
         ["line 1: a fence that never closes"],
-        1,
     ),
-    "unclosed_at_the_end_of_the_file": ("```bash\nx\n", ["line 1: a fence that never closes"], 1),
+    "unclosed_at_the_end_of_the_file": ("```bash\nx\n", [], ["line 1: a fence that never closes"]),
+    "unclosed_at_the_end_of_a_file_with_no_final_newline": (
+        "```bash\nx",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
     "text_on_the_last_close_line": (
         "```bash\nx\n```bash\n",
+        [],
         ["line 1: a fence that never closes"],
-        1,
     ),
-    "an_opener_alone_on_the_last_line": ("text\n\n```\n", ["line 3: a fence that never closes"], 1),
+    "an_opener_alone_on_the_last_line": (
+        "text\n\n```\n",
+        [],
+        ["line 3: a fence that never closes"],
+    ),
     "a_close_indented_four_past_the_opener_is_content": (
         "```bash\nx\n    ```\n",
+        [],
         ["line 1: a fence that never closes"],
-        1,
+    ),
+    "kimi_a_close_indented_four_at_the_top_level_is_content": (
+        "  ```bash\n  x\n    ```\n",
+        [],
+        ["line 1: a fence that never closes"],
     ),
     "a_list_item_close_indented_four_past_the_opener_is_content": (
         "1. one\n   ```bash\n   x\n       ```\n2. two\n",
-        ["line 2: a fence that never closes (its list item ends at line 5)"],
-        1,
+        [],
+        ["line 2: a fence that never closes"],
     ),
     "n2_text_on_a_list_item_fence_s_close": (
         "1. one\n   ```bash\n   x\n   ``` then prose\n   more\n\n2. two\n",
-        ["line 2: a fence that never closes (its list item ends at line 7)"],
-        1,
+        [],
+        ["line 2: a fence that never closes"],
     ),
 }
 
@@ -5119,23 +5140,41 @@ def test_c1rf_fix3_n2_the_fence_checker_reads_fences_as_commonmark_does(name: st
     fence that does not close on a line of its own (the file ends, or its list item does) never
     closes. kimi's input is the first control: one valid fence, no offence."""
 
-    text, expected, _ = _FENCE_CONTROLS[name]
-    assert _fence_offences(text) == expected
+    text, spans, offences = _FENCE_CONTROLS[name]
+    found, said = _fence_scan(text)
+    assert (found, [re.sub(r" \(.*\)$", "", o) for o in said]) == (spans, offences)
 
 
 @pytest.mark.parametrize("name", sorted(_FENCE_CONTROLS))
 def test_c1rf_fix3_n2_a_commonmark_renderer_agrees_with_the_line_checker(name: str) -> None:
-    """The renderer is the independent oracle for each control: it shows the expected number of
-    fences, it finds the same fences that never close, and every fence both readers close has the
-    same opening and closing line."""
+    """The renderer is the independent oracle for each control: it closes exactly the expected
+    fences, at their opening and closing lines, and finds exactly the expected fences that never
+    close."""
 
     markdown_it = pytest.importorskip("markdown_it")
-    text, expected, count = _FENCE_CONTROLS[name]
-    tokens = markdown_it.MarkdownIt("commonmark").parse(text)
-    assert len([t for t in tokens if t.type == "fence"]) == count
-    spans, offences = _rendered_fences(markdown_it, text)
-    assert offences == [re.sub(r" \(.*\)$", "", o) for o in expected]
-    assert spans == _fence_scan(text)[0]
+    text, spans, offences = _FENCE_CONTROLS[name]
+    assert _rendered_fences(markdown_it, text) == (spans, offences)
+
+
+def test_c1rf_fix4_n2_the_real_1bcd424_defect_is_a_shred_block_that_never_closes() -> None:
+    """Fix round 4: the real N2 defect, the runbook's bytes at 1bcd424, stays a control. Its shred
+    block's close carries text, so CommonMark reads that line as content and the block never
+    closes; the opener's line is found from the bytes, not from the renderer."""
+
+    markdown_it = pytest.importorskip("markdown_it")
+    shown = _git("show", f"{_N2_DEFECT_MAIN}:docs/ops/N3-CUTOVER.md")
+    assert shown.returncode == 0, shown.stderr
+    lines = shown.stdout.splitlines()
+    shred = lines.index(
+        "   shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow"
+    )
+    assert (lines[shred - 1], lines[shred + 1]) == (
+        "   ```bash",
+        "   ``` One escrow copy, exactly; the `.env` on",
+    )
+    assert _rendered_fences(markdown_it, shown.stdout)[1] == [
+        f"line {shred}: a fence that never closes"
+    ]
 
 
 def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
