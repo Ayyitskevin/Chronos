@@ -66,8 +66,11 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
 
 from chronos.broker.demo import DEMO_ACCOUNT_ID
+from chronos.cli.main import main as cli_main
+from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.operations import cutover_archive as cutover
 from chronos.operations import restore_drill as drill
@@ -4132,3 +4135,38 @@ def test_c1f_f6_the_dry_run_s_next_steps_say_what_apply_will_do_not_what_it_did(
     assert "this run removed" in done[0] and "restore_copy_removed" in done[0]
     assert all("--apply will" not in step for step in done), done
     assert done[2:4] == steps[2:4] and done[5] == steps[5]
+
+
+def test_c1f_f7_step_9_names_the_account_id_argument_and_where_its_value_comes_from(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C1 F7 (P3): on a demo host ``mandate fingerprint`` without ``--account-id`` stops with
+    ``no account id available; pass --account-id or set IB_ACCOUNT_ID`` (S9a); with the demo
+    account id it prints the keyed value that equals the bound scope row (S9b). Step 9 names the
+    argument for both commands and where its value comes from on each broker; the premise is
+    re-measured in-process against the CLI."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step9 = _step(text, "9. **Re-author", "10. **Retention")
+    flat = " ".join(step9.split())
+    assert f"mandate fingerprint --account-id {DEMO_ACCOUNT_ID}" in flat
+    assert f"mandate check --file <mandate> --account-id {DEMO_ACCOUNT_ID}" in flat
+    assert "DEMO_ACCOUNT_ID" in step9 and "src/chronos/broker/demo.py" in step9
+    assert "IB_ACCOUNT_ID" in step9  # the IBKR-paper source, and what the bare command reads
+    assert "no account id available; pass --account-id or set IB_ACCOUNT_ID" in step9
+    assert "account-match" in step9 and "0 blocking" in step9 and "STATUS" in step9
+    # the premise: the bare command fails on a host without IB_ACCOUNT_ID; --account-id works
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", TEST_PERSISTENCE_KEY_HEX)
+    monkeypatch.delenv("IB_ACCOUNT_ID", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert cli_main(["mandate", "fingerprint"]) == 1
+        bare = capsys.readouterr().out
+        assert "no account id available; pass --account-id or set IB_ACCOUNT_ID" in bare
+        assert cli_main(["mandate", "fingerprint", "--account-id", DEMO_ACCOUNT_ID]) == 0
+        printed = capsys.readouterr().out.splitlines()
+    finally:
+        get_settings.cache_clear()
+    assert re.fullmatch(r"[0-9a-f]{64}", printed[0]), printed
+    assert printed[1].startswith("# derived from --account-id")
+    assert DEMO_ACCOUNT_ID not in printed[1]  # the id is masked, never echoed whole
