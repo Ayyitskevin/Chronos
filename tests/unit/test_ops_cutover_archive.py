@@ -45,6 +45,7 @@ import json
 import os
 import pickle
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -66,6 +67,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from chronos.broker.demo import DEMO_ACCOUNT_ID
 from chronos.domain.enums import DataQuality
 from chronos.operations import cutover_archive as cutover
 from chronos.operations import restore_drill as drill
@@ -90,6 +92,7 @@ from chronos.supervisor.position_management import (
     record_directive_resolution,
     register_position,
 )
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "src" / "chronos" / "operations" / "cutover_archive.py"
@@ -3904,3 +3907,91 @@ def test_c1f_f3_measured_the_chosen_mv_form_refuses_an_occupied_live_name_and_th
     )
     assert moved.returncode == 0 and moved.stderr == "", moved
     assert live.read_bytes() == b"the pre-cutover store" and not archived.exists()
+
+
+def test_c1f_f1_step_8_proves_the_bind_from_the_file_key_alone_on_the_host_it_runs_on(
+    tmp_path: Path,
+) -> None:
+    """C1 F1 (P2) under the code owner's constraint (out/KEYSRC-ASSESS.md §3): step 8 is the
+    end-to-end proof that the store bound under the ESCROWED key — the fingerprint computed from
+    ``<checkout>/.env``'s key alone, compared with the bound ``database_scope`` row. On a demo
+    host ``b1-preflight`` cannot give it: it refuses before its scope line (S8), and its scope
+    CLEAR is ``("ibkr", "paper", …)`` by construction (``b1_preflight.py:564``), so even its scope
+    line alone reads REFUSE against a demo-bound store whatever the key. Step 8 therefore composes
+    two existing commands with the file as the only key source: ``env -i`` strips every shell
+    source before ``mandate fingerprint --account-id``, whose settings then read the key from the
+    cwd's ``.env`` (``settings.py:101-102``) and nothing else; ``sqlite3`` reads the row. No "or
+    the operator CLI you use" (§3 weakness 1); a mismatch right after the first start is named
+    for what it is — bound under a key other than the escrowed one — with the one remedy (§3
+    weakness 3)."""
+
+    step8 = _step(RUNBOOK.read_text(encoding="utf-8"), "8. **Bind", "9. **")
+    assert "or the operator CLI you use" not in step8
+    blocks = re.findall(r"```bash\n(.*?)```", step8, re.S)
+    assert len(blocks) == 1, "step 8 carries one check block"
+    block = blocks[0]
+    assert "mode=ro" in block and "FROM database_scope" in block
+    assert "env -i " in block and f"mandate fingerprint --account-id {DEMO_ACCOUNT_ID}" in block
+    assert "CHRONOS_PERSISTENCE_KEY" not in block  # the key is never passed in: the file is it
+    assert "b1-preflight" not in block  # on a demo host it is not the check: REFUSE by design
+    assert "CLEAR [scope] already bound to this paper account" in step8  # the IBKR-paper check
+    assert "DEMO_ACCOUNT_ID" in step8 and "src/chronos/broker/demo.py" in step8
+    assert "IB_ACCOUNT_ID" in step8
+    flat = " ".join(step8.split())
+    assert "bound under a key other than the escrowed one" in flat
+    assert "remove the extra source" in flat and "re-archive the fresh store" in flat
+    assert "Never change `DATABASE_URL`" in flat
+    demo_module = (ROOT / "src" / "chronos" / "broker" / "demo.py").read_text(encoding="utf-8")
+    assert f'DEMO_ACCOUNT_ID = "{DEMO_ACCOUNT_ID}"' in demo_module  # the citation holds
+    scope_check = (ROOT / "src" / "chronos" / "cli" / "b1_preflight.py").read_text("utf-8")
+    assert 'tuple(row) == ("ibkr", "paper", account_fingerprint(account, key=key))' in scope_check
+    # the SQL the step gives is valid against the real schema and reads exactly the scope row
+    match = re.search(r'"(SELECT [^"]*FROM database_scope[^"]*)"', block)
+    assert match, block
+    store = _store(tmp_path, binding="closed")
+    with closing(sqlite3.connect(f"{store.db.as_uri()}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(match.group(1)).fetchall()
+    assert len(rows) == 1 and rows[0][0] == "demo" and len(rows[0][2]) == 64, rows
+    sqlite3_cli = shutil.which("sqlite3")
+    if sqlite3_cli is not None:  # the exact shell line, with the store's path substituted
+        line = next(entry.strip() for entry in block.splitlines() if "sqlite3 " in entry)
+        argv = shlex.split(line.replace("data/chronos.db", str(store.db)))
+        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+        assert completed.returncode == 0 and completed.stdout.startswith("demo|"), completed
+
+
+def test_c1f_f1_measured_env_i_leaves_mandate_fingerprint_no_key_source_but_the_cwd_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The premise of step 8's form: with the shell's environment stripped (``env -i``) and no
+    ``.env`` in the cwd, ``mandate fingerprint`` has no key at all even though this process
+    exports one — so no shell source reaches it; with a key supplied inside ``env -i`` the
+    pseudonym is the library's. The dotenv leg — Settings reads the key from the cwd's ``.env``
+    when the environment holds none — is test_7p's first assertion (a dotenv-format file; no
+    test ever creates a ``.env``)."""
+
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", _hex("c1f: the operator shell's exported key"))
+    cwd = tmp_path / "checkout-without-dotenv"
+    cwd.mkdir()
+    command = [
+        "env",
+        "-i",
+        *(f"{name}={value}" for name, value in SAFE_ENV.items()),
+        f"PYTHONPATH={ROOT / 'src'}",
+        sys.executable,
+        "-m",
+        "chronos.cli",
+        "mandate",
+        "fingerprint",
+        "--account-id",
+        DEMO_ACCOUNT_ID,
+    ]
+    stripped = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+    assert stripped.returncode == 1, stripped
+    assert "no persistence key available" in stripped.stdout, stripped
+    file_key = _hex("c1f: the key the .env would hold — never a real key")
+    supplied = [*command[:2], f"CHRONOS_PERSISTENCE_KEY={file_key}", *command[2:]]
+    with_key = subprocess.run(supplied, cwd=cwd, capture_output=True, text=True, check=False)
+    assert with_key.returncode == 0, with_key
+    expected = account_fingerprint(DEMO_ACCOUNT_ID, key=PersistenceKey.from_hex(file_key))
+    assert with_key.stdout.splitlines()[0] == expected
