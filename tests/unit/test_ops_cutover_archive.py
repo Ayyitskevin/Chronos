@@ -5043,7 +5043,7 @@ def _rendered_fences(markdown_it: Any, text: str) -> tuple[list[tuple[int, int]]
 
 # (markdown, the line checker's offences, how many fences a CommonMark renderer shows). Fix round 3
 # (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's, alone on
-# its line, closes it; any other line is content. The first six are legitimate CommonMark.
+# its line, closes it; any other line is content. The first seven are legitimate CommonMark.
 _FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
     "kimi_a_content_line_starts_with_the_opener": (
         "```bash\nprintf 'x'\n```bash\necho still-code\n```\n",
@@ -5063,6 +5063,7 @@ _FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
         1,
     ),
     "a_backtick_in_the_info_string_opens_no_fence": ("``` not `a fence`\ntext\n", [], 0),
+    "a_close_indented_three_closes": ("```bash\nx\n   ```\n", [], 1),
     "four_backticks_closed_by_three": (
         "````bash\nx\n```\n",
         ["line 1: a fence that never closes"],
@@ -5075,6 +5076,16 @@ _FENCE_CONTROLS: dict[str, tuple[str, list[str], int]] = {
         1,
     ),
     "an_opener_alone_on_the_last_line": ("text\n\n```\n", ["line 3: a fence that never closes"], 1),
+    "a_close_indented_four_past_the_opener_is_content": (
+        "```bash\nx\n    ```\n",
+        ["line 1: a fence that never closes"],
+        1,
+    ),
+    "a_list_item_close_indented_four_past_the_opener_is_content": (
+        "1. one\n   ```bash\n   x\n       ```\n2. two\n",
+        ["line 2: a fence that never closes (its list item ends at line 5)"],
+        1,
+    ),
     "n2_text_on_a_list_item_fence_s_close": (
         "1. one\n   ```bash\n   x\n   ``` then prose\n   more\n\n2. two\n",
         ["line 2: a fence that never closes (its list item ends at line 7)"],
