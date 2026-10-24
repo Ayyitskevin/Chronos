@@ -132,24 +132,41 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   establish it, use `8093176`, the last schema-17 commit on main (`f0a3446^1`, the first parent
   of the merge that brought schema 18). Then check it. The check parses that commit's
   `database.py` with `ast` and never imports or runs it: it prints `SCHEMA_VERSION = 17` only
-  when the file sets `SCHEMA_VERSION` in exactly one place, a plain top-level assignment of 17.
-  Two assignments, an annotated or augmented one, a binding anywhere else, a string or a
+  when the one place it can see setting `SCHEMA_VERSION` is a plain top-level assignment of 17.
+  Two assignments, an annotated or augmented one, a binding anywhere else, a string, bytes or
   keyword argument that names it, or a `*` import each print a line beginning `STOP:` instead
-  (C1R-F fix round 1, kimi P1). This must print exactly one line, `SCHEMA_VERSION = 17`;
-  anything else — a `STOP:` line, an error, or nothing — means that commit is not the rollback
-  code, so stop:
+  (C1R-F fix round 1, kimi P1). So does any use of `exec`, `eval`, `compile`, `__import__`,
+  `setattr`, `globals`, `vars`, `locals`, `importlib`, `builtins` or `__builtins__`, whatever
+  it does: code built or looked up at run time can set the name where a static read cannot
+  follow it (fix round 2, kimi P1). The check guards against an honest wrong pick — a mistyped
+  sha, a schema-18 commit — not against a commit written to defeat it. The backstop for that
+  is the schema gate: code whose effective `SCHEMA_VERSION` is 18 refuses the restored
+  schema-17 store at start. `db-preflight`, which the backend unit runs first, prints
+  `REFUSE [schema] Unsupported Chronos schema version 17; expected 18` and exits 78
+  (rehearsed), so such a pick fails loudly, not silently. This must print exactly one line,
+  `SCHEMA_VERSION = 17`; anything else — a `STOP:` line, an error, or nothing — means that
+  commit is not the rollback code, so stop:
   ```bash
   git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
   import ast, sys
   tree = ast.parse(sys.stdin.buffer.read())
   name = "SCHEMA_VERSION"
-  sets = [  # every node that may set it: bind, delete, import, keyword, string, import *
+  runs = {"exec", "eval", "compile", "__import__", "setattr", "globals", "vars", "locals"}
+  used = sorted({  # run-time code that may set it, whatever it does: a name, a def, an import
+      w for n in ast.walk(tree)
+      for w in (getattr(n, "id", None), getattr(n, "name", None), getattr(n, "module", None))
+      if w in runs or str(w).split(".")[0] in ("importlib", "builtins", "__builtins__")
+  })
+  if used:
+      sys.exit("STOP: the file uses " + ", ".join(used) + ", which a static read cannot follow.")
+  sets = [  # every node that may set it: bind, delete, import, keyword, string, bytes, import *
       n for n in ast.walk(tree)
       if name in (getattr(n, "id", None), getattr(n, "attr", None))
       and not isinstance(n.ctx, ast.Load)
       or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "arg", None))
       or name in (getattr(n, "rest", None), *getattr(n, "names", ()))
       or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+      or isinstance(n, ast.Constant) and isinstance(n.value, bytes) and name.encode() in n.value
       or isinstance(n, ast.alias) and n.name == "*"
   ]
   top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
