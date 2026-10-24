@@ -456,11 +456,21 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   exits 1 and moves nothing. Never `mv -n`: measured on 9.7 it declines an occupied name
   SILENTLY with exit 0, so a rollback onto a keyed `chronos.db` the backend already created
   looks done and is not (C1 F3). An older coreutils rejects the flag itself (`invalid argument`,
-  exit 1, nothing moved); there, test the name first and move only when it is free:
-  `test ! -e data/chronos.db && mv data/chronos.db.archived-<stamp> data/chronos.db`. Then
+  exit 1, nothing moved); there — and never with a check-then-move, which a live name created
+  between the check and the move would defeat — link the archived file to the live name and
+  remove the archived name only after the link succeeded:
+  `ln -T data/chronos.db.archived-<stamp> data/chronos.db && rm data/chronos.db.archived-<stamp>`
+  and the same for `-wal`/`-shm`. `link(2)` refuses an existing name inside the one call
+  (`Already exists`, exit 1, nothing changed): nothing is renamed or unlinked over the live
+  name, so a store that appeared there a moment earlier is never overwritten; `-T` makes a
+  directory at the live name a refusal too, never a link inside it; the two names share
+  `data/`, one filesystem. Both forms are one no-clobber kernel call each — on an occupied name
+  `mv --update=none-fail` issues a single `renameat2(RENAME_NOREPLACE)` and `ln -T` a single
+  `link(2)`, measured with strace (C1-F fix round 1, kimi P1-2). Then
   **check**: `ls -la data/` must show no `.archived-<stamp>` name and the three regular files at
-  the live names; a `not replacing` line means a live name was occupied — stop and look before
-  anything else. Then check out the pre-cutover code (`git checkout <pre-cutover sha>`, the sha
+  the live names; a `not replacing` or `Already exists` line means a live name was occupied —
+  stop and look before anything else. Then check out the pre-cutover code (`git checkout
+  <pre-cutover sha>`, the sha
   you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by design);
   start. The move refuses if the live name exists; a sentinel still there says
   `mv: cannot move 'data/chronos.db.archived-<stamp>' to
