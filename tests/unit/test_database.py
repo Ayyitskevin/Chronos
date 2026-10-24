@@ -295,6 +295,42 @@ def test_empty_v1_database_is_refused_without_mutation(tmp_path: Path) -> None:
         database.dispose()
 
 
+def test_pre_n3_schema_refusal_points_at_the_cutover_runbook_not_only_at_alembic(
+    tmp_path: Path,
+) -> None:
+    """C1 F8: the backend's refusal of a pre-N3 store (schema 17) sent the operator to
+    `alembic upgrade head` — a route that, for a store bound before N3, ends at migration
+    0017's refusal by design. The one guidance message says so and names docs/ops/N3-CUTOVER.md;
+    db-preflight composes its REFUSE line from the same constant."""
+
+    database_path = tmp_path / "pre-n3.db"
+    database = Database(f"sqlite+pysqlite:///{database_path}")
+    try:
+        database.initialize()
+        with database.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE schema_version SET version = :version"),
+                {"version": SCHEMA_VERSION - 1},
+            )
+        _assert_initialize_refuses_without_mutation(
+            database,
+            database_path,
+            expected_version=SCHEMA_VERSION - 1,
+            expected_error=(
+                f"Unsupported Chronos schema version {SCHEMA_VERSION - 1}; "
+                f"expected {SCHEMA_VERSION}"
+            ),
+        )
+        with pytest.raises(RuntimeError) as refused:
+            database.initialize()
+    finally:
+        database.dispose()
+    message = str(refused.value)
+    assert "docs/ops/N3-CUTOVER.md" in message and "0017" in message, message
+    assert "forthcoming" not in message
+    assert "alembic upgrade head" in message  # the route still exists for an unbound store
+
+
 def test_populated_v1_database_is_refused_without_mutation(tmp_path: Path) -> None:
     database_path = tmp_path / "populated-v1.db"
     database = Database(f"sqlite+pysqlite:///{database_path}")

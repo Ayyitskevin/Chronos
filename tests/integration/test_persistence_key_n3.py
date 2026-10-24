@@ -237,8 +237,23 @@ def test_0017_refuses_a_bound_database_and_changes_nothing(tmp_path: Path) -> No
 
     message = str(refused.value)
     assert "database_scope" in message
-    assert "docs/ops/N3-CUTOVER.md" in message  # the archive runbook (N3-2, forthcoming)
+    assert "docs/ops/N3-CUTOVER.md" in message  # the archive runbook (N3-2)
     assert _dump(db_path) == before  # zero changes: rows, schema_version and alembic_version
+
+
+def test_0017_refusal_names_the_landed_runbook_and_nothing_forthcoming(tmp_path: Path) -> None:
+    """C1 F8: the refusal called the N3-2 cutover runbook "forthcoming"; it landed (#305, #310,
+    #311-#313). The message names the page and nothing that is still to come."""
+
+    db_path = tmp_path / "chronos.db"
+    _make_v17_database(db_path, scope_fingerprint=_unkeyed("DU7654321"))
+
+    with pytest.raises(RuntimeError) as refused:
+        command.upgrade(_alembic_config(db_path), "head")
+
+    message = str(refused.value)
+    assert "docs/ops/N3-CUTOVER.md" in message
+    assert "forthcoming" not in message
 
 
 def test_0017_upgrades_an_unbound_v17_database_to_schema_18(tmp_path: Path) -> None:
