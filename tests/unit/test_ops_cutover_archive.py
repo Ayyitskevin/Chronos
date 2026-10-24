@@ -51,6 +51,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 from collections.abc import Iterator, MutableMapping
 from contextlib import closing
@@ -1514,6 +1515,264 @@ def test_7n_the_runbook_moves_the_decrypt_proof_off_host_before_any_copy_is_dele
     assert "decrypts the new artifact through the host identity" not in prose
     rollback = " ".join(text[text.index("## Rollback") :].split())
     assert "(or the host identity)" not in rollback
+
+
+# B2-FIX1 (C1 F2): the key has ONE home, the checkout's .env, and a counted check proves it is
+# nowhere else the units or the shell hand the backend; (C1 F9) the artifact is not a repo file.
+
+#: what each cited line must say (the runbook states the precedence by file:line)
+_ONE_HOME_CITATIONS = {
+    "src/chronos/config/settings.py": ('env_file=".env"', "case_sensitive=False"),
+    "docs/ops/chronos-backend.service": ("WorkingDirectory=", "EnvironmentFile="),
+    "docs/ops/chronos-worker.service": ("WorkingDirectory=", "EnvironmentFile="),
+}
+
+
+def _step(text: str, start: str, end: str) -> str:
+    return text[text.index(start) : text.index(end)]
+
+
+def _one_home_block() -> str:
+    step5 = _step(RUNBOOK.read_text(encoding="utf-8"), "5. **Generate", "6. **Escrow")
+    blocks = [b for b in re.findall(r"```bash\n(.*?)```", step5, re.S) if "ONE HOME: OK" in b]
+    assert len(blocks) == 1, "step 5 carries exactly one one-home check block"
+    return textwrap.dedent(blocks[0])
+
+
+def test_7o_the_runbook_names_one_home_for_the_key_and_its_citations_hold() -> None:
+    """C1 F2: step 5 names the checkout's .env as the key's only home and says why, by file:line;
+    every cited line says what the page claims, and every claim is cited."""
+
+    step5 = _step(RUNBOOK.read_text(encoding="utf-8"), "5. **Generate", "6. **Escrow")
+    prose = " ".join(step5.split())
+    assert "One home: `<checkout>/.env`, and only there." in prose
+    assert "beats" in prose and "case-insensitively" in prose  # the precedence, stated
+    assert "settings_customise_sources" in prose  # the library's order, named
+    covered: set[tuple[str, str]] = set()
+    for path, number in re.findall(r"((?:src|docs)/[\w/.-]+\.(?:py|service)):(\d+)", step5):
+        assert path in _ONE_HOME_CITATIONS, path
+        line = (ROOT / path).read_text(encoding="utf-8").splitlines()[int(number) - 1]
+        said = [needle for needle in _ONE_HOME_CITATIONS[path] if needle in line]
+        assert said, f"{path}:{number} says {line!r}"
+        covered.update((path, needle) for needle in said)
+    wanted = {(path, n) for path, needles in _ONE_HOME_CITATIONS.items() for n in needles}
+    assert covered == wanted, wanted - covered
+
+
+def test_7p_the_process_environment_beats_the_dotenv_file_case_insensitively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The precedence the one-home rule rests on (C1 probe P1), pinned so a change to it sends
+    someone back to step 5: a value in the process environment — where a unit's EnvironmentFile=
+    puts it — wins over the dotenv file, and a lower-case name counts."""
+
+    from chronos.config.settings import Settings
+
+    dotenv = tmp_path / "dotenv-format"  # never a .env: the file Settings is pointed at
+    in_file = _hex("b2-fix1 TEST value in the dotenv file — never a real key")
+    in_environment = _hex("b2-fix1 TEST value in the process environment — never a real key")
+    dotenv.write_text(f"CHRONOS_PERSISTENCE_KEY={in_file}\n", encoding="utf-8")
+    monkeypatch.delenv("CHRONOS_PERSISTENCE_KEY", raising=False)
+    loaded = Settings(_env_file=dotenv).chronos_persistence_key
+    assert loaded is not None and loaded.get_secret_value() == in_file
+    monkeypatch.setenv("chronos_persistence_key", in_environment)
+    loaded = Settings(_env_file=dotenv).chronos_persistence_key
+    assert loaded is not None and loaded.get_secret_value() == in_environment
+
+
+def _run_one_home_check(
+    tmp_path: Path,
+    *,
+    dotenv: str,
+    backend_env: str | None = "",
+    worker_env: str = "",
+    unit_text: str = "",
+    manager_env: str = "",
+    shell_env: dict[str, str] | None = None,
+    shell: str = "bash",
+) -> subprocess.CompletedProcess[str]:
+    """The step-5 block, run as written with two substitutions: ``<checkout>/.env`` is a file
+    named ``dotenv-substitute`` (no .env is ever created) and ``<PRIVATE_ENV_DIR>`` is a temp
+    directory; ``systemctl`` is a stub that prints the unit text and the manager environment."""
+
+    checkout, private, stub = tmp_path / "checkout", tmp_path / "private", tmp_path / "bin"
+    for directory in (checkout, private, stub):
+        directory.mkdir()
+    (checkout / "dotenv-substitute").write_text(dotenv, encoding="utf-8")
+    if backend_env is not None:
+        (private / "chronos-backend.env").write_text(backend_env, encoding="utf-8")
+    (private / "chronos-worker.env").write_text(worker_env, encoding="utf-8")
+    (tmp_path / "units.txt").write_text(unit_text, encoding="utf-8")
+    (tmp_path / "manager.txt").write_text(manager_env, encoding="utf-8")
+    systemctl = stub / "systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\n"
+        f'case "$2" in cat) cat {tmp_path / "units.txt"} ;; '
+        f"show-environment) cat {tmp_path / 'manager.txt'} ;; *) exit 64 ;; esac\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    block = re.sub(r"(?<![\w/.-])\.env\b", "dotenv-substitute", _one_home_block())
+    block = block.replace("<PRIVATE_ENV_DIR>", str(private))
+    assert re.search(r"<[A-Z_]+>", block) is None, block
+    env = {"PATH": f"{stub}:{os.environ['PATH']}", "HOME": str(tmp_path), **(shell_env or {})}
+    return subprocess.run(
+        [shell, "-c", block], cwd=checkout, env=env, capture_output=True, text=True, check=False
+    )
+
+
+_FIX1_KEY = _hex("b2-fix1 TEST key for the one-home check — never a real one")
+_FIX1_OTHER = _hex("b2-fix1 TEST other key — never a real one")
+
+
+@pytest.mark.parametrize(
+    ("case", "kwargs", "ok"),
+    [
+        pytest.param(*row, id=row[0])
+        for row in [
+            ("only-in-dotenv", {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"}, True),
+            (
+                "a-comment-elsewhere-is-not-a-key-line",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": "# CHRONOS_PERSISTENCE_KEY lives in the checkout's .env\n",
+                },
+                True,
+            ),
+            (
+                "wrong-file-only-in-backend-env",
+                {"dotenv": "", "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "empty-dotenv-line-key-in-backend-env",
+                {
+                    "dotenv": "CHRONOS_PERSISTENCE_KEY=\n",
+                    "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                },
+                False,
+            ),
+            (
+                "both-with-different-values",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "backend_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "lower-case-name-in-worker-env",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "worker_env": f"chronos_persistence_key={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "two-lines-in-dotenv",
+                {
+                    "dotenv": (
+                        f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\nCHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n"
+                    ),
+                },
+                False,
+            ),
+            (
+                "export-form-in-dotenv",
+                {"dotenv": f"export CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"},
+                False,
+            ),
+            (
+                "environment-line-in-a-unit",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "unit_text": f"[Service]\nEnvironment=CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "in-the-user-manager-environment",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "manager_env": f"CHRONOS_PERSISTENCE_KEY={_FIX1_OTHER}\n",
+                },
+                False,
+            ),
+            (
+                "exported-in-this-shell",
+                {
+                    "dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n",
+                    "shell_env": {"CHRONOS_PERSISTENCE_KEY": _FIX1_KEY},
+                },
+                False,
+            ),
+            (
+                "a-private-env-file-that-is-not-there",
+                {"dotenv": f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n", "backend_env": None},
+                False,
+            ),
+        ]
+    ],
+)
+def test_7q_the_one_home_check_passes_only_with_the_key_in_the_dotenv_alone(
+    tmp_path: Path, case: str, kwargs: dict[str, Any], ok: bool
+) -> None:
+    """C1 F2, executed: the step-5 block ends ``ONE HOME: OK`` only when the exact key line is in
+    the checkout's .env once and no other source the units or this shell hand the backend names
+    it — the wrong-file case (the key only in chronos-backend.env) stops the operator before the
+    compare. It prints counts, never the value."""
+
+    completed = _run_one_home_check(tmp_path, **kwargs)
+    last = completed.stdout.strip().splitlines()[-1]
+    assert last == ("ONE HOME: OK" if ok else "STOP: the key is not in exactly one place"), (
+        case,
+        completed.stdout,
+        completed.stderr,
+    )
+    for value in (_FIX1_KEY, _FIX1_OTHER):
+        assert value not in completed.stdout + completed.stderr, case
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+@pytest.mark.parametrize("ok", [True, False], ids=["only-in-dotenv", "wrong-file"])
+def test_7q_zsh_the_one_home_check_reads_the_same_in_zsh(tmp_path: Path, ok: bool) -> None:
+    line = f"CHRONOS_PERSISTENCE_KEY={_FIX1_KEY}\n"
+    kwargs: dict[str, Any] = {"dotenv": line} if ok else {"dotenv": "", "backend_env": line}
+    completed = _run_one_home_check(tmp_path, shell="zsh", **kwargs)
+    expected = "ONE HOME: OK" if ok else "STOP: the key is not in exactly one place"
+    assert completed.stdout.strip().splitlines()[-1] == expected, completed
+
+
+def test_7r_step6_runs_the_one_home_check_before_the_escrow_and_before_any_deletion() -> None:
+    """C1 F2: the check stands before the escrow command and again between MATCH and the first
+    deletion; the compare reads the one home, the file the check counted."""
+
+    step6 = _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **")
+    checks = [m.start() for m in re.finditer("one-home check", step6)]
+    escrow_command = step6.index("python -m chronos.operations.persistence_key_escrow")
+    assert any(at < escrow_command for at in checks), "no check before the escrow"
+    match, deletion = step6.index("echo MATCH"), step6.index("shred -u")
+    assert any(match < at < deletion for at in checks), "no check between MATCH and deletion"
+    remote = re.search(r'ssh <host> "([^"]*)"', step6)
+    assert remote is not None and "<checkout>/.env" in remote.group(1), step6
+
+
+def test_7s_the_escrow_artifact_is_written_outside_the_checkout_in_a_private_directory() -> None:
+    """C1 F9: ``--out`` names a 0700 directory under the home, made fresh just before the tool
+    runs — never a bare name, which lands in the checkout (not ignored; writable by the backend
+    unit); the copy, the compare and the shred all use that one path."""
+
+    step6 = _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **")
+    command = re.search(r"persistence_key_escrow --out (\S+)", step6)
+    assert command is not None
+    out = command.group(1)
+    directory, name = out.rsplit("/", 1) if "/" in out else ("", out)
+    assert directory.startswith("~/") and name == "chronos-persistence-key.age", out
+    made = step6.index(f"mkdir -m 0700 {directory}")
+    assert made < command.start()
+    assert f"scp <host>:{directory[2:]}/{name} ." in step6
+    assert f"shred -u {out}" in step6 and f"rmdir {directory}" in step6
+    assert "<checkout>/chronos-persistence-key.age" not in step6
 
 
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
