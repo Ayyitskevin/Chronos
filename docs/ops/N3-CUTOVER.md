@@ -386,11 +386,21 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   data/chronos.db data/chronos.db-wal data/chronos.db-shm data/chronos.db-journal` (and any
   sentinel the report's `sentinels` lists at an `.archived-<stamp>` name after a refusal); if
   the backend already ran, the fresh keyed `chronos.db` sits at the live name instead and you
-  are in the next bullet; then rename the moved-aside files back by name —
-  `mv -n data/chronos.db.archived-<stamp> data/chronos.db` and the same for the `-wal`/`-shm`
-  siblings that were moved — check out the pre-cutover code (`git checkout <pre-cutover sha>`,
-  the sha you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by
-  design); start. `mv -n` refuses if the live name exists (a sentinel still there says so with
+  are in the next bullet; then rename the moved-aside files back by name, with the form that
+  REFUSES an occupied live name out loud —
+  `mv --update=none-fail data/chronos.db.archived-<stamp> data/chronos.db` and the same for the
+  `-wal`/`-shm` siblings that were moved. GNU coreutils 9.5 or newer (`mv --version`; the
+  rehearsal host runs 9.7): on an occupied name it prints `mv: not replacing 'data/chronos.db'`,
+  exits 1 and moves nothing. Never `mv -n`: measured on 9.7 it declines an occupied name
+  SILENTLY with exit 0, so a rollback onto a keyed `chronos.db` the backend already created
+  looks done and is not (C1 F3). An older coreutils rejects the flag itself (`invalid argument`,
+  exit 1, nothing moved); there, test the name first and move only when it is free:
+  `test ! -e data/chronos.db && mv data/chronos.db.archived-<stamp> data/chronos.db`. Then
+  **check**: `ls -la data/` must show no `.archived-<stamp>` name and the three regular files at
+  the live names; a `not replacing` line means a live name was occupied — stop and look before
+  anything else. Then check out the pre-cutover code (`git checkout <pre-cutover sha>`, the sha
+  you wrote down before step 1: a schema-17 store is refused by the post-N3 code, by design);
+  start. The move refuses if the live name exists (a sentinel still there says so with
   `Is a directory`); never force it.
 - **After new rows exist in the keyed store:** going back drops them. Decide that explicitly;
   the archive and the moved-aside files restore the pre-cutover state at any time, with the

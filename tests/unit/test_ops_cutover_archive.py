@@ -1472,7 +1472,8 @@ def test_7h_the_runbook_states_the_r2_boundaries() -> None:
 
 def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     """r3: the sentinel directories, the owner's rmdir as step 7's first line, the rollback order
-    (rmdir, then mv -n), the new refusal row; the escrow step says the tool deletes nothing."""
+    (rmdir, then the rename back), the new refusal row; the escrow step says the tool deletes
+    nothing."""
 
     text = RUNBOOK.read_text(encoding="utf-8")
     step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
@@ -1485,7 +1486,7 @@ def test_7j_the_runbook_states_the_r3_boundaries() -> None:
     )
     assert "non-regular" in step7  # what every writer says until then
     rollback = text[text.index("## Rollback") :]
-    assert rollback.index("rmdir") < rollback.index("mv -n")
+    assert rollback.index("rmdir") < rollback.index("mv --update=none-fail")  # C1 F3's form
     table = text[text.index("## What the gate's refusal codes mean") :]
     assert "`LIVE_NAME_OCCUPIED`" in table
 
