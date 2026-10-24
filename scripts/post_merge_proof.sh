@@ -145,7 +145,10 @@ step "2. the merge result is on ${DEFAULT_BRANCH} (§6.2)"
 # D-44: every ancestry read in this proof (here, §6.3's identity, the PR base, and MERGE_SHA^ in
 # normalised_patch) disables grafts, replacement refs and the commit-graph, exactly as gate 30
 # does: a forged commit-graph in the clone or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store can
-# rewrite parent edges, so the answer is read from the commit objects themselves.
+# rewrite parent edges, so the answer is read from the commit objects themselves. The content
+# reads (§6.3's byte equality and changed paths, §6.5's claimed files, §6.6's row-ID scan) take
+# the same flags (A1-F1): the same writer can swap a commit's root tree in the graph, or replace
+# the commit outright, and make the merge result read as the reviewed head.
 if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects merge-base --is-ancestor "${MERGE_SHA}" "origin/${DEFAULT_BRANCH}" 2>/dev/null; then
   pass "${MERGE_SHA} is an ancestor of origin/${DEFAULT_BRANCH}"
 else
@@ -188,7 +191,7 @@ if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects m
   printf '        checked here: a merge commit may legitimately carry other changes to these paths.\n'
 else
   pass "identity rewritten (squash or rebase) — as §6.3 expects; proving final-state equality instead"
-  if git diff --exit-code "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" >/dev/null 2>&1; then
+  if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects diff --exit-code "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" >/dev/null 2>&1; then
     pass "byte-for-byte equal on the given path(s): git diff --exit-code ${HEAD_OID} ${MERGE_SHA} -- ${PATHS[*]}"
   else
     # Byte equality stays the first question; this is only reached when it says no.
@@ -207,7 +210,7 @@ else
         else
           pass "${changed}: ok (adjacent landing) — byte equality broke, and the PR's patch equals the merge commit's patch once index/@@ are stripped"
         fi
-      done < <(git diff --name-only "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" 2>/dev/null)
+      done < <(GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects diff --name-only "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" 2>/dev/null)
     fi
   fi
 fi
@@ -245,20 +248,20 @@ step "5. the claimed files are as claimed, at the merge result (§6.5)"
 while IFS=$'\t' read -r name status previous; do
   [[ -z "${name}" ]] && continue
   if [[ "${status}" == "removed" ]]; then
-    if git cat-file -e "${MERGE_SHA}:${name}" 2>/dev/null; then
+    if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects cat-file -e "${MERGE_SHA}:${name}" 2>/dev/null; then
       fail "${name} was reported deleted but is present at ${MERGE_SHA}"
     else
       pass "${name} is absent (deleted), as claimed"
     fi
   else
-    if git cat-file -e "${MERGE_SHA}:${name}" 2>/dev/null; then
+    if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects cat-file -e "${MERGE_SHA}:${name}" 2>/dev/null; then
       pass "${name} is present (${status}), as claimed"
     else
       fail "${name} was reported ${status} but is ABSENT at ${MERGE_SHA} — the phantom-merge signature"
     fi
   fi
   if [[ -n "${previous}" ]]; then
-    if git cat-file -e "${MERGE_SHA}:${previous}" 2>/dev/null; then
+    if GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects cat-file -e "${MERGE_SHA}:${previous}" 2>/dev/null; then
       fail "${previous} was renamed to ${name} but still exists at ${MERGE_SHA}"
     else
       pass "${previous} is absent, as a rename to ${name} requires"
@@ -270,7 +273,7 @@ done <<<"${API_FILES}"
 step "6. duplicated row IDs in the table documents (§6.6)"
 
 for table in DECISIONS.md RISK_REGISTER.md; do
-  if ! git cat-file -e "${MERGE_SHA}:${table}" 2>/dev/null; then
+  if ! GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects cat-file -e "${MERGE_SHA}:${table}" 2>/dev/null; then
     fail "${table} is absent at ${MERGE_SHA}; the duplicate-ID scan cannot run"
     continue
   fi
@@ -278,7 +281,7 @@ done
 
 # One combined stream over both documents, matching the full ID cell — a looser
 # pattern false-positives on the historical `R-nn-orig` rows.
-DUPES="$( { git show "${MERGE_SHA}:DECISIONS.md" 2>/dev/null; git show "${MERGE_SHA}:RISK_REGISTER.md" 2>/dev/null; } \
+DUPES="$( { GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects show "${MERGE_SHA}:DECISIONS.md" 2>/dev/null; GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects show "${MERGE_SHA}:RISK_REGISTER.md" 2>/dev/null; } \
   | grep -oE '^\| [DR]-[0-9]+[^ |]*' | sort | uniq -d )"
 if [[ -z "${DUPES}" ]]; then
   pass "no duplicated row IDs in DECISIONS.md or RISK_REGISTER.md at ${MERGE_SHA}"
