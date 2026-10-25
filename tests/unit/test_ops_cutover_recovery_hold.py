@@ -20,6 +20,9 @@ are compared with what those commands print.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import re
 import subprocess
@@ -39,6 +42,7 @@ from chronos.api.dependencies import require_lease_holder, require_writer
 from chronos.api.main import create_app
 from chronos.api.routes import autonomy as autonomy_routes
 from chronos.api.routes import live as live_routes
+from chronos.cli.campaign_preflight import cmd_campaign_preflight
 from chronos.cli.campaign_status import _recovery_status
 from chronos.config.settings import Settings, get_settings
 from chronos.operations import cutover_archive as cutover
@@ -102,8 +106,11 @@ _GATE: dict[str, tuple[str, ...]] = {
         "marker was not where the backend looks, so the live-safety state this host ran with is "
         "missing.",
         "`python -m chronos.cli campaign status` and `campaign preflight` cannot show this reason: "
-        "they report the fresh store's missing `installation_identity` row as UNVERIFIED, before "
-        "and after the acknowledgement.",
+        "until the restart after your acknowledgement they report the fresh store's missing "
+        "`installation_identity` row as UNVERIFIED.",
+        "That restart writes the row from the marker's id (ADR-0054, amended 2026-10-25), and from "
+        "then on both read the pair as consistent: `recovery hold: CLEAR` and "
+        "`PASS [ADR-0054] state identity`.",
     ),
     "acknowledge": (
         "**Then you acknowledge it: your act, with a typed note** saying this is the expected N3 "
@@ -470,23 +477,66 @@ def test_c1rf2_a_re_archived_store_brings_the_hold_back(demo_env: Path) -> None:
 
 
 def test_c1rf2_campaign_status_cannot_show_this_reason(demo_env: Path) -> None:
-    """The runbook's claim about `campaign status`, measured before and after acknowledging."""
+    """The runbook's claim about `campaign status` and `campaign preflight`, measured at each step.
 
+    UNVERIFIED while held, still UNVERIFIED in the acknowledging process (the note takes effect
+    at the next start), then CLEAR and PASS after the restart writes the identity row (PGAP-I).
+    """
+
+    def preflight_line() -> str:
+        arguments = argparse.Namespace(
+            mandate=demo_env / "mandate.json",
+            registry=demo_env / "registry.json",
+            state_dir=demo_env,
+            unit=demo_env / "worker.service",
+            policy=demo_env / "policy.md",
+            provider="local",
+            model="model-tag",
+            worker_backend_url="http://127.0.0.1:8765",
+            worker_symbols="SPY",
+            backend_symbols="SPY",
+            backend_host="127.0.0.1",
+            backend_port=8765,
+            evidence=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_campaign_preflight(arguments)
+        (line,) = [
+            line for line in output.getvalue().splitlines() if "ADR-0054] state identity" in line
+        ]
+        return line
+
+    unverified = (
+        "FAIL [SHADOW_CAMPAIGN ADR-0054] state identity: UNVERIFIED; missing "
+        "installation_identity row; boot the backend writer once, then re-run preflight"
+    )
     with _boot():
         pass
     _archive_per_cutover(demo_env)
     with _boot() as client:
-        assert _recovery_status(demo_env, demo_env / "chronos.db").detail == (
-            "missing installation_identity row"
+        status = _recovery_status(demo_env, demo_env / "chronos.db")
+        assert (status.state.value, status.detail) == (
+            "UNVERIFIED",
+            "missing installation_identity row",
         )
+        assert preflight_line() == unverified
         client.post(
             "/live/recovery/acknowledge",
             json={"note": "synthetic N3 cutover"},
             headers=_token(demo_env),
         ).raise_for_status()
+        status = _recovery_status(demo_env, demo_env / "chronos.db")
+        assert status.state.value == "UNVERIFIED"
+        assert preflight_line() == unverified
     with _boot() as client:
         assert client.app.state.backend.recovery_hold is None  # type: ignore[attr-defined]
     result = _recovery_status(demo_env, demo_env / "chronos.db")
-    assert (
-        result.state.value == "UNVERIFIED" and result.detail == "missing installation_identity row"
+    assert (result.name, result.state.value, result.detail) == (
+        "recovery hold",
+        "CLEAR",
+        "installation witnesses agree",
+    )
+    assert preflight_line() == (
+        "PASS [ADR-0054] state identity: marker/database pair consistent; no recovery hold"
     )

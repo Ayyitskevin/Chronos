@@ -20,10 +20,12 @@ real app twice through its real lifespan, deleting state between boots.
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 import pytest
 from fastapi.testclient import TestClient
@@ -56,10 +58,13 @@ from chronos.orders.recovery_hold import (
     evaluate_recovery_hold,
     evaluate_startup_recovery_hold,
     read_restore_pending_token,
+    record_acknowledgement,
 )
 from chronos.orders.state_generation import StateGenerationMarker
+from chronos.persistence.database import Database
 from chronos.persistence.schema import Base, InstallationIdentityRow
 from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.locking import WriterLease
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -661,3 +666,287 @@ def test_a_restore_witness_file_holds_over_the_real_lifespan(demo_env: Path) -> 
         hold = client.app.state.backend.recovery_hold  # type: ignore[attr-defined]
         assert hold is not None
         assert hold.reason is RecoveryHoldReason.RESTORE_PENDING
+
+
+# --- An acknowledged replacement adopts the marker's id (PGAP-I, ADR-0054 amendment) --
+#
+# The N3 cutover moves the store aside and keeps the marker, so the fresh keyed store
+# boots `database_replaced`. Before this amendment the acknowledgement retired the hold
+# but nothing wrote the identity row, so every later boot re-derived the same hold and
+# retired it again, and `campaign preflight` stayed UNVERIFIED for good. The writer now
+# records the marker's id on the boot that finds an acknowledgement for that exact
+# replacement, and in no other case. Each test below pins one of the brief's invariants.
+
+_MARKER_ID: Final = "installation-before-the-cutover"
+_LATER: Final = _NOW + timedelta(minutes=5)
+
+
+def _replaced_database(state: Path, marker_id: str = _MARKER_ID) -> sessionmaker[Session]:
+    """A surviving marker beside a database `create_all` just made: no identity row."""
+
+    StateGenerationMarker(state / "state_generation.json").ensure_installation(marker_id, now=_NOW)
+    engine = create_engine(f"sqlite:///{state / 'chronos.db'}")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _evaluate(sessions: sessionmaker[Session], state: Path, now: datetime) -> RecoveryHold | None:
+    marker = StateGenerationMarker(state / "state_generation.json")
+    return evaluate_startup_recovery_hold(sessions, marker, state_directory=state, now=now)
+
+
+def _acknowledge_hold(sessions: sessionmaker[Session], hold: RecoveryHold) -> None:
+    with sessions.begin() as session:
+        record_acknowledgement(
+            session, hold, note="synthetic N3 cutover", acknowledged_by="operator", now=_NOW
+        )
+
+
+def _identity(sessions: sessionmaker[Session]) -> tuple[str | None, datetime | None] | None:
+    with sessions.begin() as session:
+        row = session.get(InstallationIdentityRow, 1)
+        return None if row is None else (row.installation_id, row.first_seen_at)
+
+
+def test_an_acknowledged_replacement_adopts_the_marker_id_on_the_next_boot(
+    tmp_path: Path,
+) -> None:
+    """The seed: the boot that finds the acknowledgement writes the marker's own id."""
+
+    sessions = _replaced_database(tmp_path)
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+    assert _identity(sessions) is None
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) == (_MARKER_ID, _LATER)
+    # and from then on the pair is consistent: no hold, no further write
+    assert _evaluate(sessions, tmp_path, _LATER + timedelta(minutes=5)) is None
+    assert _identity(sessions) == (_MARKER_ID, _LATER)
+
+
+def test_an_unacknowledged_replacement_still_holds_and_writes_nothing(tmp_path: Path) -> None:
+    """Invariant 3: without the operator's note the replacement holds on every boot."""
+
+    sessions = _replaced_database(tmp_path)
+    for now in (_NOW, _LATER):
+        hold = _evaluate(sessions, tmp_path, now)
+        assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+        assert _identity(sessions) is None
+
+
+def test_adopting_the_marker_never_reseeds_it(tmp_path: Path) -> None:
+    """Invariant 2: the marker's bytes are the evidence; the seed only reads them."""
+
+    sessions = _replaced_database(tmp_path)
+    marker_path = tmp_path / "state_generation.json"
+    before = marker_path.read_bytes()
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None
+    _acknowledge_hold(sessions, hold)
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert marker_path.read_bytes() == before
+    assert json.loads(before)["installation_id"] == _MARKER_ID
+
+
+def test_an_acknowledged_mismatch_never_rewrites_a_row_bearing_a_real_id(tmp_path: Path) -> None:
+    """Invariant 1: the acknowledgement retires a mismatch; it never repairs the row."""
+
+    sessions = _replaced_database(tmp_path, marker_id="marker-installation")
+    with sessions.begin() as session:
+        session.add(
+            InstallationIdentityRow(
+                id=1, installation_id="recorded-installation", first_seen_at=_NOW
+            )
+        )
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.INSTALLATION_MISMATCH
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) == ("recorded-installation", _NOW)
+
+
+def test_an_acknowledged_lost_state_directory_writes_no_row(tmp_path: Path) -> None:
+    """Invariant 4: `state_directory_lost` keeps the row it had, and mints no marker."""
+
+    sessions = _replaced_database(tmp_path)
+    with sessions.begin() as session:
+        session.add(InstallationIdentityRow(id=1, installation_id=_MARKER_ID, first_seen_at=_NOW))
+    (tmp_path / "state_generation.json").unlink()
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.STATE_DIRECTORY_LOST
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) == (_MARKER_ID, _NOW)
+    assert not (tmp_path / "state_generation.json").exists()
+
+
+def test_an_acknowledged_unreadable_marker_beside_a_fresh_store_writes_no_row(
+    tmp_path: Path,
+) -> None:
+    """Invariant 4: `marker_unreadable` names no id, so there is nothing to adopt."""
+
+    sessions = _replaced_database(tmp_path)
+    marker_path = tmp_path / "state_generation.json"
+    marker_path.write_text("{ not json", encoding="utf-8")
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.MARKER_UNREADABLE
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) is None
+    assert marker_path.read_text(encoding="utf-8") == "{ not json"
+
+
+def test_an_acknowledged_replacement_beside_a_restore_witness_writes_no_row(
+    tmp_path: Path,
+) -> None:
+    """Invariant 4: a restore-pending token is the tool's restore; the seed leaves it alone."""
+
+    sessions = _replaced_database(tmp_path)
+    (tmp_path / RECOVERY_PENDING_NAME).write_text(
+        json.dumps({"token": "restore-2026-10-25"}), encoding="utf-8"
+    )
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+    assert hold.witness_token == "restore-2026-10-25"
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) is None
+
+
+def test_an_acknowledged_restore_pending_hold_writes_nothing(tmp_path: Path) -> None:
+    """Invariant 4: `restore_pending` keeps its row exactly as it was."""
+
+    sessions = _replaced_database(tmp_path)
+    with sessions.begin() as session:
+        session.add(InstallationIdentityRow(id=1, installation_id=_MARKER_ID, first_seen_at=_NOW))
+    (tmp_path / RECOVERY_PENDING_NAME).write_text(
+        json.dumps({"token": "restore-2026-10-25"}), encoding="utf-8"
+    )
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.reason is RecoveryHoldReason.RESTORE_PENDING
+    _acknowledge_hold(sessions, hold)
+
+    assert _evaluate(sessions, tmp_path, _LATER) is None
+    assert _identity(sessions) == (_MARKER_ID, _NOW)
+
+
+def test_an_acknowledgement_for_another_marker_id_does_not_seed(tmp_path: Path) -> None:
+    """Invariant 5: the note covered one installation's replacement, not this one."""
+
+    sessions = _replaced_database(tmp_path, marker_id="the-acknowledged-installation")
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None
+    _acknowledge_hold(sessions, hold)
+    (tmp_path / "state_generation.json").unlink()
+    StateGenerationMarker(tmp_path / "state_generation.json").ensure_installation(
+        "another-installation", now=_NOW
+    )
+
+    hold = _evaluate(sessions, tmp_path, _LATER)
+    assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+    assert hold.marker_installation_id == "another-installation"
+    assert _identity(sessions) is None
+
+
+def test_an_acknowledgement_for_another_witness_token_does_not_seed(tmp_path: Path) -> None:
+    """Invariant 5: the note covered the replacement seen with a token; without it, ask again."""
+
+    sessions = _replaced_database(tmp_path)
+    witness = tmp_path / RECOVERY_PENDING_NAME
+    witness.write_text(json.dumps({"token": "restore-2026-10-25"}), encoding="utf-8")
+    hold = _evaluate(sessions, tmp_path, _NOW)
+    assert hold is not None and hold.witness_token == "restore-2026-10-25"
+    _acknowledge_hold(sessions, hold)
+    witness.unlink()
+
+    hold = _evaluate(sessions, tmp_path, _LATER)
+    assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+    assert hold.witness_token == ""
+    assert _identity(sessions) is None
+
+
+def _move_the_store_aside(root: Path) -> None:
+    """The N3 cutover's step 3: the store family moves; the marker and kill file stay."""
+
+    for name in ("chronos.db", "chronos.db-wal", "chronos.db-shm"):
+        if (root / name).exists():
+            (root / name).rename(root / f"{name}.archived-20261025T000000Z")
+
+
+def _recorded_identity(root: Path) -> tuple[str, ...] | None:
+    with sqlite3.connect(f"file:{root / 'chronos.db'}?mode=ro", uri=True) as connection:
+        row = connection.execute(
+            "SELECT installation_id FROM installation_identity WHERE id=1"
+        ).fetchone()
+    return None if row is None else tuple(row)
+
+
+def test_a_read_only_backend_never_adopts_the_marker(demo_env: Path) -> None:
+    """Invariant 6: only the lease-holding writer writes the row, even with the note on file."""
+
+    with _boot(demo_env):
+        pass
+    marker_id = StateGenerationMarker(demo_env / "state_generation.json").read()
+    assert marker_id is not None
+    _move_the_store_aside(demo_env)
+    with _boot(demo_env) as client:
+        assert _acknowledge(client, demo_env, "synthetic N3 cutover") == 200
+    assert _recorded_identity(demo_env) is None
+
+    database = Database(f"sqlite:///{demo_env / 'chronos.db'}")
+    database.initialize()
+    lease = WriterLease(database.sessions, holder="another-writer")
+    assert lease.acquire() is True
+    try:
+        with _boot(demo_env) as client:
+            state = client.app.state.backend  # type: ignore[attr-defined]
+            assert state.read_only is True
+        assert _recorded_identity(demo_env) is None
+    finally:
+        lease.release()
+        database.dispose()
+
+    with _boot(demo_env) as client:
+        assert client.app.state.backend.recovery_hold is None  # type: ignore[attr-defined]
+    assert _recorded_identity(demo_env) == (marker_id.installation_id,)
+
+
+def test_the_adopting_boot_keeps_the_kill_switch_engaged_and_disarmed(demo_env: Path) -> None:
+    """Invariant 7: adopting the id grants nothing; the emergency stop keeps its own act."""
+
+    with _boot(demo_env) as client:
+        assert client.post(
+            "/live/kill", json={"reason": "operator stop"}, headers=_headers(demo_env)
+        ).is_success
+    _move_the_store_aside(demo_env)
+    with _boot(demo_env) as client:
+        assert client.app.state.backend.recovery_hold is not None  # type: ignore[attr-defined]
+        assert _acknowledge(client, demo_env, "synthetic N3 cutover") == 200
+    with _boot(demo_env) as client:
+        assert client.app.state.backend.recovery_hold is None  # type: ignore[attr-defined]
+        assert _recorded_identity(demo_env) is not None
+        body = client.get("/live/status", headers=_headers(demo_env)).json()
+        assert body["kill_switch"]["engaged"] is True
+        assert body["arm"]["armed"] is False
+
+
+def test_after_the_adopting_boot_no_second_hold_follows(demo_env: Path) -> None:
+    """The cutover sequence end to end: hold, note, restart, and then ordinary boots."""
+
+    with _boot(demo_env):
+        pass
+    _move_the_store_aside(demo_env)
+    with _boot(demo_env) as client:
+        hold = client.app.state.backend.recovery_hold  # type: ignore[attr-defined]
+        assert hold is not None and hold.reason is RecoveryHoldReason.DATABASE_REPLACED
+        assert _acknowledge(client, demo_env, "synthetic N3 cutover") == 200
+    for _ in range(2):
+        with _boot(demo_env) as client:
+            state = client.app.state.backend  # type: ignore[attr-defined]
+            assert state.recovery_hold is None and state.may_write is True
