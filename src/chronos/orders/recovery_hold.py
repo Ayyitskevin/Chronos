@@ -225,7 +225,9 @@ def resolve_installation(
     all* has never run this code, because ``create_all`` leaves the table empty
     and only the migration leaves the sentinel. A marker beside such a database
     therefore belongs to an installation it never witnessed, and that is the
-    replaced-database row of the table, not an adoption.
+    replaced-database row of the table, not an adoption. Only an operator's note
+    for that exact replacement turns it into one, and that write lives in
+    :func:`evaluate_startup_recovery_hold`, beside the acknowledgement it needs.
     """
 
     row = session.get(InstallationIdentityRow, 1)
@@ -305,6 +307,16 @@ def evaluate_startup_recovery_hold(
     read-only backend must not write the first witness, and it already satisfies
     everything a hold enforces -- it refuses every mutating route, it never
     publishes readiness, and it builds no autonomy runtime.
+
+    One acknowledged hold also writes (the ADR-0054 amendment of 2026-10-25): a
+    ``database_replaced`` observation the operator has typed a note for, seen with
+    no restore witness. The note says the replacement was intended -- the N3
+    cutover moves the store aside and keeps the marker -- so this database now
+    witnesses the marker's installation, and the next boot has a row to agree or
+    disagree with. Without it the row never appears and every later boot re-derives
+    the same hold. Every other acknowledged hold writes nothing: a row bearing a
+    real id is never rewritten, the marker is only read, and a restore witness
+    leaves the replacement to the restore that left it.
     """
 
     token = read_restore_pending_token(state_directory / RECOVERY_PENDING_NAME)
@@ -316,6 +328,13 @@ def evaluate_startup_recovery_hold(
             recorded_installation_id=recorded_id,
             restore_pending_token=token,
         )
-        if hold is None or acknowledgement_exists(session, hold):
+        if hold is None:
             return None
-        return hold
+        acknowledged = acknowledgement_exists(session, hold)
+        if acknowledged and hold.reason is RecoveryHoldReason.DATABASE_REPLACED and token is None:
+            session.add(
+                InstallationIdentityRow(
+                    id=1, installation_id=hold.marker_installation_id, first_seen_at=now
+                )
+            )
+        return None if acknowledged else hold
