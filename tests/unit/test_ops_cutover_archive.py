@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from markdown_it import MarkdownIt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
@@ -4445,3 +4446,766 @@ def test_c1f_fix1_measured_both_rollback_forms_are_one_no_clobber_kernel_call(
     assert len(ln_calls) == 1 and "link" in ln_calls[0] and "EEXIST" in ln_calls[0], ln_calls
     assert live.read_bytes() == b"fresh keyed store"
     assert archived.read_bytes() == b"the pre-cutover store"
+
+
+# ------------------------------------------------- C1R-F (the C1 re-run's runbook findings)
+
+#: the last schema-17 commit on main: the first parent of #309's merge (N3-1 brought schema 18)
+_LAST_SCHEMA17_MAIN = "8093176"
+_N2_DEFECT_MAIN = "1bcd424"  # main before C1R-F: the runbook with the real N2 defect
+_SCHEMA18_MERGE = "f0a3446"
+#: "Before you start"'s check that the recorded rollback commit is schema-17 code: it parses the
+#: file and never runs it, and prints the line only for ONE plain top-level ``= 17`` (fix round 1)
+#: in a file that uses no run-time code: exec, eval, compile, … importlib, builtins (fix round 2)
+_SCHEMA17_CHECK = """\
+git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
+import ast, sys
+tree = ast.parse(sys.stdin.buffer.read())
+name = "SCHEMA_VERSION"
+runs = {"exec", "eval", "compile", "__import__", "setattr", "globals", "vars", "locals"}
+used = sorted({  # run-time code that may set it, whatever it does: a name, a def, an import
+    w for n in ast.walk(tree)
+    for w in (getattr(n, "id", None), getattr(n, "name", None), getattr(n, "module", None))
+    if w in runs or str(w).split(".")[0] in ("importlib", "builtins", "__builtins__")
+})
+if used:
+    sys.exit("STOP: the file uses " + ", ".join(used) + ", which a static read cannot follow.")
+sets = [  # every node that may set it: bind, delete, import, keyword, string, bytes, import *
+    n for n in ast.walk(tree)
+    if name in (getattr(n, "id", None), getattr(n, "attr", None))
+    and not isinstance(n.ctx, ast.Load)
+    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "arg", None))
+    or name in (getattr(n, "rest", None), *getattr(n, "names", ()))
+    or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+    or isinstance(n, ast.Constant) and isinstance(n.value, bytes) and name.encode() in n.value
+    or isinstance(n, ast.alias) and n.name == "*"
+]
+top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
+if len(top) != 1:
+    sys.exit(f"STOP: {len(sets)} place(s) may set SCHEMA_VERSION, not one plain assignment.")
+value = top[0].value
+if not (isinstance(value, ast.Constant) and type(value.value) is int and value.value == 17):
+    sys.exit(f"STOP: SCHEMA_VERSION = {ast.unparse(value)}, not 17.")
+print("SCHEMA_VERSION = 17")
+'
+"""
+#: the be60be2 form (kimi C1R-F re-review HOLD P1): its string clause read ``str`` only, so
+#: ``SCHEMA_VERSION = 17`` then ``exec(b"SCHEMA_VERSION = 18")`` passed it
+_SCHEMA17_FIX1_CHECK = """\
+git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py | python -I -c '
+import ast, sys
+tree = ast.parse(sys.stdin.buffer.read())
+name = "SCHEMA_VERSION"
+sets = [  # every node that may set it: bind, delete, import, keyword, string, import *
+    n for n in ast.walk(tree)
+    if name in (getattr(n, "id", None), getattr(n, "attr", None))
+    and not isinstance(n.ctx, ast.Load)
+    or name in (getattr(n, "name", None), getattr(n, "asname", None), getattr(n, "arg", None))
+    or name in (getattr(n, "rest", None), *getattr(n, "names", ()))
+    or isinstance(n, ast.Constant) and isinstance(n.value, str) and name in n.value
+    or isinstance(n, ast.alias) and n.name == "*"
+]
+top = [s for s in tree.body if isinstance(s, ast.Assign) and s.targets == sets]
+if len(top) != 1:
+    sys.exit(f"STOP: {len(sets)} place(s) may set SCHEMA_VERSION, not one plain assignment.")
+value = top[0].value
+if not (isinstance(value, ast.Constant) and type(value.value) is int and value.value == 17):
+    sys.exit(f"STOP: SCHEMA_VERSION = {ast.unparse(value)}, not 17.")
+print("SCHEMA_VERSION = 17")
+'
+"""
+#: the 10486a9 form (kimi C1R-F HOLD P1): it tests that one LINE is present, not the value the
+#: module ends with, so ``SCHEMA_VERSION = 17`` then ``SCHEMA_VERSION = 18`` passed it
+_SCHEMA17_LINE_CHECK = (
+    "git -C <checkout> show <pre-cutover sha>:src/chronos/persistence/database.py"
+    " | grep -x 'SCHEMA_VERSION = 17'"
+)
+_DATABASE_PY = "src/chronos/persistence/database.py"
+#: the pre-C1R-F instruction: HEAD of a checkout this page requires to be post-N3 already
+_N1_OLD_RECORD = (
+    "Write down the pre-cutover commit of the running code before you change anything — the "
+    "Rollback section needs it: `git -C <checkout> rev-parse HEAD` → `<pre-cutover sha>`."
+)
+
+
+def _section(text: str, start: str, end: str) -> str:
+    return " ".join(text[text.index(start) : text.index(end)].split())
+
+
+def _schema17_checks(runbook: str) -> list[str]:
+    """Every rollback-commit check under "Before you start", as an operator copies it: each
+    fenced ``bash`` block dedented as a renderer shows it, and each inline ``git -C <checkout>
+    show <pre-cutover sha>:…`` span (the 10486a9 form, so a revert to it is still found and run)."""
+
+    before = runbook[runbook.index("## Before you start") : runbook.index("## Steps")]
+    fenced = re.findall(r"^( *)```bash\n(.*?)^\1```$", before, re.S | re.M)
+    inline = re.findall(r"`(git -C <checkout> show <pre-cutover sha>:[^`]*)`", before)
+    return [textwrap.dedent(block) for _, block in fenced] + inline
+
+
+def _the_runbook_s_schema17_check() -> str:
+    checks = _schema17_checks(RUNBOOK.read_text(encoding="utf-8"))
+    assert len(checks) == 1, checks
+    return checks[0]
+
+
+def _n1_offences(runbook: str) -> list[str]:
+    """What "Before you start" and the Rollback must say about the rollback commit (C1R N1)."""
+
+    before = _section(runbook, "## Before you start", "## Steps")
+    rollback = _section(runbook, "## Rollback", "## What the gate's refusal codes mean")
+    wanted_before = (
+        "The code on this host is the post-N3 checkout (`SCHEMA_VERSION` 18). The Rollback "
+        "section needs the commit the host ran **before** the post-N3 deploy, not the post-N3 "
+        "`HEAD`: only schema-17 code starts the restored schema-17 store, and the post-N3 code "
+        "refuses it, by design (`Unsupported Chronos schema version 17; expected 18`).",
+        "Write that commit down as `<pre-cutover sha>`: before the deploy it is "
+        "`git -C <checkout> rev-parse HEAD`; after the deploy, it is the entry "
+        "`git -C <checkout> reflog` shows just before the deploy.",
+        f"If you cannot establish it, use `{_LAST_SCHEMA17_MAIN}`, the last schema-17 commit on "
+        f"main (`{_SCHEMA18_MERGE}^1`, the first parent of the merge that brought schema 18).",
+        "Then check it. The check parses that commit's `database.py` with `ast` and never "
+        "imports or runs it: it prints `SCHEMA_VERSION = 17` only when the one place it can see "
+        "setting `SCHEMA_VERSION` is a plain top-level assignment of 17.",
+        "Two assignments, an annotated or augmented one, a binding anywhere else, a string, bytes "
+        "or keyword argument that names it, or a `*` import each print a line beginning `STOP:` "
+        "instead (C1R-F fix round 1, kimi P1).",
+        "So does any use of `exec`, `eval`, `compile`, `__import__`, `setattr`, `globals`, "
+        "`vars`, `locals`, `importlib`, `builtins` or `__builtins__`, whatever it does: code "
+        "built or looked up at run time can set the name where a static read cannot follow it "
+        "(fix round 2, kimi P1).",
+        "The check guards against an honest wrong pick — a mistyped sha, a schema-18 commit — "
+        "not against a commit written to defeat it.",
+        "The backstop for that is the schema gate: code whose effective `SCHEMA_VERSION` is 18 "
+        "refuses the restored schema-17 store at start. `db-preflight`, which the backend unit "
+        "runs first, prints `REFUSE [schema] Unsupported Chronos schema version 17; expected 18` "
+        "and exits 78 (rehearsed), so such a pick fails loudly, not silently.",
+        "This must print exactly one line, `SCHEMA_VERSION = 17`; anything else — a `STOP:` "
+        "line, an error, or nothing — means that commit is not the rollback code, so stop:",
+    )
+    offences = [f"Before you start lacks: {w}" for w in wanted_before if w not in before]
+    checks = _schema17_checks(runbook)
+    if checks != [_SCHEMA17_CHECK]:
+        offences.append(f"Before you start's check is not exactly the pinned one: {checks!r}")
+    if _N1_OLD_RECORD in before:
+        offences.append("Before you start still records the post-N3 HEAD as the rollback commit")
+    wanted_rollback = (
+        "`git checkout <pre-cutover sha>`, the schema-17 commit you wrote down and checked under "
+        '"Before you start" — never the post-N3 `HEAD`'
+    )
+    if wanted_rollback not in rollback:
+        offences.append(f"Rollback lacks: {wanted_rollback}")
+    return offences
+
+
+def test_c1rf_n1_the_rollback_commit_is_the_pre_deploy_schema_17_one_and_is_checked() -> None:
+    """C1R N1 (P2): "Before you start" had Kevin record ``git rev-parse HEAD`` of a checkout the
+    same bullet requires to be post-N3 already, so ``<pre-cutover sha>`` was a schema-18 commit
+    and the Rollback's ``git checkout <pre-cutover sha>`` started code that refuses the restored
+    schema-17 store (rehearsed: ``REFUSE … version 17; expected 18``, rc 78). The page now asks
+    for the commit the host ran BEFORE the post-N3 deploy, names 8093176 as the fallback, checks
+    the recorded commit is schema-17 code, and the Rollback checks out that commit."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert _n1_offences(text) == []
+    # negative controls: the check removed, the fallback removed, the old record restored, the
+    # Rollback's pointer back to "the sha you wrote down before step 1" — each is caught
+    block = "  ```bash\n" + textwrap.indent(_SCHEMA17_CHECK, "  ") + "  ```\n"
+    assert text.count(block) == 1
+    no_check = _n1_offences(text.replace(block, ""))
+    assert no_check == ["Before you start's check is not exactly the pinned one: []"]
+    # the 10486a9 one-liner back in its place (kimi P1) is found, and is not the pinned check
+    line_check = _n1_offences(text.replace(block, f"  `{_SCHEMA17_LINE_CHECK}`\n"))
+    assert line_check == [
+        f"Before you start's check is not exactly the pinned one: {[_SCHEMA17_LINE_CHECK]!r}"
+    ]
+    no_fallback = text.replace(f"`{_LAST_SCHEMA17_MAIN}`", "`<a commit>`")
+    assert no_fallback != text and _n1_offences(no_fallback)
+    old = _n1_offences(text.replace("## Steps", f"- {_N1_OLD_RECORD}\n\n## Steps", 1))
+    assert old == ["Before you start still records the post-N3 HEAD as the rollback commit"]
+    assert "the sha you wrote down before step 1" not in " ".join(_rollback().split())
+
+
+def _git(*argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), *argv], capture_output=True, text=True, check=False
+    )
+
+
+def _python_on_path(tmp_path: Path) -> dict[str, str]:
+    """The environment for a pasted check: ``python`` on PATH is this test's interpreter."""
+
+    shim = tmp_path / "bin" / "python"
+    if not shim.exists():
+        shim.parent.mkdir()
+        shim.symlink_to(sys.executable)
+    return {**os.environ, "PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def _run_schema17_check(
+    command: str, checkout: Path, sha: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """``command`` exactly as the runbook gives it, ``<checkout>`` and ``<pre-cutover sha>``
+    filled in the way the operator fills them."""
+
+    line = command.replace("<checkout>", str(checkout)).replace("<pre-cutover sha>", sha)
+    return subprocess.run(
+        ["bash", "-c", line], capture_output=True, text=True, check=False, env=env
+    )
+
+
+def test_c1rf_n1_measured_the_check_passes_the_fallback_and_refuses_the_post_n3_code(
+    tmp_path: Path,
+) -> None:
+    """The runbook's own check, run against this repository's history: it prints exactly
+    ``SCHEMA_VERSION = 17`` for 8093176 (the named fallback) and nothing on stdout, exit 1, and a
+    ``STOP:`` line on stderr, for this tree's HEAD (post-N3, schema 18) and for #309's merge.
+    8093176 is that merge's first parent, so it is the last schema-17 commit on main's
+    first-parent line. Independent of the check, git itself shows the two SCHEMA_VERSION lines."""
+
+    head = _git("rev-parse", "HEAD").stdout.strip()
+    assert _git("rev-parse", f"{_SCHEMA18_MERGE}^1").stdout == (
+        _git("rev-parse", _LAST_SCHEMA17_MAIN).stdout
+    ), "8093176 must be the first parent of the merge that brought schema 18"
+    assert _git("merge-base", "--is-ancestor", _SCHEMA18_MERGE, head).returncode == 0
+    path = "src/chronos/persistence/database.py"
+    versions = {
+        rev: re.findall(r"^SCHEMA_VERSION = (\d+)$", _git("show", f"{rev}:{path}").stdout, re.M)
+        for rev in (_LAST_SCHEMA17_MAIN, _SCHEMA18_MERGE, head)
+    }
+    assert versions == {_LAST_SCHEMA17_MAIN: ["17"], _SCHEMA18_MERGE: ["18"], head: ["18"]}
+
+    command, env = _the_runbook_s_schema17_check(), _python_on_path(tmp_path)
+
+    def check(sha: str) -> subprocess.CompletedProcess[str]:
+        return _run_schema17_check(command, ROOT, sha, env)
+
+    passed = check(_LAST_SCHEMA17_MAIN)
+    assert (passed.returncode, passed.stdout) == (0, "SCHEMA_VERSION = 17\n"), passed
+    for refused_sha in (head, _SCHEMA18_MERGE):
+        refused = check(refused_sha)
+        assert (refused.returncode, refused.stdout) == (1, ""), (refused_sha, refused)
+        assert refused.stderr == "STOP: SCHEMA_VERSION = 18, not 17.\n", (refused_sha, refused)
+
+
+_TEXT_OUT: dict[str, Any] = {"capture_output": True, "text": True, "check": True}
+
+
+def _synthetic_checkout(tmp_path: Path, *sources: str | None) -> tuple[Path, list[str]]:
+    """A throwaway repository with one commit per source: ``database.py`` holds that source, or
+    is absent for ``None``. Returns the repository and the commit shas, in order."""
+
+    repo = tmp_path / "checkout"
+    git = ("git", "-C", str(repo), "-c", "user.name=Chronos Test")
+    git += ("-c", "user.email=chronos-test@example.invalid", "-c", "commit.gpgsign=false")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    target = repo / _DATABASE_PY
+    shas = []
+    for number, source in enumerate(sources):
+        if source is None:
+            target.unlink(missing_ok=True)
+            (repo / "README").write_text(f"commit {number}\n", encoding="utf-8")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source, encoding="utf-8")
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "--no-verify", "-m", f"c{number}"], check=True)
+        shas.append(subprocess.run([*git, "rev-parse", "HEAD"], **_TEXT_OUT).stdout.strip())
+    return repo, shas
+
+
+#: (base commit, the one exact text replaced — None appends —, the replacement, accepted?)
+_SCHEMA17_VARIANTS: dict[str, tuple[str, str | None, str, bool]] = {
+    # kimi's negative control: a schema-18 module that still carries the schema-17 line
+    "kimi_dual_17_then_18": (
+        "HEAD",
+        "SCHEMA_VERSION = 18\n",
+        "SCHEMA_VERSION = 17\nSCHEMA_VERSION = 18\n",
+        False,
+    ),
+    "annotated_18": ("HEAD", "SCHEMA_VERSION = 18\n", "SCHEMA_VERSION: int = 18\n", False),
+    "no_space_18": ("HEAD", "SCHEMA_VERSION = 18\n", "SCHEMA_VERSION=18\n", False),
+    # fail closed: 17, but not in the one plain form the check reads
+    "annotated_17": (
+        _LAST_SCHEMA17_MAIN,
+        "SCHEMA_VERSION = 17\n",
+        "SCHEMA_VERSION: int = 17\n",
+        False,
+    ),
+    "17_then_rebound_inside_an_if": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "if True:\n    SCHEMA_VERSION = 18\n",
+        False,
+    ),
+    "17_then_augmented": (_LAST_SCHEMA17_MAIN, None, "SCHEMA_VERSION += 1\n", False),
+    "17_then_set_through_a_string": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'globals()["SCHEMA_VERSION"] = 18\n',
+        False,
+    ),
+    "17_then_a_star_import": (_LAST_SCHEMA17_MAIN, None, "from os.path import *\n", False),
+    "17_then_set_through_a_keyword": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "globals().update(SCHEMA_VERSION=18)\n",
+        False,
+    ),
+    "17_then_imported_under_its_name": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "from os import sep as SCHEMA_VERSION\n",
+        False,
+    ),
+    "17_then_declared_global_in_a_function": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "def _rebind():\n    global SCHEMA_VERSION\n",
+        False,
+    ),
+    # accepted: the fallback's own bytes, and the same value without the spaces
+    "8093176_unchanged": (_LAST_SCHEMA17_MAIN, None, "", True),
+    "no_space_17": (_LAST_SCHEMA17_MAIN, "SCHEMA_VERSION = 17\n", "SCHEMA_VERSION=17\n", True),
+}
+
+
+def _variant(base: str, old: str | None, new: str) -> str:
+    source = _git("show", f"{base}:{_DATABASE_PY}").stdout
+    assert source.count("\nSCHEMA_VERSION = ") == 1, base
+    if old is None:
+        return source + new
+    assert source.count(old) == 1, (base, old)
+    return source.replace(old, new)
+
+
+@pytest.mark.parametrize("variant", list(_SCHEMA17_VARIANTS))
+def test_c1rf_fix1_n1_the_check_reads_the_effective_value_and_stops_on_an_ambiguous_one(
+    tmp_path: Path, variant: str
+) -> None:
+    """kimi C1R-F HOLD P1: the 10486a9 check (``… | grep -x 'SCHEMA_VERSION = 17'``) tested that
+    one line was present, so a schema-18 commit that ALSO carried that line passed it, and the
+    Rollback would start code that refuses the restored schema-17 store. The runbook's check,
+    run verbatim on a synthetic commit of each variant, prints ``SCHEMA_VERSION = 17`` (rc 0,
+    nothing on stderr) only for one plain top-level assignment of 17; every other variant
+    prints nothing on stdout, a ``STOP:`` line on stderr, and exits non-zero."""
+
+    base, old, new, accepted = _SCHEMA17_VARIANTS[variant]
+    repo, (sha,) = _synthetic_checkout(tmp_path, _variant(base, old, new))
+    result = _run_schema17_check(
+        _the_runbook_s_schema17_check(), repo, sha, _python_on_path(tmp_path)
+    )
+    if accepted:
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "SCHEMA_VERSION = 17\n",
+            "",
+        ), result
+    else:
+        assert result.returncode != 0 and result.stdout == "", result
+        assert result.stderr.startswith("STOP: ") and result.stderr.count("\n") == 1, result
+
+
+def test_c1rf_fix1_n1_control_the_10486a9_line_check_passed_kimi_s_dual_assignment(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the variant test: the synthetic dual-assignment commit really is
+    the P1 — the 10486a9 one-liner prints ``SCHEMA_VERSION = 17``, rc 0, for it — and that
+    commit's module really ends at 18 (git shows the two lines; the last one wins)."""
+
+    repo, (sha,) = _synthetic_checkout(
+        tmp_path, _variant(*_SCHEMA17_VARIANTS["kimi_dual_17_then_18"][:3])
+    )
+    shown = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{sha}:{_DATABASE_PY}"], **_TEXT_OUT
+    ).stdout
+    assert re.findall(r"^SCHEMA_VERSION = (\d+)$", shown, re.M) == ["17", "18"]
+    old = _run_schema17_check(_SCHEMA17_LINE_CHECK, repo, sha, _python_on_path(tmp_path))
+    assert (old.returncode, old.stdout) == (0, "SCHEMA_VERSION = 17\n"), old
+
+
+def test_c1rf_fix1_n1_the_check_stops_on_a_bad_sha_and_a_missing_path(tmp_path: Path) -> None:
+    """The check fails closed when git has nothing to show: a sha that names no commit, and a
+    commit without ``database.py``. Each prints nothing on stdout, git's own ``fatal:`` line and
+    a ``STOP:`` line on stderr, and exits non-zero; the commit that has the fallback's bytes, in
+    the same repository, passes (so the refusals are not the harness)."""
+
+    fallback = _git("show", f"{_LAST_SCHEMA17_MAIN}:{_DATABASE_PY}").stdout
+    repo, (with_file, without_file) = _synthetic_checkout(tmp_path, fallback, None)
+    command, env = _the_runbook_s_schema17_check(), _python_on_path(tmp_path)
+    passed = _run_schema17_check(command, repo, with_file, env)
+    assert (passed.returncode, passed.stdout, passed.stderr) == (0, "SCHEMA_VERSION = 17\n", "")
+    for sha in ("0" * 40, without_file):
+        refused = _run_schema17_check(command, repo, sha, env)
+        assert refused.returncode != 0 and refused.stdout == "", (sha, refused)
+        lines = refused.stderr.splitlines()
+        assert lines[0].startswith("fatal: ") and lines[-1].startswith("STOP: "), (sha, refused)
+
+
+#: kimi's re-review counterexample: HEAD's schema-18 module with its one assignment set to 17,
+#: and 18 set again from a bytes literal the module executes
+_KIMI_BYTES_EXEC = 'SCHEMA_VERSION = 17\nexec(b"SCHEMA_VERSION = 18")\n'
+
+
+def _uses(*names: str) -> str:
+    return f"STOP: the file uses {', '.join(names)}, which a static read cannot follow.\n"
+
+
+_MAY_SET_TWICE = "STOP: 2 place(s) may set SCHEMA_VERSION, not one plain assignment.\n"
+_SET_18 = '"SCHEMA_" + "VERSION = 18"'  # computed: no constant names it
+#: (base commit, the one exact text replaced — None appends —, the replacement, exact stderr).
+#: One call or import per run-time name the check stops on, each spelled so that no OTHER clause
+#: of the check sees it, plus the bytes clause and the two clauses the round-2 names now shadow
+#: in the round-1 variants (a string and a keyword through ``globals()``).
+_SCHEMA17_FIX2_VARIANTS: dict[str, tuple[str, str | None, str, str]] = {
+    "kimi_17_then_exec_of_bytes": (
+        "HEAD",
+        "SCHEMA_VERSION = 18\n",
+        _KIMI_BYTES_EXEC,
+        _uses("exec"),
+    ),
+    "17_then_a_bytes_literal_naming_it": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        '_PATCH = b"SCHEMA_VERSION = 18"\n',
+        _MAY_SET_TWICE,
+    ),
+    "17_then_exec": (_LAST_SCHEMA17_MAIN, None, f"exec({_SET_18})\n", _uses("exec")),
+    "17_then_eval": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "eval(\"globals().update({'SCHEMA_' + 'VERSION': 18})\")\n",
+        _uses("eval"),
+    ),
+    "17_then_compile": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f'_CODE = compile({_SET_18}, "<n3>", "exec")\n',
+        _uses("compile"),
+    ),
+    "17_then___import__": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        '__import__("sys").modules[__name__].__dict__["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("__import__"),
+    ),
+    "17_then_setattr": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nsetattr(sys.modules[__name__], "SCHEMA_" + "VERSION", 18)\n',
+        _uses("setattr"),
+    ),
+    "17_then_globals": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'globals()["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("globals"),
+    ),
+    "17_then_vars": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nvars(sys.modules[__name__])["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("vars"),
+    ),
+    "17_then_locals": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'locals()["SCHEMA_" + "VERSION"] = 18\n',
+        _uses("locals"),
+    ),
+    "17_then_import_importlib": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "import importlib.util as _util\n",
+        _uses("importlib.util"),
+    ),
+    "17_then_from_importlib": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "from importlib.util import find_spec as _find\n",
+        _uses("importlib.util"),
+    ),
+    "17_then_builtins": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f"import builtins\nbuiltins.exec({_SET_18})\n",
+        _uses("builtins"),
+    ),
+    "17_then___builtins__": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        f'__builtins__["ex" + "ec"]({_SET_18})\n',
+        _uses("__builtins__"),
+    ),
+    "17_then_a_string_through_the_module_dict": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        'import sys\nsys.modules[__name__].__dict__["SCHEMA_VERSION"] = 18\n',
+        _MAY_SET_TWICE,
+    ),
+    "17_then_a_keyword_through_the_module_dict": (
+        _LAST_SCHEMA17_MAIN,
+        None,
+        "import sys\nsys.modules[__name__].__dict__.update(SCHEMA_VERSION=18)\n",
+        _MAY_SET_TWICE,
+    ),
+}
+
+
+@pytest.mark.parametrize("variant", list(_SCHEMA17_FIX2_VARIANTS))
+def test_c1rf_fix2_n1_the_check_stops_on_bytes_and_on_any_run_time_code(
+    tmp_path: Path, variant: str
+) -> None:
+    """kimi C1R-F re-review HOLD P1: the be60be2 check read string constants only, so a module
+    that assigned 17 and then ran ``exec(b"SCHEMA_VERSION = 18")`` passed it. The check now
+    reads bytes like strings, and stops on any use of the run-time names (exec, eval, compile,
+    __import__, setattr, globals, vars, locals, importlib, builtins, __builtins__), whatever
+    their arguments: a static read cannot follow what they set. Each variant is one synthetic
+    commit run through the runbook's EXACT command: rc 1, nothing on stdout, and exactly the
+    expected ``STOP:`` line, which names the clause that stopped it."""
+
+    base, old, new, stderr = _SCHEMA17_FIX2_VARIANTS[variant]
+    repo, (sha,) = _synthetic_checkout(tmp_path, _variant(base, old, new))
+    result = _run_schema17_check(
+        _the_runbook_s_schema17_check(), repo, sha, _python_on_path(tmp_path)
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (1, "", stderr), result
+
+
+def test_c1rf_fix2_n1_control_the_be60be2_check_passed_kimi_s_bytes_exec(tmp_path: Path) -> None:
+    """Positive control for the fix-2 variants: kimi's synthetic commit really is the P1. The
+    be60be2 check prints ``SCHEMA_VERSION = 17``, rc 0, for it, while the module's effective
+    value is 18 (the two synthetic lines alone, run in an empty namespace — no Chronos code). And
+    the round-2 check passes every schema-17 module it must: 8093176's bytes, unchanged."""
+
+    namespace: dict[str, object] = {}
+    exec(_KIMI_BYTES_EXEC, namespace)
+    assert namespace["SCHEMA_VERSION"] == 18
+    source = _variant(*_SCHEMA17_FIX2_VARIANTS["kimi_17_then_exec_of_bytes"][:3])
+    fallback = _git("show", f"{_LAST_SCHEMA17_MAIN}:{_DATABASE_PY}").stdout
+    repo, (kimi, unchanged) = _synthetic_checkout(tmp_path, source, fallback)
+    env = _python_on_path(tmp_path)
+    old = _run_schema17_check(_SCHEMA17_FIX1_CHECK, repo, kimi, env)
+    assert (old.returncode, old.stdout, old.stderr) == (0, "SCHEMA_VERSION = 17\n", ""), old
+    new = _run_schema17_check(_the_runbook_s_schema17_check(), repo, unchanged, env)
+    assert (new.returncode, new.stdout, new.stderr) == (0, "SCHEMA_VERSION = 17\n", ""), new
+
+
+def _rendered_fences(text: str) -> tuple[list[tuple[int, int]], list[str]]:
+    """The fences a CommonMark renderer shows (markdown-it-py's ``commonmark`` preset, locked in
+    requirements-dev.lock): the ones that close, as (opening line, closing line) from each
+    token's line map, and the offences. Since fix round 4 this is the only fence reader: the
+    hand-written line reader drew two P2s in a row (kimi @ 11fecfa, @ 5327d66) and is gone. The
+    renderer itself says whether a fence closed on a line of its own: a closed fence's map spans
+    its opener, its content and its closing line, so the content is two lines shorter than the
+    map. A fence the renderer ended because the file or its list item ended has no closing line,
+    so it never closes. The content's lines are counted as lines, not as newlines: a fence left
+    open at the end of a file with no final newline has a last content line with no newline
+    (fix round 4). What the block holds is not judged: a content line may start with backticks
+    (fix round 3, kimi P2)."""
+
+    spans: list[tuple[int, int]] = []
+    offences: list[str] = []
+    for fence in MarkdownIt("commonmark").parse(text):
+        if fence.type != "fence":
+            continue
+        start, end = fence.map
+        content_lines = fence.content.count("\n")
+        if fence.content and not fence.content.endswith("\n"):
+            content_lines += 1  # the file ended inside the block, on a line with no newline
+        if content_lines == end - start - 2:
+            spans.append((start + 1, end))
+        else:
+            offences.append(f"line {start + 1}: a fence that never closes")
+    return spans, offences
+
+
+# (markdown, the fences that close as (opening line, closing line), the fences that never close).
+# The expected values are read off CommonMark 0.31.2 §4.5 by hand, not from the renderer. Fix
+# round 3 (kimi P2 @ 11fecfa): inside an open fence only a backtick run as long as the opener's,
+# alone on its line, closes it; any other line is content. Fix round 4 (kimi P2 @ 5327d66): at the
+# top level an opener and its close are each indented up to three spaces, independently, and a
+# content line may be indented less than the opener; a close indented four is content. The first
+# nine are legitimate CommonMark.
+_FENCE_CONTROLS: dict[str, tuple[str, list[tuple[int, int]], list[str]]] = {
+    "kimi_a_content_line_starts_with_the_opener": (
+        "```bash\nprintf 'x'\n```bash\necho still-code\n```\n",
+        [(1, 5)],
+        [],
+    ),
+    "text_after_a_long_run_at_the_top_level_is_content": (
+        "```bash\nx\n``` trailing\n```\n",
+        [(1, 4)],
+        [],
+    ),
+    "trailing_whitespace_after_the_close": ("```bash\nx\n```   \n", [(1, 3)], []),
+    "a_longer_fence_holds_a_shorter_one": ("````md\n```bash\nx\n```\n````\n", [(1, 5)], []),
+    "a_blank_line_inside_a_list_item_fence": (
+        "1. one\n   ```bash\n   x\n\n   y\n   ```\n2. two\n",
+        [(2, 6)],
+        [],
+    ),
+    "a_backtick_in_the_info_string_opens_no_fence": ("``` not `a fence`\ntext\n", [], []),
+    "a_close_indented_three_closes": ("```bash\nx\n   ```\n", [(1, 3)], []),
+    "kimi_an_indented_opener_closes_at_the_margin": ("  ```bash\n  x\n```\n", [(1, 3)], []),
+    "kimi_an_indented_fence_holds_an_unindented_line": ("  ```bash\nx\n  ```\n", [(1, 3)], []),
+    "four_backticks_closed_by_three": (
+        "````bash\nx\n```\n",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
+    "unclosed_at_the_end_of_the_file": ("```bash\nx\n", [], ["line 1: a fence that never closes"]),
+    "unclosed_at_the_end_of_a_file_with_no_final_newline": (
+        "```bash\nx",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
+    "text_on_the_last_close_line": (
+        "```bash\nx\n```bash\n",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
+    "an_opener_alone_on_the_last_line": (
+        "text\n\n```\n",
+        [],
+        ["line 3: a fence that never closes"],
+    ),
+    "a_close_indented_four_past_the_opener_is_content": (
+        "```bash\nx\n    ```\n",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
+    "kimi_a_close_indented_four_at_the_top_level_is_content": (
+        "  ```bash\n  x\n    ```\n",
+        [],
+        ["line 1: a fence that never closes"],
+    ),
+    "a_list_item_close_indented_four_past_the_opener_is_content": (
+        "1. one\n   ```bash\n   x\n       ```\n2. two\n",
+        [],
+        ["line 2: a fence that never closes"],
+    ),
+    "n2_text_on_a_list_item_fence_s_close": (
+        "1. one\n   ```bash\n   x\n   ``` then prose\n   more\n\n2. two\n",
+        [],
+        ["line 2: a fence that never closes"],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FENCE_CONTROLS))
+def test_c1rf_fix4_n2_a_commonmark_renderer_reads_each_control_as_the_spec_does(name: str) -> None:
+    """The renderer is the one fence oracle (fix round 4). For each control it closes exactly the
+    expected fences, at their opening and closing lines, and finds exactly the expected fences
+    that never close: kimi's two valid indented fences are accepted, kimi's close indented four
+    is content, and a line that starts with the opener's run but carries text is content (fix
+    round 3)."""
+
+    text, spans, offences = _FENCE_CONTROLS[name]
+    assert _rendered_fences(text) == (spans, offences)
+
+
+def test_c1rf_fix4_n2_the_real_1bcd424_defect_is_a_shred_block_that_never_closes() -> None:
+    """Fix round 4: the real N2 defect, the runbook's bytes at 1bcd424, stays a control. Its shred
+    block's close carries text, so CommonMark reads that line as content and the block never
+    closes; the opener's line is found from the bytes, not from the renderer."""
+
+    shown = _git("show", f"{_N2_DEFECT_MAIN}:docs/ops/N3-CUTOVER.md")
+    assert shown.returncode == 0, shown.stderr
+    lines = shown.stdout.splitlines()
+    shred = lines.index(
+        "   shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow"
+    )
+    assert (lines[shred - 1], lines[shred + 1]) == (
+        "   ```bash",
+        "   ``` One escrow copy, exactly; the `.env` on",
+    )
+    assert _rendered_fences(shown.stdout)[1] == [f"line {shred}: a fence that never closes"]
+
+
+def test_c1rf_n2_every_fence_closes_alone_on_its_line() -> None:
+    """C1R N2 (P3): step 6's shred block closed with ```` ``` One escrow copy, exactly; …````, which
+    CommonMark does not read as a closing fence, so the rendered block ran on into the prose and
+    a whole-block copy left an unmatched backtick at the shell. Every fence in the runbook now
+    closes on a line of its own, as a CommonMark renderer reads it (fix round 4: the renderer is
+    the one reader), and the shred block is the one command."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert _rendered_fences(text)[1] == []
+    step6 = _step(text, "6. **Escrow", "7. **Vacate")
+    shred = [b for b in re.findall(r"```bash\n(.*?)```", step6, re.S) if "shred -u" in b]
+    assert [textwrap.dedent(b) for b in shred] == [
+        "shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow\n"
+    ]
+    assert "One escrow copy, exactly; the `.env` on the host is the only working copy." in (
+        " ".join(step6.split())
+    )
+    # negative controls: the N2 defect, a dropped closing fence, an over-short closing fence.
+    # With text on its close, the shred block's last line is content: the block runs on until
+    # step 7 ends its list item, so it never closes.
+    n2 = "   ```\n   One escrow copy"
+    assert n2 in text
+    defect = text.replace(n2, "   ``` One escrow copy", 1).splitlines()
+    shred_open = defect.index(
+        "   shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow"
+    )
+    assert _rendered_fences("\n".join(defect) + "\n")[1] == [
+        f"line {shred_open}: a fence that never closes"
+    ]
+    unclosed = text.rstrip("\n") + "\n```bash\necho never closed\n"
+    last = len(text.rstrip("\n").splitlines()) + 1
+    assert _rendered_fences(unclosed)[1] == [f"line {last}: a fence that never closes"]
+    assert _rendered_fences("````bash\nx\n```\n")[1] == ["line 1: a fence that never closes"]
+
+
+def test_c1rf_n2_a_commonmark_renderer_ends_the_shred_block_at_its_one_command() -> None:
+    """The same claim through the rendered tokens (markdown-it-py, locked in
+    requirements-dev.lock, imported hard: the test fails, never skips, if it leaves the lock):
+    every rendered fence in the runbook closes on a line of its own and the rendered shred block
+    is the one command."""
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    fences = [t for t in MarkdownIt("commonmark").parse(text) if t.type == "fence"]
+    assert fences, "the runbook carries fenced blocks"
+    spans, offences = _rendered_fences(text)
+    assert offences == [] and len(spans) == len(fences)
+    shred = [f.content for f in fences if "shred -u" in f.content]
+    assert shred == [
+        "shred -u ~/chronos-escrow/chronos-persistence-key.age && rmdir ~/chronos-escrow\n"
+    ]
+
+
+def test_c1rf_n3_step_6_says_the_units_can_read_the_escrow_directory_not_write_it() -> None:
+    """C1R N3 (P3): ``ProtectHome=read-only`` makes ``/home`` read-only for the units, not
+    invisible, and each unit's ``ReadWritePaths=`` names only its checkout (and the backend's
+    state directory), never the escrow directory. So the units can READ ``~/chronos-escrow`` but
+    cannot write it; step 6 said they were kept "out of" it. Checked against both shipped units."""
+
+    step6 = " ".join(
+        _step(RUNBOOK.read_text(encoding="utf-8"), "6. **Escrow", "7. **Vacate").split()
+    )
+    assert "keeps the units out of" not in step6
+    assert (
+        "`ProtectHome=read-only` lets the units read `~/chronos-escrow` but not write it "
+        "(no `ReadWritePaths=` entry covers it); what they could read is ciphertext that only "
+        "your recovery key opens. `mkdir` fails if the directory already exists"
+    ) in step6
+    for unit in ("chronos-backend.service", "chronos-worker.service"):
+        lines = (ROOT / "docs" / "ops" / unit).read_text(encoding="utf-8").splitlines()
+        # read-only, not hidden: exactly this ProtectHome=, and nothing that would hide ~
+        assert [line for line in lines if line.startswith("ProtectHome=")] == [
+            "ProtectHome=read-only"
+        ], unit
+        assert not any(
+            line.startswith(("InaccessiblePaths=", "TemporaryFileSystem=")) for line in lines
+        ), unit
+        writable = [
+            path
+            for line in lines
+            if line.startswith("ReadWritePaths=")
+            for path in line.removeprefix("ReadWritePaths=").split()
+        ]
+        assert writable and all(re.fullmatch(r"%h/<CHRONOS_[A-Z_]+>", p) for p in writable), (
+            unit,
+            writable,
+        )
