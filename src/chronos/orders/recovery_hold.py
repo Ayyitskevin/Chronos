@@ -139,7 +139,8 @@ def evaluate_recovery_hold(
 
     Deliberately pure and I/O-free: every row is then a test that cannot pass by
     accident of file-system ordering, and the writes that legitimately seed a
-    first witness live in :func:`resolve_installation` where they can be read
+    first witness live in :func:`resolve_installation` and, for an acknowledged
+    replacement, :func:`evaluate_startup_recovery_hold`, where they can be read
     against the rows they must not manufacture.
     """
 
