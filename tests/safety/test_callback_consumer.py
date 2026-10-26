@@ -1350,6 +1350,34 @@ def test_the_runtime_refuses_to_start_the_consumer_on_an_in_memory_database() ->
     assert started == [] and source.sink is None
 
 
+def test_f2_a_callback_arriving_while_the_runtime_stops_the_consumer_is_never_silent(
+    rig: _Rig,
+) -> None:
+    """CB1-FIX1 F2 (Fable probe P1): an own callback landing between the runtime's two shutdown
+    steps must drop loudly, never vanish into a detached bridge."""
+
+    class _CallbackLandsDuringStop:
+        def __init__(self, real: CallbackConsumer) -> None:
+            self._real = real
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+        def stop(self, **kwargs: Any) -> int:
+            lost = self._real.stop(**kwargs)
+            rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)  # the window
+            return lost
+
+    runtime = runtime_module.AppRuntime.__new__(runtime_module.AppRuntime)
+    runtime.callback_source = rig.bridge
+    runtime.callback_consumer = _CallbackLandsDuringStop(rig.consumer)  # type: ignore[assignment]
+    rig.invalidations.clear()
+    runtime._stop_callback_consumer()
+
+    assert rig.invalidations == [DROPPED_EVENT_REASON]
+    assert rig.consumer.health().dropped == 1
+
+
 def test_a_demo_writer_lifespan_starts_the_consumer_and_journals_the_demo_stream(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
