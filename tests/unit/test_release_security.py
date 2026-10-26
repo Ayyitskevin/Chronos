@@ -157,8 +157,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # pre-N3 position_admission.py bytes in the spec and the compiler, and the pre-re-pin readiness
     # digest (3); the two pre-N3 idempotency goldens (2).
     # 41 at CB-1 (the callback consumer wired through runtime.py, official_ibkr.py and demo.py:
-    # their superseded source-inventory fingerprints, 3).
-    assert len(historical_candidates) == 41
+    # their superseded source-inventory fingerprints, 3). 42 at CB1-FIX1 (runtime.py: the consumer
+    # stops before its sink detaches, superseding CB-1's runtime.py fingerprint).
+    assert len(historical_candidates) == 42
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
