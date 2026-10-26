@@ -445,8 +445,10 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    surviving state files, so the backend boots held: read-only, unreconciled, no autonomy
    runtime. Read the hold from `<checkout>`. The token comes from the backend's own token file
    (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs): the
-   shell puts it in the header, and nothing prints it. The log is your `LOG_FILE`
-   (`logs/chronos.log` by default).
+   shell puts it in the header, and nothing prints it. The token never enters any process's argv
+   either (`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path): the shell reads the file
+   and hands curl a header file through process substitution (bash and zsh). The log is your
+   `LOG_FILE` (`logs/chronos.log` by default).
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
@@ -455,7 +457,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    print("reconciliation:", h["reconciliation_status"])
    print("tasks:", " ".join(t["name"] + "=" + t["state"] for t in o["tasks"]))
    '
-   curl -sS -w ' HTTP %{http_code}\n' -H "X-Chronos-Token: $(cat data/backend_api_token)" http://127.0.0.1:<port>/autonomy/alerts
+   curl -sS -w ' HTTP %{http_code}\n' -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts
    grep -F '"event":"recovery_hold_engaged"' logs/chronos.log | tail -n 1
    ```
    It must print these four lines, then one log line whose message begins `This boot cannot
@@ -483,7 +485,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    database replacement. The same token file, never printed:
    ```bash
    curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
-     -H "X-Chronos-Token: $(cat data/backend_api_token)" \
+     -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") \
      -H 'Content-Type: application/json' \
      -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}'
    ```
@@ -494,7 +496,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 
    **Restart, then prove the hold is gone, before step 8.** `systemctl --user restart
    chronos-backend`, then `systemctl --user is-active chronos-backend` → `active`, then the
-   `/health` and `/autonomy/alerts` commands above again. They must print:
+   `/health` and `/autonomy/alerts` commands above again, but not the `grep`: the log still holds
+   the held boot's `recovery_hold_engaged` line, which proves nothing now. They must print:
    ```
    startup_faults: none
    reconciliation: RECONCILED

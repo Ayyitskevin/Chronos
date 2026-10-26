@@ -68,6 +68,38 @@ def _step7(text: str | None = None) -> str:
     )
 
 
+#: The one header form the runbook may use: curl reads the header from a pipe the shell fills, so
+#: the token is in no process's argv (G1). ``$(<file)`` is a shell builtin read; ``printf`` is a
+#: builtin; the only argv curl carries is ``/dev/fd/N``.
+_HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api_token)\")"
+
+
+def _curl_commands(text: str) -> list[str]:
+    """Every logical ``curl`` command in the bash fences, backslash continuations joined."""
+
+    commands = []
+    for info, body in _fences(text):
+        if info != "bash":
+            continue
+        for logical in re.sub(r"\\\n\s*", " ", body).splitlines():
+            if re.match(r"\s*curl\b", logical):
+                commands.append(logical)
+    return commands
+
+
+def _token_in_curl_argv_problems(text: str) -> list[str]:
+    """Curl commands that put the token file's contents where curl's argv can carry them."""
+
+    problems = []
+    for command in _curl_commands(text):
+        if re.search(r"\$\(\s*cat\b[^)]*token", command):
+            problems.append(f"$(cat <token file>) in a curl command: {command[:80]}")
+        for match in re.finditer("backend_api_token", command):
+            if command[: match.end() + 3][-len(_HEADER_FROM_FILE) :] != _HEADER_FROM_FILE:
+                problems.append(f"token file outside the fd-fed header form: {command[:80]}")
+    return problems
+
+
 # --- the gate's text --------------------------------------------------------------------------
 
 #: Each part of the gate, as the sentences (whitespace-normalized) the runbook must carry in
@@ -90,8 +122,11 @@ _GATE: dict[str, tuple[str, ...]] = {
         "The token comes from the backend's own token file (`BACKEND_TOKEN_FILE`, "
         "`data/backend_api_token` by default; use your path if it differs): the shell puts it in "
         "the header, and nothing prints it.",
+        "The token never enters any process's argv either (`ps` and `/proc/<pid>/cmdline` show "
+        "only a `/dev/fd/N` path): the shell reads the file and hands curl a header file through "
+        "process substitution (bash and zsh).",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
-        "curl -sS -w ' HTTP %{http_code}\\n' -H \"X-Chronos-Token: $(cat data/backend_api_token)\" "
+        "curl -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
         "http://127.0.0.1:<port>/autonomy/alerts",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
         "prove it does not follow a restore (database_replaced)`:",
@@ -117,7 +152,8 @@ _GATE: dict[str, tuple[str, ...]] = {
         "database replacement.",
         "The same token file, never printed:",
         "curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \\ "
-        '-H "X-Chronos-Token: $(cat data/backend_api_token)" \\ '
+        + _HEADER_FROM_FILE
+        + " \\ "
         "-H 'Content-Type: application/json' \\",
         'Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>",'
         '"effective":"next start"}`.',
@@ -130,7 +166,8 @@ _GATE: dict[str, tuple[str, ...]] = {
         "**Restart, then prove the hold is gone, before step 8.**",
         "`systemctl --user restart chronos-backend`, then `systemctl --user is-active "
         "chronos-backend` → `active`, then the `/health` and `/autonomy/alerts` commands above "
-        "again. They must print:",
+        "again, but not the `grep`: the log still holds the held boot's `recovery_hold_engaged` "
+        "line, which proves nothing now. They must print:",
         "`startup_faults: none`: the hold is cleared.",
         "`HTTP 200`: writes are allowed (the body lists unacknowledged alerts; it may hold the "
         "mandate alert below instead of `[]`).",
@@ -219,13 +256,50 @@ def test_c1rf2_the_gate_commands_never_print_the_token() -> None:
     for block in blocks:
         assert "backend_api_token" in block
         uses = block.count("backend_api_token")
-        assert block.count('-H "X-Chronos-Token: $(cat data/backend_api_token)"') == uses
-        for word in (" -v", "--verbose", "--trace", "set -x", "echo ", "printf ", "tee "):
+        assert block.count(_HEADER_FROM_FILE) == uses
+        for word in (" -v", "--verbose", "--trace", "set -x", "echo ", "tee "):
             assert word not in block, word
+        # the only printf is the header line the fd-fed form carries
+        assert block.count("printf ") == uses
     # the header and the default file are the code's own
     assert auth._TOKEN_HEADER == "X-Chronos-Token"
     assert Settings.model_fields["backend_token_file"].default == Path("data/backend_api_token")
     assert Settings.model_fields["log_file"].default == Path("logs/chronos.log")
+
+
+def test_g1_no_curl_in_the_runbook_has_the_token_in_its_argv() -> None:
+    """G1: `-H "X-Chronos-Token: $(cat <token file>)"` put the token in curl's argv (ps, /proc)."""
+
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert len(_curl_commands(runbook)) >= 2, "the pin must see the gate's curl commands"
+    assert _token_in_curl_argv_problems(runbook) == []
+    assert "$(cat data/backend_api_token)" not in runbook
+
+
+def test_g1_negative_control_the_old_argv_form_is_caught() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    old = '-H "X-Chronos-Token: $(cat data/backend_api_token)"'
+    assert _HEADER_FROM_FILE in runbook
+    assert len(_token_in_curl_argv_problems(runbook.replace(_HEADER_FROM_FILE, old))) >= 2
+    # a different spelling of the same leak is caught too
+    other = runbook.replace(_HEADER_FROM_FILE, '-H "X-Chronos-Token: $(< data/backend_api_token)"')
+    assert _token_in_curl_argv_problems(other)
+    assert _token_in_curl_argv_problems(
+        runbook.replace(_HEADER_FROM_FILE, '-H "X-Chronos-Token: $(cat  "$F"/token)"')
+    )
+
+
+def test_g2_the_restart_read_leaves_out_the_held_boots_log_line() -> None:
+    """G2: re-running the `grep` after the restart prints the held boot's stale line again."""
+
+    prove = _step7()[_step7().index("**Restart, then prove the hold is gone") :]
+    assert _flat("again, but not the `grep`") in _flat(prove)
+    assert "held boot's `recovery_hold_engaged` line" in _flat(prove)
+    # a restart paragraph that tells the reader to re-run everything above is caught
+    wrong = _step7().replace("again, but not the `grep`", "again")
+    assert _gate_problems(wrong) and all(
+        problem.startswith("prove-cleared") for problem in _gate_problems(wrong)
+    )
 
 
 def test_c1rf2_the_routes_the_gate_reads_are_the_ones_it_says() -> None:
