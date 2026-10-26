@@ -45,6 +45,7 @@ from chronos.broker.demo import DemoBroker
 from chronos.broker.request_registry import RequestRegistry
 from chronos.domain.enums import OrderLifecycle, OrderSide
 from chronos.domain.models import BrokerExecution, UnderlyingContract
+from chronos.orders import callback_consumer as consumer_module
 from chronos.orders.callback_consumer import (
     CALLBACK_CONFLICT,
     CALLBACK_CONSUMER_HEALTH,
@@ -1004,7 +1005,7 @@ def test_4_5h_a_database_failure_is_retried_demotes_once_and_keeps_the_event(rig
 class _FileRig:
     """A file database (the production topology) and a consumer with no intents behind it."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, **overrides: Any) -> None:
         self.database = _file_database(tmp_path)
         self.invalidations: list[str] = []
         from chronos.orders.tracker import OrderTracker
@@ -1028,6 +1029,7 @@ class _FileRig:
             account_id=PAPER_ACCOUNT,
             persistence_key=TEST_PERSISTENCE_KEY,
             invalidate=self.invalidations.append,
+            **overrides,
         )
 
     def foreign(self, index: int) -> StreamEvent:
@@ -1142,6 +1144,36 @@ def test_5i_offer_never_blocks_the_reader_while_the_consumer_is_stuck_on_the_dat
     finally:
         release.set()
         file_rig.consumer.stop(timeout=5)
+        file_rig.database.dispose()
+
+
+def _orphan_commission(index: int) -> StreamEvent:
+    return StreamEvent(
+        kind=StreamKind.COMMISSION,
+        received_at=utc_now(),
+        own_at_capture=False,
+        raw={"execId": f"ffff0000.orphan.{index:02d}", "commission": 1.05, "currency": "USD"},
+    )
+
+
+def test_f5_idle_seconds_do_not_sweep_but_the_cadence_still_closes_a_pending_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CB1-FIX1 F5: the PENDING sweep is a full anti-join over an append-only journal, so it
+    runs on start, after a failure streak clears, and every ``_SWEEP_SECONDS``, not on every
+    idle second."""
+
+    file_rig = _FileRig(tmp_path, commission_grace=timedelta(seconds=0.5))
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(_orphan_commission(1))  # PENDING: inside its grace when handled
+        time.sleep(2.5)  # two idle seconds go by, past the grace
+        assert file_rig.outcomes() == []  # not swept on an idle tick
+
+        monkeypatch.setattr(consumer_module, "_SWEEP_SECONDS", 0.2)
+        assert _wait_until(lambda: file_rig.outcomes() == ["unknown_execution"], timeout=3.0)
+    finally:
+        file_rig.consumer.stop()
         file_rig.database.dispose()
 
 
