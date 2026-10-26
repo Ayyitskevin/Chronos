@@ -1016,6 +1016,11 @@ class CallbackConsumer:
             return CallbackOutcome.APPLIED, {"lifecycle": lifecycle.value}
         if result.identity_refined:
             return CallbackOutcome.IDENTITY_REFINED, {"lifecycle": lifecycle.value}
+        if self._tracker_intent_status(intent_id) is not intent:
+            # CB1-FIX1 F3: another writer moved the intent inside our CAS, so "no change" is not
+            # what happened. Stay PENDING; the next sweep re-drives against the new status, and the
+            # state machine decides. It re-pends only while other writers keep moving the intent.
+            return None
         return CallbackOutcome.NO_CHANGE, {"lifecycle": lifecycle.value}
 
     def _tracker_intent_status(self, intent_id: str) -> OrderLifecycle | None:
