@@ -42,6 +42,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -104,6 +105,12 @@ QUEUE_CAPACITY = 1024
 COMMISSION_GRACE = timedelta(seconds=30)
 DEFER_GRACE = timedelta(seconds=60)
 _IDLE_SECONDS = 1.0
+#: CB1-FIX1 F5: the PENDING sweep is a full anti-join over the append-only journal, so it runs on
+#: start, after a failure streak clears and on this cadence -- never on every idle second.
+_SWEEP_SECONDS = 30.0
+#: Retry backoff per failed attempt: base * 2**(attempt-1), capped at 10 * base. At the default a
+#: persistently failing event holds the one consumer thread 0.5+1+2+4+5 = 12.5 s before its drop.
+_RETRY_BASE_SECONDS = 0.5
 _STOP_DRAIN_SECONDS = 2.0
 _RETRY_LIMIT = 5
 _SWEEP_LIMIT = 200
@@ -581,6 +588,8 @@ class CallbackConsumer:
         self._last_error_type: str | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_sweep = 0.0  # time.monotonic() of the last sweep attempt
+        self._sweep_requested = False  # a failure streak cleared: sweep at the next loop
         self._is_writer: Callable[[], bool] = lambda: True
 
     # ---------------------------------------------------------------- reader-thread side
@@ -687,10 +696,11 @@ class CallbackConsumer:
                     self._halt("writer lease lost")
                     return
                 self._note_drops()
+                if self._sweep_is_due():
+                    self._sweep_safely()
                 try:
                     item = self._queue.get(timeout=_IDLE_SECONDS)
                 except queue.Empty:
-                    self._sweep_safely()
                     continue
                 if item is _STOP:
                     return
@@ -760,13 +770,17 @@ class CallbackConsumer:
                 self.handle(event)
             except Exception as error:
                 self._note_failure(error)
-                if self._stopping.wait(min(0.5 * 2 ** (attempt - 1), 5.0)):
+                backoff = min(_RETRY_BASE_SECONDS * 2 ** (attempt - 1), 10 * _RETRY_BASE_SECONDS)
+                if self._stopping.wait(backoff):
                     break
                 continue
             with self._lock:
+                streak_cleared = self._failures > 0
                 self._failures = 0
                 if self._state == "degraded":
                     self._state = "running"
+                if streak_cleared:
+                    self._sweep_requested = True
             return
         # still unhandled: a journaled event stays PENDING for the sweep; an unjournaled one is lost
         self._drop(event, "callback consumer gave up on an event after retries")
@@ -785,7 +799,15 @@ class CallbackConsumer:
         if first:
             self._invalidate(CONSUMER_FAILED_REASON)
 
+    def _sweep_is_due(self) -> bool:
+        with self._lock:
+            requested = self._sweep_requested
+        return requested or time.monotonic() - self._last_sweep >= _SWEEP_SECONDS
+
     def _sweep_safely(self) -> None:
+        with self._lock:
+            self._sweep_requested = False
+        self._last_sweep = time.monotonic()
         try:
             self.sweep()
         except Exception as error:

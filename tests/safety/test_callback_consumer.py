@@ -1177,6 +1177,34 @@ def test_f5_idle_seconds_do_not_sweep_but_the_cadence_still_closes_a_pending_row
         file_rig.database.dispose()
 
 
+def test_f5_a_cleared_failure_streak_sweeps_without_waiting_for_the_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(consumer_module, "_RETRY_BASE_SECONDS", 0.0)
+    file_rig = _FileRig(tmp_path, commission_grace=timedelta(seconds=0.5))
+    journal = file_rig.consumer.journal
+    real = journal.append_pending
+    failures = [OperationalError("INSERT", {}, Exception("database is locked"))]
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        if failures and args[1] is StreamKind.ORDER_STATUS:  # only the foreign status fails
+            raise failures.pop()
+        return real(*args, **kwargs)
+
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(_orphan_commission(2))  # PENDING inside its grace
+        time.sleep(1.0)  # past the grace; the 30 s cadence is far away
+        assert file_rig.outcomes() == []
+        journal.append_pending = flaky  # type: ignore[method-assign]
+        file_rig.consumer.offer(file_rig.foreign(7))  # fails once, then succeeds: streak cleared
+        assert _wait_until(lambda: "unknown_execution" in file_rig.outcomes(), timeout=3.0)
+        assert CONSUMER_FAILED_REASON in file_rig.invalidations
+    finally:
+        file_rig.consumer.stop()
+        file_rig.database.dispose()
+
+
 # --- 4 / 5(k) / 5: readiness is never published or inferred by the consumer ---------------------
 
 _LATCH_NAMES = frozenset(
