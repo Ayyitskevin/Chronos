@@ -139,6 +139,7 @@ class CallbackOutcome(StrEnum):
     IDENTITY_CONFLICT = "identity_conflict"
     OWNERSHIP_UNPROVEN = "ownership_unproven"
     LIFECYCLE_CONTRADICTION = "lifecycle_contradiction"
+    UNRECOGNIZED_STATUS = "unrecognized_status"
     DEFERRED_TO_RECONCILER = "deferred_to_reconciler"
     UNKNOWN_EXECUTION = "unknown_execution"
     EXECUTION_CONFLICT = "execution_conflict"
@@ -173,6 +174,7 @@ _INVALIDATING = frozenset(
         CallbackOutcome.IDENTITY_CONFLICT,
         CallbackOutcome.OWNERSHIP_UNPROVEN,
         CallbackOutcome.LIFECYCLE_CONTRADICTION,
+        CallbackOutcome.UNRECOGNIZED_STATUS,
         CallbackOutcome.EXECUTION_CONFLICT,
         CallbackOutcome.EXECUTION_REFUSED,
         CallbackOutcome.MALFORMED,
@@ -991,6 +993,10 @@ class CallbackConsumer:
         lifecycle = broker_status_to_lifecycle(
             str(facts["status"]), filled_quantity=filled, remaining_quantity=remaining
         )
+        if lifecycle is OrderLifecycle.SUBMISSION_UNKNOWN:
+            # CB1-FIX1 F1 (D-43's rule: refuse to a typed unknown that names the cause): a status
+            # the mapper does not know never moves a working order; the reconciler owns it
+            return CallbackOutcome.UNRECOGNIZED_STATUS, {"status": str(facts["status"])}
         update = OrderStatusUpdate(
             intent_id=intent_id,
             broker_order_id=order_id,
