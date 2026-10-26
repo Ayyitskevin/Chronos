@@ -171,9 +171,14 @@ class JournalVerdict(StrEnum):
     CONFLICT = "conflict"
 
 
-#: Outcomes that also demote readiness (the evidence contradicts or cannot be proven).
+#: Outcomes that also demote readiness (the evidence contradicts or cannot be proven). The rest do
+#: not: the successes; NOT_OWN_AT_CAPTURE (RC-1 already demoted when it arrived);
+#: DEFERRED_TO_RECONCILER (a SUBMISSION_UNKNOWN intent already keeps the composite locked as
+#: unresolved; a pre-submit status carries no persisted broker order id, so it is never the one
+#: candidate); LATE_COMMISSION_REFUSED (cost-basis evidence, no order state; D-15: leave).
 _INVALIDATING = frozenset(
     {
+        CallbackOutcome.UNKNOWN_EXECUTION,  # CB1-FIX1 F6: as unproven as an unknown intent
         CallbackOutcome.CROSS_ACCOUNT,
         CallbackOutcome.UNKNOWN_INTENT,
         CallbackOutcome.AMBIGUOUS_INTENT,
