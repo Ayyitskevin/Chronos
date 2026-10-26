@@ -197,10 +197,12 @@ class AppRuntime:
         source = getattr(self, "callback_source", None)
         consumer = getattr(self, "callback_consumer", None)
         try:
-            if source is not None:
-                source.set_stream_sink(None)
+            # stop first (CB1-FIX1 F2): a callback landing before the detach drops loudly through
+            # offer; detaching first would leave a window in which the bridge drops it silently
             if consumer is not None:
                 consumer.stop()
+            if source is not None:
+                source.set_stream_sink(None)
         except Exception:
             logging.getLogger("chronos.runtime").exception(
                 "Callback consumer shutdown failed",
