@@ -778,6 +778,48 @@ def test_f1_an_unrecognized_status_is_typed_never_ingested_and_demotes(rig: _Rig
     assert _outcomes(rig.harness)[-1] == CallbackOutcome.APPLIED.value
 
 
+# --- CB1-FIX1 F3: a CAS lost to a concurrent writer is re-driven, never closed as no_change ------
+
+
+def test_f3_a_cas_lost_to_a_concurrent_writer_stays_pending_and_is_re_driven(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fable probe P3: a cancel moves the intent SUBMITTED -> CANCEL_PENDING inside the consumer's
+    own record_transition call, so the consumer's CAS from SUBMITTED loses."""
+
+    repo = rig.harness.tracker_repo
+    real = repo.record_transition
+    raced: list[OrderLifecycle] = []
+
+    def racing(**kwargs: Any) -> bool:
+        if kwargs.get("source") == CALLBACK_SOURCE and not raced:
+            raced.append(kwargs["to_status"])
+            assert real(
+                intent_id="intent-1",
+                event_key="intent-1:9001:CANCEL_PENDING:race",
+                source="CANCEL",
+                from_status=OrderLifecycle.SUBMITTED,
+                to_status=OrderLifecycle.CANCEL_PENDING,
+                current_account_id=PAPER_ACCOUNT,
+                occurred_at=FIXED_NOW,
+                enforce_from_status=True,
+            )
+        return real(**kwargs)
+
+    monkeypatch.setattr(repo, "record_transition", racing)
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert raced == [OrderLifecycle.FILLED]
+    assert rig.intent_status() is OrderLifecycle.CANCEL_PENDING
+    assert _outcomes(rig.harness) == []  # the broker's Filled is not closed as no_change ...
+    assert len(rig.consumer.journal.pending()) == 1  # ... it stays PENDING
+
+    rig.consumer.sweep()  # re-driven against the status the other writer left
+    assert rig.intent_status() is OrderLifecycle.FILLED
+    assert _outcomes(rig.harness) == [CallbackOutcome.APPLIED.value]
+
+
 # --- 5(c) the key carries every identity ---------------------------------------------------------
 
 
