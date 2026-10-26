@@ -1217,6 +1217,68 @@ def test_f5_a_cleared_failure_streak_sweeps_without_waiting_for_the_cadence(
         file_rig.database.dispose()
 
 
+# --- CB1-FIX1 F4: Fable's surviving mutants X01-X04, each pinned -------------------------------
+
+
+def test_x01_a_commission_never_pairs_with_an_execution_closed_unproven(rig: _Rig) -> None:
+    # same account, a foreign client id on the OFFICIAL path: the execution closes not own ...
+    rig.app.execDetails(-1, _option_contract(), _execution(rig.order_ref, client_id=_CLIENT + 1))
+    rig.app.commissionReport(FakeCommissionReport(_EXEC_ID, 1.05, "USD"))
+    rig.consumer.drain()
+
+    outcomes = _rows(rig.harness, CALLBACK_OUTCOME)
+    assert [row["outcome"] for row in outcomes] == [
+        CallbackOutcome.NOT_OWN_AT_CAPTURE.value,
+        CallbackOutcome.UNKNOWN_EXECUTION.value,
+    ]
+    assert outcomes[1]["execution_outcome"] == CallbackOutcome.NOT_OWN_AT_CAPTURE.value
+    assert _fills(rig.harness) == []  # ... and its commission never writes it as a fill
+
+
+def test_x02_an_event_that_exhausts_its_retries_is_dropped_loudly(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(consumer_module, "_RETRY_BASE_SECONDS", 0.0)
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise OperationalError("INSERT", {}, Exception("database is locked"))
+
+    rig.consumer.journal.append_pending = broken  # type: ignore[method-assign]
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    event = rig.consumer._queue.get_nowait()
+    rig.consumer._handle_with_retry(event)  # five failed attempts
+
+    assert rig.consumer.health().dropped == 1
+    assert rig.invalidations[-1] == DROPPED_EVENT_REASON
+    assert rig.invalidations.count(CONSUMER_FAILED_REASON) == 1
+    assert rig.consumer.health().queued == 0
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+
+
+def test_x03_a_foreign_client_execution_on_the_official_path_is_not_own(rig: _Rig) -> None:
+    rig.app.execDetails(-1, _option_contract(), _execution(rig.order_ref, client_id=_CLIENT + 1))
+    rig.consumer.drain()
+    assert _outcomes(rig.harness) == [CallbackOutcome.NOT_OWN_AT_CAPTURE.value]
+    assert _fills(rig.harness) == []
+
+
+def test_x04_start_closes_a_pending_row_without_waiting_for_the_cadence(tmp_path: Path) -> None:
+    file_rig = _FileRig(tmp_path, commission_grace=timedelta(seconds=0.3))
+    try:
+        file_rig.consumer.open()
+        file_rig.consumer.offer(_orphan_commission(3))
+        file_rig.consumer.drain()  # PENDING: inside its grace
+        file_rig.consumer.stop()
+        time.sleep(0.5)  # past the grace, before any start: only the start sweep can close it now
+        assert file_rig.outcomes() == []
+
+        file_rig.consumer.start(is_writer=lambda: True)
+        assert _wait_until(lambda: file_rig.outcomes() == ["unknown_execution"], timeout=3.0)
+    finally:
+        file_rig.consumer.stop()
+        file_rig.database.dispose()
+
+
 # --- 4 / 5(k) / 5: readiness is never published or inferred by the consumer ---------------------
 
 _LATCH_NAMES = frozenset(
