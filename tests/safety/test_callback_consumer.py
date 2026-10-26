@@ -755,6 +755,29 @@ def test_5e_execution_then_commission_pairs_and_a_late_commission_is_refused_and
     assert {row["facts"]["amount"] for row in kept} == {"1.05", "0.95"}  # never lost
 
 
+# --- CB1-FIX1 F1: an unrecognized status is refused to a typed unknown, never ingested ----------
+
+
+def test_f1_an_unrecognized_status_is_typed_never_ingested_and_demotes(rig: _Rig) -> None:
+    # "ApiPending" is real IBKR vocabulary the mapper does not know: it maps to SUBMISSION_UNKNOWN,
+    # and SUBMITTED -> SUBMISSION_UNKNOWN is a legal transition (Fable probe P2)
+    rig.status(_ORDER, "ApiPending", 0, 1, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    outcomes = _rows(rig.harness, CALLBACK_OUTCOME)
+    assert [row["outcome"] for row in outcomes] == ["unrecognized_status"]
+    assert outcomes[0]["status"] == "apipending"  # the notice names the cause (D-43)
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    assert [event for event in rig.events() if event.source == CALLBACK_SOURCE] == []
+    assert UNPROVEN_CALLBACK_REASON in rig.invalidations
+
+    # control: a recognized status for the same intent still applies
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+    assert rig.intent_status() is OrderLifecycle.FILLED
+    assert _outcomes(rig.harness)[-1] == CallbackOutcome.APPLIED.value
+
+
 # --- 5(c) the key carries every identity ---------------------------------------------------------
 
 
