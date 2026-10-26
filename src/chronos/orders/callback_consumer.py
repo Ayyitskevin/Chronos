@@ -593,7 +593,9 @@ class CallbackConsumer:
         self._last_error_type: str | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_sweep = 0.0  # time.monotonic() of the last sweep attempt
+        # time.monotonic() of the last sweep; the cadence starts at construction, so the start
+        # sweep in _run is the only immediate one
+        self._last_sweep = time.monotonic()
         self._sweep_requested = False  # a failure streak cleared: sweep at the next loop
         self._is_writer: Callable[[], bool] = lambda: True
 
