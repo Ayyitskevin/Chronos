@@ -362,6 +362,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                             "passed": False,
                         },
                     )
+                # CB-1: a writer with no recovery hold journals unsolicited callbacks from here
+                # on; the consumer only demotes readiness, the composite above publishes it.
+                runtime.start_callback_consumer(is_writer=_still_the_writer)
     except BaseException:
         if not read_only:
             try:

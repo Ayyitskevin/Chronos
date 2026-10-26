@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import atexit
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Protocol
+
+from sqlalchemy.engine import make_url
 
 from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
@@ -29,6 +33,7 @@ from chronos.domain.enums import (
 )
 from chronos.domain.models import (
     AccountSummary,
+    BrokerExecution,
     ConnectionStatus,
     CryptoContract,
     MarketQuote,
@@ -36,6 +41,11 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.orders.arming import LiveArmingService
+from chronos.orders.callback_consumer import (
+    CallbackConsumer,
+    ConsumerHealth,
+    ExecutionWriteOutcome,
+)
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.kill_switch import LiveKillSwitch
@@ -56,6 +66,7 @@ from chronos.orders.service import OrderManagementService
 from chronos.orders.session_drawdown import SessionDrawdownBreaker
 from chronos.orders.submission import OrderSubmissionBoundary
 from chronos.orders.tracker import OrderTracker
+from chronos.persistence import execution_repository as fills_writer
 from chronos.persistence.database import Database
 from chronos.persistence.execution_repository import ExecutionRepository
 from chronos.persistence.order_repositories import (
@@ -82,6 +93,40 @@ from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
 from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 from chronos.utils.logging import configure_logging
 from chronos.utils.time import utc_now
+
+
+class _CallbackSource(Protocol):
+    """CB-1: where unsolicited callbacks come from (the official bridge, the Demo seam)."""
+
+    def set_stream_sink(self, sink: Callable[[Any], object] | None) -> None: ...
+
+
+def _file_backed(url: str) -> bool:
+    parsed = make_url(url)
+    return parsed.get_backend_name() != "sqlite" or parsed.database not in (None, "", ":memory:")
+
+
+def _callback_execution_writer(
+    repository: ExecutionRepository,
+) -> Callable[[BrokerExecution], ExecutionWriteOutcome]:
+    """CB-1: the consumer's write-only seam to the fills writer (BP-1's authority line).
+
+    The consumer lives in ``chronos.orders``, which never imports the writer; it gets this
+    callable instead. It records and never reads a row back. The writer's typed refusals map to
+    the consumer's outcome enum the way the coordinator's ``_record_execution`` maps them.
+    """
+
+    def record(execution: BrokerExecution) -> ExecutionWriteOutcome:
+        try:
+            correlation_id = repository.linked_correlation_id(execution.order_ref)
+            written = repository.record(execution, correlation_id=correlation_id)
+        except fills_writer.ExecutionConflict:
+            return ExecutionWriteOutcome.CONFLICT
+        except (fills_writer.UnknownCorrelation, ValueError):
+            return ExecutionWriteOutcome.REFUSED
+        return ExecutionWriteOutcome.RECORDED if written else ExecutionWriteOutcome.ALREADY_RECORDED
+
+    return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +163,49 @@ class AppRuntime:
     # published; evidence only (K1 (a) append-only, K2 (a) masked id + fingerprint). Optional
     # so a runtime built without a database seam records nothing.
     reconciliation_runs: ReconciliationRunRecorder | None = None
+    # CB-1: the supervised callback consumer and the stream it drains (the official adapter's
+    # bridge or the Demo seam). Built for every runtime; started only by a writer's lifespan.
+    callback_consumer: CallbackConsumer | None = None
+    callback_source: _CallbackSource | None = None
+
+    def start_callback_consumer(self, *, is_writer: Callable[[], bool]) -> bool:
+        """Start draining unsolicited callbacks (writer only, after the startup reconciliation).
+
+        Refused on an in-memory database: its one ``StaticPool`` connection is shared across
+        threads, so a second thread's commit would adopt another session's pending writes.
+        """
+
+        consumer = getattr(self, "callback_consumer", None)
+        source = getattr(self, "callback_source", None)
+        if consumer is None or source is None:
+            return False
+        if not _file_backed(self.database.url):
+            logging.getLogger("chronos.runtime").warning(
+                "Callback consumer not started on an in-memory database",
+                extra={"event": "callback_consumer_not_started"},
+            )
+            return False
+        consumer.start(is_writer=is_writer)
+        source.set_stream_sink(consumer.offer)
+        return True
+
+    def callback_consumer_health(self) -> ConsumerHealth | None:
+        consumer = getattr(self, "callback_consumer", None)
+        return consumer.health() if consumer is not None else None
+
+    def _stop_callback_consumer(self) -> None:
+        source = getattr(self, "callback_source", None)
+        consumer = getattr(self, "callback_consumer", None)
+        try:
+            if source is not None:
+                source.set_stream_sink(None)
+            if consumer is not None:
+                consumer.stop()
+        except Exception:
+            logging.getLogger("chronos.runtime").exception(
+                "Callback consumer shutdown failed",
+                extra={"event": "callback_consumer_shutdown_failed"},
+            )
 
     def reconcile_submission_readiness(
         self,
@@ -218,6 +306,7 @@ class AppRuntime:
 
     def close(self) -> None:
         try:
+            self._stop_callback_consumer()
             self.connection.close()
         finally:
             self.market_data.clear_cache()
@@ -312,8 +401,12 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             audit=KillSwitchEventRepository(database.sessions),
         )
         broker: Broker
+        # CB-1: the adapter's unsolicited-callback stream; the read-only ib_async adapter has none
+        callback_source: _CallbackSource | None = None
+        convert_execution: Callable[..., BrokerExecution] | None = None
         if settings.broker_mode is BrokerMode.DEMO:
             broker = DemoBroker(profile=settings.demo_profile)
+            callback_source = broker
         elif settings.broker_adapter is BrokerAdapter.IB_ASYNC:
             from chronos.broker.ibkr import IBKRBroker
 
@@ -326,7 +419,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             # kill switch is constructed first and shared so the adapter's
             # last-line breaker check (ADR-0009 §8) sees the same durable state
             # as the /live API and the submission boundary.
-            from chronos.broker.official_ibkr import OfficialIBKRBroker
+            from chronos.broker.official_ibkr import OfficialIBKRBroker, execution_from_pair
 
             broker = OfficialIBKRBroker(
                 settings,
@@ -339,6 +432,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
                     persistence_key=persistence_key,
                 ),
             )
+            # CB-1: an adapter double without the callback bridge simply has no stream
+            callback_source = getattr(broker, "bridge", None)
+            convert_execution = execution_from_pair
         market_data = MarketDataManager(
             broker,
             max_quote_age=timedelta(seconds=settings.max_quote_age_seconds),
@@ -426,6 +522,17 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             reconciliation_readiness=reconciliation_readiness,
             persistence_key=persistence_key,
         )
+        callback_consumer = (
+            _build_callback_consumer(
+                database=database,
+                account_id=account.account_id,
+                persistence_key=persistence_key,
+                invalidate=reconciliation_readiness.invalidate,
+                convert_execution=convert_execution,
+            )
+            if callback_source is not None
+            else None
+        )
     except BaseException:
         if connection is not None:
             try:
@@ -462,10 +569,40 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         session_drawdown=session_drawdown,
         persistence_key=persistence_key,
         reconciliation_runs=reconciliation_runs,
+        callback_consumer=callback_consumer,
+        callback_source=callback_source,
     )
     if register_atexit:
         atexit.register(runtime.close)
     return runtime
+
+
+def _build_callback_consumer(
+    *,
+    database: Database,
+    account_id: str,
+    persistence_key: PersistenceKey,
+    invalidate: Callable[[str], object],
+    convert_execution: Callable[..., BrokerExecution] | None,
+) -> CallbackConsumer:
+    """CB-1: built here, started only by a writer (``AppRuntime.start_callback_consumer``)."""
+
+    intents = OrderIntentRepository(database.sessions)
+    tracker_repo = OrderTrackerRepository(database.sessions)
+    return CallbackConsumer(
+        sessions=database.sessions,
+        intents=intents,
+        tracker=OrderTracker(intents, tracker_repo),
+        ownership=PersistedOrderOwnershipLedger(
+            intents, tracker_repo, persistence_key=persistence_key
+        ),
+        record_execution=_callback_execution_writer(ExecutionRepository(database.sessions)),
+        account_id=account_id,
+        persistence_key=persistence_key,
+        # the ONE latch method the consumer may reach: it demotes, never publishes
+        invalidate=invalidate,
+        convert_execution=convert_execution,
+    )
 
 
 def _build_order_management(

@@ -612,6 +612,10 @@ def _make_app(bridge: CallbackBridge) -> Any:
             # RC-1: classify the RAW identifiers first — before any int() — so a malformed id
             # can neither alias an own order nor raise before readiness is invalidated.
             bridge.observe_order_status_identity(clientId, orderId)
+            # CB-1: the raw arguments go to the callback consumer, unconverted
+            bridge.on_order_status_stream(
+                orderId, status, filled, remaining, avgFillPrice, permId, clientId
+            )
             if type(orderId) is not int:
                 return  # a malformed order id matches no flight; it was classified above
             bridge.on_order_status(
