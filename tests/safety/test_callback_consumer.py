@@ -522,6 +522,18 @@ def test_2_a_commission_for_an_unknown_execution_id_is_typed_after_its_grace(rig
     assert _fills(rig.harness) == []
 
 
+def test_f6_an_unknown_execution_commission_demotes_like_an_unknown_intent(rig: _Rig) -> None:
+    """CB1-FIX1 F6 (Fable probe P4): a commission for an execution this process never journaled
+    is as unproven as an orderStatus for an unknown intent; both demote (tightening only)."""
+
+    rig.app.commissionReport(FakeCommissionReport("ffff0000.orphan.01", 1.05, "USD"))
+    rig.consumer.drain()
+    rig.clock.advance(31)
+    rig.consumer.sweep()
+    assert _outcomes(rig.harness) == [CallbackOutcome.UNKNOWN_EXECUTION.value]
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
+
+
 def test_2_a_status_for_an_intent_the_boundary_owns_is_deferred_never_ingested(
     rig: _Rig,
 ) -> None:
