@@ -492,6 +492,25 @@ def test_the_bind_refusal_names_a_different_key_and_prescribes_no_new_database_u
     assert _leaks(message, _key("bound"), _key("other")) == []
 
 
+def test_fix4_the_runbooks_quote_the_current_bind_refusal_and_its_remedy() -> None:
+    """KEYSRC-FIX4 (Kimi DELTA3 P3-1, residual R5): the operator runbooks quote the refusal this
+    branch ships, and neither still prescribes a new DATABASE_URL nor promises a follow-up."""
+
+    root = Path(runtime_module.__file__).resolve().parents[2]
+    swap = (root / "docs" / "ops" / "b1-swap-runbook.md").read_text(encoding="utf-8")
+    cutover = (root / "docs" / "ops" / "N3-CUTOVER.md").read_text(encoding="utf-8")
+    shipped = (root / "src" / "chronos" / "persistence" / "database.py").read_text(encoding="utf-8")
+
+    assert '"This Chronos database is already bound to a different broker scope or a "' in shipped
+    flat = " ".join(swap.split())
+    assert "already bound to a different broker scope or a different persistence key" in flat
+    for text in (swap, cutover):
+        flat = " ".join(text.split())
+        assert "configure a separate DATABASE_URL" not in flat
+        assert "a follow-up fixes the message" not in flat
+        assert "database.py:254-258" not in flat
+
+
 def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_url(
     tmp_path: Path,
 ) -> None:
