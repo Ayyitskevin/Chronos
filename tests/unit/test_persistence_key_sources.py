@@ -1070,3 +1070,66 @@ def test_fix3_the_key_module_never_uses_an_interpolating_parse() -> None:
     used = _names_used(inspect.getsource(pk))
     assert used & {"dotenv_values", "resolve_variables", "load_dotenv", "interpolate"} == set()
     assert "parse_stream" in used
+
+
+# --- 8. KEYSRC-FIX5: the reader's independent read (HOLD P2=1 @ b702697) ---
+# P2-1: README.md tells every developer `cp .env.example .env`; the template carried an EMPTY key
+# line, which the count rightly treats as a source, and tests/conftest.py sets the key in the
+# environment: two sources, so the API suite refused on a fresh checkout. The template now binds no
+# key (the line is commented, with the instruction); an empty line stays a source (pinned above).
+
+_TEMPLATE = Path(runtime_module.__file__).resolve().parents[2] / ".env.example"
+
+
+def test_fix5_the_template_binds_no_key() -> None:
+    """The template's own bytes (``.env.example``, not a ``.env``) bind the key zero times, through
+    the loader's parser, and still say where the real key goes."""
+
+    text = _TEMPLATE.read_text(encoding="utf-8")
+
+    assert pk.count_key_lines(text) == 0
+    assert pk.key_binding_values(text) == []
+    assert f"#{_NAME}=" in text.splitlines()  # the commented line the owner replaces
+
+
+def test_fix5_a_copied_template_and_the_test_environment_key_are_one_source(tmp_path: Path) -> None:
+    """The README path (`cp .env.example .env`) next to tests/conftest.py's environment key: one
+    source, so the suite runs on a fresh checkout. The copy is named dotenv.synthetic."""
+
+    copy = tmp_path / "dotenv.synthetic"
+    copy.write_bytes(_TEMPLATE.read_bytes())
+
+    snapshot = pk.take_persistence_key_snapshot(environ={_NAME: _key("conftest")}, env_files=[copy])
+
+    assert snapshot.source == "the process environment"
+
+
+# P3-1: on a refused source, `mandate fingerprint` said on stdout that the key was "absent or
+# malformed"; `mandate check` said "no account id was available". Each now names the refusal.
+
+
+@pytest.mark.usefixtures("_fresh_settings")
+def test_fix5_mandate_fingerprint_stdout_names_a_refusal_not_an_absent_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _dotenv(tmp_path, f"{_NAME}={_key('file')}")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.setenv(_NAME, _key("env"))
+
+    assert main(["mandate", "fingerprint", "--account-id", _ACCOUNT]) == 1
+
+    out = capsys.readouterr().out
+    assert out.startswith("no persistence key available")  # the prefix scripts match, unchanged
+    assert "refused" in out and "stderr" in out
+    assert _leaks(out, _key("env"), _key("file"), path=path) == []
+
+
+def test_fix5_mandate_check_names_the_key_when_the_account_check_is_skipped() -> None:
+    from chronos.cli import mandate_check
+
+    (finding,) = mandate_check._review_account(
+        mandate_check.AutonomyMandate.model_construct(), expected=None, fingerprint_source=""
+    )
+
+    assert finding.code == "account-check-skipped"
+    assert "persistence key" in finding.message
