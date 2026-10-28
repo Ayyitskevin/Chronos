@@ -621,6 +621,32 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
             "account=account,",
             "account=account if evidence_provenance_is_current else None,",
         ),
+        # D43-FIX4 (reader F2, B1-B3): control flow around the read, not only the read's bytes
+        (  # B1: an early return before the read
+            "src/chronos/orders/submission.py",
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n        try:",
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n"
+            "        if self is not None:\n"
+            "            return Decimal('1000000'), ''\n"
+            "        try:",
+        ),
+        (  # B2: the read made conditional
+            "src/chronos/orders/evidence.py",
+            "        account = self._connection.run(self._connection.broker.account_summary())\n",
+            "        if self._settings is None:\n"
+            "            account = None\n"
+            "        else:\n"
+            "            account = self._connection.run("
+            "self._connection.broker.account_summary())\n",
+        ),
+        (  # B3: a flag-guarded bypass inside the read's try
+            "src/chronos/orders/submission.py",
+            "        try:\n            account = self._connection.run(",
+            "        try:\n"
+            "            if getattr(self, '_stale_ok', False):\n"
+            "                return Decimal('1000000'), ''\n"
+            "            account = self._connection.run(",
+        ),
     ],
     ids=[
         "evidence-call",
@@ -633,6 +659,9 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
         "submission-wrapped-call",
         "evidence-wrapped-call",
         "evidence-conditional",
+        "submission-early-return",
+        "evidence-conditional-read",
+        "submission-flag-bypass-in-try",
     ],
 )
 def test_3b3_the_read_scan_sees_an_edited_read(path: str, old: str, new: str) -> None:
@@ -666,6 +695,24 @@ def test_3b5_a_sibling_argument_of_the_read_s_consumer_stays_free() -> None:
     old = "opening_orders_today=opening_today,"
     assert source.count(old) == 1
     edited = source.replace(old, "opening_orders_today=opening_today + 0,")
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
+
+
+def test_3b6_an_exit_after_the_read_stays_free() -> None:
+    """Negative control for FIX4's control-path slice: only exits BEFORE the read are part of it.
+
+    A guard added after the read (here, after the readiness snapshot that follows it) is the rest
+    of the function, which D-53 keeps free.
+    """
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "        readiness_after = self._reconciliation_readiness.snapshot()\n"
+    assert source.count(old) == 1
+    edited = source.replace(
+        old, old + "        if intent is None:\n            raise ValueError('no intent')\n"
+    )
     assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
     assert _account_summary_reads(source) == _account_summary_reads(edited)
 
