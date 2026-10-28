@@ -2119,13 +2119,17 @@ def test_fix3_p1_the_accepting_check_and_the_put_are_one_critical_section(
         file_rig.database.dispose()
 
 
-def test_fix3_p1_kimi_schedule_stop_cannot_complete_inside_the_offer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["worker", "synchronous"])
+def test_fix3_p1_kimi_schedule_stop_cannot_complete_inside_the_offer(
+    tmp_path: Path, mode: str
+) -> None:
     """Kimi's probe (out/CB1/kimi-probes/test_stop_offer_race.py), ``stop()`` on its own thread.
 
     The offer is held after its accepting check and before its put; ``stop()`` runs; the offer is
     released once stop has returned (the f0736a3 schedule: the put lands after the final drain) or
     is waiting on the lock the offer holds. Either way the accepted event must end journaled, or
-    counted lost with one DROPPED demotion; never queued behind no worker.
+    counted lost with one DROPPED demotion; never queued behind no worker. ``synchronous`` is the
+    ``open()`` mode with no worker: there stop's flip is the only lock between put and drain.
     """
 
     file_rig = _FileRig(tmp_path)
@@ -2143,7 +2147,10 @@ def test_fix3_p1_kimi_schedule_stop_cannot_complete_inside_the_offer(tmp_path: P
     stopper = threading.Thread(target=stopping)
     lock.offer_thread, lock.stop_thread = offered, stopper
     try:
-        consumer.start(is_writer=lambda: True)
+        if mode == "worker":
+            consumer.start(is_writer=lambda: True)
+        else:
+            consumer.open()
         offered.start()
         assert entered.wait(2)  # accepted, not yet queued
         stopper.start()
@@ -2214,5 +2221,28 @@ def test_fix3_a_worker_that_dies_holding_an_event_counts_it_lost(tmp_path: Path)
         assert file_rig.consumer.stop(timeout=1) == 0  # nothing queued; counted once, not twice
         assert file_rig.consumer.health().dropped == 1
     finally:
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix3_an_abandoned_workers_event_is_counted_once_by_its_stop(tmp_path: Path) -> None:
+    """P1-1b never double counts: the stop counted the held event; the worker, released afterwards,
+    exits on its revoked token without counting it again."""
+
+    file_rig = _FileRig(tmp_path)
+    entered, release = _blocked_handle(file_rig.consumer)
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(file_rig.foreign(1))
+        assert entered.wait(2)
+        thread = file_rig.consumer._thread
+        assert thread is not None
+        assert file_rig.consumer.stop(timeout=0.05) == 1
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert file_rig.consumer.health().dropped == 1
+    finally:
+        release.set()
         file_rig.consumer.stop(timeout=1)
         file_rig.database.dispose()
