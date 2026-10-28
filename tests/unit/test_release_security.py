@@ -156,12 +156,21 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # api/autonomy_wiring.py source-inventory fingerprints (3); the QQQ readiness pins of the
     # pre-N3 position_admission.py bytes in the spec and the compiler, and the pre-re-pin readiness
     # digest (3); the two pre-N3 idempotency goldens (2).
+    # 39 at KEYSRC (runtime.py: the persistence-key source check supersedes its fingerprint).
+    # 40 at KEYSRC-FIX1 (runtime.py: the one-snapshot key resolution supersedes KEYSRC's).
+    # 41 at KEYSRC-FIX2 (runtime.py: the key resolved from the counted snapshot supersedes FIX1's).
+    # 42 at KEYSRC-FIX4 (api/autonomy_wiring.py: the mandate-mismatch log names the key cause).
     # 41 at CB-1 (the callback consumer wired through runtime.py, official_ibkr.py and demo.py:
     # their superseded source-inventory fingerprints, 3). 42 at CB1-FIX1 (runtime.py: the consumer
     # stops before its sink detaches, superseding CB-1's runtime.py fingerprint).
+    # 47 at the KEYSRC/CB-1 merge: the union of both branches' entries (the shared N3-1 runtime.py
+    # entry once: 38 + 4 + 3), plus the two runtime.py fingerprints the merged file supersedes
+    # (CB1-FIX1's and KEYSRC-FIX2's).
     # 43 at D-43 (rebased onto 0e624e5: official_ibkr.py's quantity quarantine supersedes
     # CB-1's official_ibkr.py fingerprint).
-    assert len(historical_candidates) == 43
+    # 48 at the D-43/#329 merge: main's 47 plus D-43's one (CB-1's official_ibkr.py fingerprint,
+    # superseded by the quantity quarantine); neither side changes the other's inventory files.
+    assert len(historical_candidates) == 48
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

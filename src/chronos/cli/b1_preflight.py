@@ -51,6 +51,9 @@ from chronos.cli.db_preflight import run_preflight as run_database_preflight
 from chronos.config.persistence_key import (
     PERSISTENCE_KEY_ENV,
     PersistenceKeyError,
+    count_key_lines,
+    has_interpolation,
+    key_binding_values,
     resolve_persistence_key,
 )
 from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
@@ -71,6 +74,8 @@ _CHECKLIST_PLACEHOLDER_ACCOUNT = "DU1234567"
 _DEFAULT_DATABASE_URL = "sqlite:///data/chronos.db"
 _PEPPER_SHAPE = re.compile(r"[0-9a-f]{64}")
 _AMBIENT_PREFIXES = ("BROKER_", "IB_", "ALLOW_", "AUTONOMY_", "CHRONOS_")
+#: Settings loads case-insensitively, so an exported name outranks the file in any case it folds
+_AMBIENT_FOLDED = tuple(prefix.casefold() for prefix in _AMBIENT_PREFIXES)
 _CREDENTIAL_KEY = re.compile(r"(PASS(WORD)?|USER(NAME)?|LOGIN|SECRET|TOKEN)", re.IGNORECASE)
 _PROC_NET = Path("/proc/net")
 _ENV_LABEL = "chronos-preflight env file"
@@ -121,9 +126,9 @@ def preflight_b1_env(
     """
 
     found: list[tuple[str, str]] = []
-    values = {k: v for k, v in dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    values = _file_values(text)
 
-    ambient = sorted(k for k in (environ or {}) if k.startswith(_AMBIENT_PREFIXES))
+    ambient = sorted(k for k in (environ or {}) if k.casefold().startswith(_AMBIENT_FOLDED))
     if ambient:
         found.append(("P12", f"exported variables outrank the file: {', '.join(ambient)}"))
 
@@ -301,6 +306,26 @@ class _FileOnlySettings(Settings):
         return (init_settings,)
 
 
+def _file_values(text: str) -> dict[str, str]:
+    """The file's values for B1's file-only settings: the loader's parse, except the key.
+
+    KEYSRC-FIX3: python-dotenv interpolates every value from the LIVE environment, so the key is
+    the file's RAW binding (the backend's own interpolation-free parse, last line, as the loader
+    would pick); every other value keeps the loader's semantics.
+    """
+
+    folded = PERSISTENCE_KEY_ENV.casefold()
+    values = {
+        k: v
+        for k, v in dotenv_values(stream=io.StringIO(text)).items()
+        if v is not None and k.casefold() != folded
+    }
+    key_values = key_binding_values(text)
+    if key_values and key_values[-1] is not None:
+        values[PERSISTENCE_KEY_ENV] = key_values[-1]
+    return values
+
+
 def _load_settings(values: Mapping[str, str]) -> Settings | str:
     """Build Settings from the file's own values only (never os.environ, never any .env)."""
 
@@ -418,7 +443,30 @@ def _env_lines(report: B1Report, text: str, environ: Mapping[str, str]) -> None:
             f"P1-P13 met ({len(CONDITIONS)} conditions; P11 by the admission: a regular, "
             "owner-only 0600 file read through one descriptor)",
         )
-    values = {k: v for k, v in dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    # KEYSRC: the backend refuses a key named more than once (it counts the same lines), and the
+    # last line is the one the settings below would load: say so here, before any scope verdict
+    named = count_key_lines(text)
+    if named > 1:
+        report.add(
+            "REFUSE",
+            "key-source",
+            f"{PERSISTENCE_KEY_ENV} is named on {named} lines of the file (any case, export forms "
+            "and empty values included); the backend refuses to start unless exactly one names it: "
+            "keep one (the value is not shown)",
+        )
+    # KEYSRC-FIX3: python-dotenv interpolates every value from the LIVE environment, so the key
+    # B1 checks is the file's RAW binding (the backend's own parse), and a key binding with
+    # interpolation syntax is refused here as the backend refuses it
+    key_values = key_binding_values(text)
+    if has_interpolation(key_values):
+        report.add(
+            "REFUSE",
+            "key-source",
+            f"{PERSISTENCE_KEY_ENV} contains '$' (interpolation syntax) in the file: its value "
+            "would come from another variable, not from the file; the backend refuses to start: "
+            "write the key itself (the value is not shown)",
+        )
+    values = _file_values(text)
     settings = _load_settings(values)
     if isinstance(settings, str):
         report.add("INFO", "database", "not checked: the file's settings did not load (P1/P8)")
@@ -567,8 +615,10 @@ def _scope_lines(report: B1Report, path: Path, settings: Settings) -> None:
         report.add(
             "REFUSE",
             "scope",
-            "this database is already bound to a different broker scope; the backend would "
-            "refuse to start: choose a new absolute DATABASE_URL (runbook step 6)",
+            "this database is already bound to a different broker scope or a different "
+            "persistence key than this file's: find which before changing anything (a new "
+            "DATABASE_URL starts a separate store, and if the key changed, one bound under a key "
+            "that may not be escrowed)",
         )
 
 
