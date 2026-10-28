@@ -118,13 +118,26 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   rebinding written in the file (`globals()[…]`, `exec`, a star import, or one hidden by a coding
   cookie) is refused before the sandbox. Everything else is refused too, benign or not (a negative
   number, an attribute alias such as `schema.TABLE`, `sa.text(…)`, a class, a decorator): a gates/
-  change first. An imported module still lets an in-process rebinding through (below).
-  What this proves is the DECLARED chain. It does not read other modules: a module the file imports
-  (any candidate module, `chronos.persistence` included) runs at import time and can still rebind the
-  file's header, and `upgrade()`/`downgrade()` bodies run only in the sandbox. The
-  in-sandbox installed smoke checks only `get_heads() == [head]` and the applied version, never the graph,
-  so a fork that merges back to the declared head passes it; nothing trusted re-verifies the RUNTIME graph
-  (owner residual). A PR that adds a migration needs human review of its imports.
+  change first. Candidate code outside the file (an imported module, among other routes) still lets
+  an in-process rebinding through (below).
+  What this proves is the DECLARED chain, i.e. the revision files' own text. It does not see code the
+  candidate controls that runs in the sandbox before or during Alembic's import of a revision, and any
+  such code can rebind a header in-process. Known routes, none of them blocked: a module the file
+  imports (any candidate module, `chronos.persistence` included) and `env.py`; an unchecked-hash `.pyc`
+  committed under a `src/` `__pycache__/` that shadows an imported module's honest `.py` (the
+  interpreter runs the pyc; `PYTHONDONTWRITEBYTECODE` stops writes, not reads; only a revision file
+  itself cannot be shadowed, since `versions/` admits only `NNNN_lowercase.py` blobs); a
+  `src/sitecustomize.py`, which runs at interpreter start in a sandboxed process that has `src` on its
+  path (via `PYTHONPATH=src`, and under `-I` too where the lane venv's overlaid site-packages `.pth`
+  names `src`), `make release-gate`'s `$(PY) scripts/verify_release_artifact.py` included; and a
+  `.pth` or `sitecustomize.py` shipped in the wheel (or written into it by a build hook), which lands
+  in the runtime venv's site-packages and runs in the `-I` installed smoke (read from the install
+  path, not built end to end). `upgrade()`/`downgrade()` bodies run only in the sandbox. The
+  in-sandbox installed smoke checks only `get_heads() == [head]` and the applied version, never the
+  graph, so a fork that merges back to the declared head passes it; nothing trusted re-verifies the RUNTIME graph
+  (owner residual). The control is human review of the PR's whole executable surface under `src/` and
+  in the wheel (imports, every added or changed file under `src/`, build config, anything binary such
+  as a `.pyc`), not only a revision's imports.
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming

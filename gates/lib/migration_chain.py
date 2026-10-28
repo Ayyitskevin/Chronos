@@ -33,9 +33,13 @@ literals, as main's column tuples use), and undecorated defs without type parame
 defaults are constants. Anything else is refused, benign or not (a negative number, an attribute
 alias such as ``schema.TABLE``, a lowercase ``sa.text(...)`` call, a class, a decorator): a
 legitimate need is a gates/ change first. Def bodies are NOT inspected (they run only in the
-sandbox), and an IMPORTED module is candidate code that runs at import: it can still rebind the
-importing file's header, which this step cannot see (the README's trust model says so), so the
-body that runs at import is NOT proven unable to rebind a header.
+sandbox). Nor is any other code the candidate controls that runs in the sandbox before or during
+Alembic's import of a revision: an imported module, ``env.py``, a ``src/sitecustomize.py``, an
+unchecked-hash ``.pyc`` in a ``src/`` ``__pycache__/`` that shadows an imported module, a ``.pth``
+or ``sitecustomize.py`` shipped in the wheel. Any of it can rebind a header in-process, this step
+blocks none of it, and nothing trusted re-verifies the runtime graph (owner residual; the README's
+trust model lists the routes and the control: human review of the PR's whole executable surface
+under ``src/`` and in the wheel).
 
 On success the trusted overlay's one ``_MIGRATION_HEAD`` line is set to the derived head (no write
 when it is already main's) and the head is printed. Every other byte of the overlay stays main's.
