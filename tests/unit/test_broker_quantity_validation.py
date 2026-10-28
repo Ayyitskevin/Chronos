@@ -444,3 +444,24 @@ def test_fix4_the_wire_reader_turns_a_none_or_an_overflowing_figure_into_nan(
         "[order-quantity] orderStatus for order 7 carried an unreadable filled figure "
         f"({type_name})"
     ]
+
+
+def test_fix4_the_two_remaining_raise_paths_are_recorded_and_match_the_source() -> None:
+    """Reader F5: residuals R4 and R5 lived only in the receipt. The owner reads limitations.md,
+    so they are recorded there, and the line is checked against the source it describes."""
+
+    text = _limitations()
+    assert "Two raise paths remain on the official adapter's order reads (D-43 R4, R5)" in text
+    # R4: a well-formed but inconsistent row still fails BrokerOrder validation (executed)
+    with pytest.raises(ValidationError, match="must equal order quantity"):
+        _row(
+            lifecycle=OrderLifecycle.SUBMITTED,
+            quantity_quarantine=None,
+            filled_quantity=QUANTITY,
+            remaining_quantity=QUANTITY,
+        )
+    # R5: avgFillPrice / permId still go through float() / int() in the EWrapper
+    official = (_ROOT / "src" / "chronos" / "broker" / "official_ibkr.py").read_text(
+        encoding="utf-8"
+    )
+    assert "float(avgFillPrice)," in official and "int(permId)," in official
