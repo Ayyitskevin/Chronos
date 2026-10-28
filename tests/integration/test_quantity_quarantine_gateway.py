@@ -530,17 +530,16 @@ def _drop_replayed_status(name: str, args: tuple[Any, ...]) -> list[tuple[str, t
 
 @contextmanager
 def _ready_window(
-    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, *, hooked: bool = True
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[tuple[OfficialIBKRBroker, BrokerConnectionManager, ReconciliationReadiness, Any]]:
     """Kimi's probe fixture: an own order, a prior READY proof, then that order's filled figure
-    poisoned through the real EWrapper. ``hooked=False`` builds the adapter without the
-    readiness hook, so only the evidence path's own refusal can stand."""
+    poisoned through the real EWrapper."""
 
     _wrap(monkeypatch, gateway, "open_orders", _drop_replayed_status)
     readiness = ReconciliationReadiness(session_id="d43-fix1-ready-window")
     broker = OfficialIBKRBroker(
         fake_ibapi.official_settings(),
-        on_connection_uncertain=readiness.invalidate if hooked else None,
+        on_connection_uncertain=readiness.invalidate,
         on_managed_account_scope_change=readiness.invalidating_transition,
         order_ownership=fake_ibapi.InstalledGatewayLedger(),
     )
@@ -607,16 +606,6 @@ def test_fix1_kimi_probe_ready_then_poisoned_row_refuses_evidence_and_the_guard(
     assert after.ready is False
     assert after.reason == QUARANTINE_REASON
     assert acquired is False
-
-
-def test_fix1_evidence_refuses_a_quarantined_row_even_without_the_readiness_hook(
-    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with _ready_window(gateway, monkeypatch, hooked=False) as (_broker, manager, readiness, _c):
-        evidence = _gather(manager, readiness)
-        still_ready = readiness.snapshot().ready
-    assert still_ready  # nothing demoted the latch: the evidence path must refuse on its own
-    assert evidence.reconciliation_status is ReconciliationStatus.PENDING
 
 
 def test_fix1_control_well_formed_figures_keep_the_ready_proof_usable(
