@@ -12,8 +12,8 @@ On success it prints exactly one `PASS: <gate> — <reason>` line on stdout; on 
 `FAIL: <gate> — <reason + what to do>` line on stderr and exit 1. A tool failure inside a gate
 (`make`, `git fetch`, `gh`) is its own FAIL line, never a silent exit. Gates report state; they
 never perform a lane transition (no gate marks a PR ready, merges, or edits it).
-`tests/gates/test_gates_10_30.sh` (05/10/20/30, run-all) and `tests/gates/test_gates_40_70.sh` (40–70) pin the
-contract for the gates below. Gates 60 and 70 use `.venv/bin/python` (the Makefile's `PY`);
+`tests/gates/test_gates_10_30.sh` (05/10/20/30, run-all), `tests/gates/test_gates_40_70.sh` (40–70) and
+`tests/gates/test_gate40_migration_chain.sh` (gate 40's migration-head step) pin the contract for the gates below. Gates 60 and 70 use `.venv/bin/python` (the Makefile's `PY`);
 `CHRONOS_PY` overrides it, which is the harness's only knob.
 
 | # | Gate | One-line rule | Came from |
@@ -101,6 +101,17 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   Makefile or gutted security script never runs, and every call is `make -R -f <trusted Makefile>` (a
   candidate `GNUmakefile`/`makefile` is never searched for; MAKEFILES/MAKEFLAGS never reach the sandbox).
   The receipt names the trusted base commit.
+- **Gate 40's migration head is derived as DATA (D-47(b)):** the overlaid release script's one
+  `_MIGRATION_HEAD` line is the only byte that is not main's. Trusted code (`gates/lib/migration_chain.py`,
+  run `python3 -I -B` from the trusted set) reads main's revision files at the trusted base and the
+  candidate's at `PR_HEAD_SHA` as git objects, parses each header with `ast` on its text (size-capped,
+  never imported or executed), and requires: only regular `NNNN_lowercase.py` blobs in `versions/`; literal
+  headers whose `revision` equals the file prefix; main's files byte-identical (append-only); one root, no
+  cycle, no branch, one head; numbering by one; main's literal equal to main's head (else a trusted-base
+  FAIL); the candidate's own literal equal to its head (what CI checks). It then writes the derived head
+  into the trusted overlay copy (no write when it is main's head) and the receipt records it as
+  `migration_head`. The in-sandbox installed smoke still checks the RUNTIME chain against that head, so a
+  header that rebinds itself at import time fails there.
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming

@@ -60,6 +60,13 @@ for name in names:
             sys.exit(f"requirements-{name}.lock:{n} is not a pinned requirement, a sha256 hash or a comment (options, URLs and paths are refused)")
 PY
 )" || fail "$(tail -n 1 <<< "$why"); the trusted steps read the locks only as pinned data"
+# D-47(b): the release script's expected migration head is DERIVED, not main's literal: trusted code reads main's
+# chain (trusted base) and the candidate's (PR_HEAD_SHA) as git objects, ast-parses each header as data (never
+# imported), proves the candidate only appends to main's linear chain and declares the same head itself, then
+# sets the trusted overlay's one _MIGRATION_HEAD line to it (invariants I1-I8: gates/lib/migration_chain.py).
+mhead="$(python3 -I -B "$(dirname "$0")/lib/migration_chain.py" "$(trusted_repo)" "$trusted_sha" "$top" "$PR_HEAD_SHA" "$work/trusted/verify_release_artifact.py" 2>&1)" \
+  || fail "$(tail -n 1 <<< "$mhead"); the trusted step reads the migrations only as data"
+[[ "$mhead" =~ ^[0-9]{4}$ ]] || fail "the trusted migration step printed no head ($(tail -n 1 <<< "$mhead"))"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/chronos-gates/wheels"; mkdir -p "$cache" && chmod 0700 "$cache" || fail "could not create the wheel cache"
 for l in $LOCKS; do
   "$tools/bin/python" -I -B -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
@@ -120,7 +127,7 @@ if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name 
 fi
 cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
 lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
-out="$(python3 -I -B - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
+out="$(python3 -I -B - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" "$mhead" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 targets = dict(line.split() for line in open(sys.argv[6]))
@@ -151,7 +158,7 @@ if len(summaries) == 1:
 receipt = {"sha": snap_head, "exit": code, "pytest": pytest, "summaries": len(summaries), "tree_verified": bad is None and not lane_dirty,
            "targets": {k: int(v) for k, v in targets.items()}, "locks": locks, "cache_sha256": sys.argv[8],
            "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0},
-           "trusted_base": sys.argv[10]}
+           "trusted_base": sys.argv[10], "migration_head": sys.argv[11]}
 path = os.path.join(top, ".gates", "40-evidence-at-head.json")
 if os.path.lexists(path):
     if not stat.S_ISREG(os.lstat(path).st_mode): sys.exit(f"{path} is a link or non-regular file; remove it")
