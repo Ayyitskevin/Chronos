@@ -1035,7 +1035,8 @@ def test_fix3_b1_refuses_a_key_binding_with_interpolation_syntax(
     assert [f.level for f in refusals] == ["REFUSE"]
     assert _INTERPOLATION_REFUSED in refusals[0].text
     assert _leaks(refusals[0].text, _key("b1-live")) == []
-    (values,) = captured
-    named = [value for name, value in values.items() if name.casefold() == _NAME.casefold()]
-    raw_kept = named == ["${CHRONOS_REFERENCED}"]  # a boolean: a failure never prints the key
-    assert raw_kept, "B1's settings did not get the raw binding value"
+    assert len(captured) == 2  # the conditions' settings (P1-P13) and the scope check's settings
+    for values in captured:
+        named = [value for name, value in values.items() if name.casefold() == _NAME.casefold()]
+        raw_kept = named == ["${CHRONOS_REFERENCED}"]  # a boolean: a failure never prints the key
+        assert raw_kept, "a B1 settings load did not get the raw binding value"
