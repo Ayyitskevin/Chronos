@@ -12,6 +12,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -456,10 +457,67 @@ def _packet_base_ref() -> str:
     )
 
 
+def _account_summary_reads(source: str) -> list[str]:
+    """Every live AccountSummary read in one module, as AST dumps, and nothing else.
+
+    A read is a call to ``.account_summary()``. Per read: the qualified name of the function it
+    sits in, the statement that makes the call, the ``except`` handlers of a ``try`` around it
+    inside that function, and every node that uses a name the statement binds (``account=account``,
+    ``account.net_liquidation``). The rest of the module is free to change (D-53).
+    """
+
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def chain(node: ast.AST) -> Iterator[ast.AST]:
+        while node in parents:
+            node = parents[node]
+            yield node
+
+    reads: list[str] = []
+    for call in ast.walk(tree):
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "account_summary"
+        ):
+            continue
+        statement = next(n for n in chain(call) if isinstance(n, ast.stmt))
+        scopes = [
+            n
+            for n in chain(call)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        ]
+        function = scopes[0]
+        reads.append(".".join(reversed([s.name for s in scopes])))
+        reads.append(ast.dump(statement))
+        for node in chain(statement):
+            if node is function:
+                break
+            if isinstance(node, ast.Try):
+                reads.extend(ast.dump(handler) for handler in node.handlers)
+        bound = {
+            target.id
+            for target in getattr(statement, "targets", [])
+            if isinstance(target, ast.Name)
+        }
+        for use in ast.walk(function):
+            if isinstance(use, ast.Name) and use.id in bound and isinstance(use.ctx, ast.Load):
+                reads.append(ast.dump(parents[use]))
+    return reads
+
+
 def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> None:
     """BP-3 touches neither live AccountSummary read — measured against the branch's merge-base
     with its base ref, so merges of main into the branch (other packets' edits to these files)
-    do not fail a pin about THIS branch's edits."""
+    do not fail a pin about THIS branch's edits.
+
+    D-53 (Kevin K-20261028-002): the pin compares the reads themselves (``_account_summary_reads``),
+    not the whole of ``orders/evidence.py`` and ``orders/submission.py``, so a later safety fix
+    elsewhere in those files is not frozen out by a pin about BP-3."""
 
     ref = _packet_base_ref()
     base = subprocess.run(
@@ -471,10 +529,59 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
             ["git", "show", f"{base}:{path}"], cwd=_ROOT, capture_output=True, text=True, check=True
         ).stdout
         after = (_ROOT / path).read_text(encoding="utf-8")
-        assert ast.dump(ast.parse(before)) == ast.dump(ast.parse(after)), (
+        assert _account_summary_reads(before), f"{path} at {base[:12]}: no AccountSummary read"
+        assert _account_summary_reads(before) == _account_summary_reads(after), (
             f"{path} differs from the merge-base {base[:12]} with {ref}: this branch edited a "
             "live AccountSummary read"
         )
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "new"),
+    [
+        (  # the read itself is rerouted
+            "src/chronos/orders/evidence.py",
+            "self._connection.broker.account_summary()",
+            "self._connection.broker.account_summary(cached=True)",
+        ),
+        (  # the read's result no longer reaches the evidence
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=None,",
+        ),
+        (  # the net liquidation comes from somewhere else
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.cash, ""',
+        ),
+        (  # a broader failure is swallowed around the read
+            "src/chronos/orders/submission.py",
+            "except BrokerError as error:\n"
+            '            return None, f"net liquidation unavailable: {error}"',
+            "except Exception as error:\n"
+            '            return None, f"net liquidation unavailable: {error}"',
+        ),
+    ],
+    ids=["evidence-call", "evidence-use", "submission-use", "submission-handler"],
+)
+def test_3b3_the_read_scan_sees_an_edited_read(path: str, old: str, new: str) -> None:
+    """Positive control: each edit of an AccountSummary read is seen by the scan test_3b runs."""
+
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    assert source.count(old) == 1, old
+    assert _account_summary_reads(source) != _account_summary_reads(source.replace(old, new))
+
+
+def test_3b4_the_read_scan_ignores_the_rest_of_the_module() -> None:
+    """Negative control: an edit outside the reads leaves the scan unchanged (D-53)."""
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "readiness_after = self._reconciliation_readiness.snapshot()\n"
+    assert source.count(old) == 1
+    edited = source.replace(old, old + "        unrelated_safety_check = True\n")
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
 
 
 def test_3c_the_base_comparison_uses_no_frozen_sha() -> None:
