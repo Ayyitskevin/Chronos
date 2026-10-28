@@ -52,7 +52,18 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   `gates/lib/tools-venv.sh`'s `-m venv`/`-m pip install`, and gate 60's sandboxed `-m detect_secrets`
   (the trusted scanner must be the one that runs, not a tracked package of the same name). A new
   trusted Python call must do the same; `-I` ignores `PYTHONPATH`, so it takes any trusted path
-  explicitly. The harnesses plant shadow modules in synthetic candidate trees and fail on any marker.
+  explicitly. The harnesses plant shadow modules in synthetic candidate trees and fail on any marker: that proves
+  the cwd-import half of the rule behaviourally. The rest of it (`-B`, and the `PYTHON*`-env and user-site halves of `-I`)
+  has no candidate-reachable behaviour to plant, so `tests/gates/test_gates_40_70.sh` (`iso:3`) pins it by spelling: it
+  greps `gates/*.sh` and `gates/lib/*.sh` for a call written `python3 -…`, `…/bin/python -…` or tools-venv.sh's
+  `"$base" -…` and requires `-I -B` on each. It does NOT see another spelling (`python3 script.py` with no leading flag,
+  `python`, `python3.12`, an absolute `/usr/bin/python3`, or an interpreter held in a variable), so a trusted call written
+  any other way must be read by hand in review. Sandboxed candidate-venv `"$py"` calls are not matched, by design.
+  **Runner assumption:** `-I` governs what the interpreter imports, not which `python3` runs. The interpreter is resolved
+  through the trusted runner's `PATH`, exactly as `git`, `bwrap`, `make` and `gh` are, so the runner's `PATH` must contain
+  no relative element (no `.`, no empty entry) and no directory the candidate can write to; otherwise a tracked
+  executable named `python3` in the candidate tree would be selected before any flag applies. The lane controls the
+  runner's environment, the candidate does not.
   Not covered by this rule, by design: the sandboxed calls of the CANDIDATE's own venv (`make`'s
   targets, gate 70's pytest, gate 40's security scans), which are candidate code and need `PYTHONPATH`.
 - **Candidate code, sandboxed:** 10 (the current-state generator's `--check`), 40 (the network-free
