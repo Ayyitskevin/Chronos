@@ -26,8 +26,8 @@ tools_venv() {  # prints the tools venv path; non-zero (with a reason on stderr)
   if [ "$(cat "$dir/.gates-lock-sha256" 2>/dev/null)" != "$digest" ]; then
     base="$(sed -n 's/^home = //p' "$repo/.venv/pyvenv.cfg" 2>/dev/null)/python3"
     [ -x "$base" ] || base="$(command -v python3)"
-    rm -rf "$dir" && "$base" -m venv "$dir" >/dev/null 2>&1 \
-      && "$dir/bin/python" -m pip install -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r "$lock" >/dev/null 2>&1 \
+    rm -rf "$dir" && "$base" -I -B -m venv "$dir" >/dev/null 2>&1 \
+      && "$dir/bin/python" -I -B -m pip install -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r "$lock" >/dev/null 2>&1 \
       && printf '%s\n' "$digest" > "$dir/.gates-lock-sha256" && chmod 0700 "$dir" \
       || { rm -rf "$dir" "$lock"; echo "could not build the trusted tools venv from origin/main's requirements-dev.lock" >&2; return 1; }
   fi

@@ -38,7 +38,7 @@ sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-h
 EXCLUDED="tests/unit/test_limitations_autonomy_counters_contract.py::test_3b_the_injection_tests_exist_as_collected_pytest_items
 tests/unit/test_limitations_autonomy_counters_contract.py::test_4c_the_release_is_guarded_by_not_counts_activity_attempt"
 mkdir "$work/trusted" && printf '[pytest]\n' > "$work/trusted/pytest.ini" || fail "could not write the trusted pytest config"
-mapfile -t args < <(python3 - "$work/trusted" "$EXCLUDED" "$@" <<'PY'
+mapfile -t args < <(python3 -I -B - "$work/trusted" "$EXCLUDED" "$@" <<'PY'
 import ast, json, sys
 out, excluded, files = sys.argv[1], set(sys.argv[2].split()), sys.argv[3:]
 expected = {}
@@ -62,7 +62,7 @@ summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ 
 [ "$code" -ne 5 ] || fail "pytest collected no tests from the $# named files; the doc claims are unpinned"
 [ "$code" -eq 0 ] || fail "pytest exited $code ($summary); run '$py -m pytest -q $*' and fix the doc or the claim"
 ! grep -qE '[0-9]+ (deselected|skipped|xfailed|xpassed)' <<< "$summary" || fail "pytest reported '$summary'; every doc-contract test must run and pass (none skipped or deselected)"
-verdict="$(python3 - "$work" <<'PY' 2>&1
+verdict="$(python3 -I -B - "$work" <<'PY' 2>&1
 import json, os, re, stat, sys
 work = sys.argv[1]
 expected = json.load(open(f"{work}/trusted/expected.json"))  # trusted: derived by AST before the run
