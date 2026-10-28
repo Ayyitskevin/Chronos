@@ -24,7 +24,9 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -81,7 +83,17 @@ _LAUNCH = "/usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc"
 _LAUNCH_C = _LAUNCH + " -c '"
 #: The preflight run once, through the same launch: both absolute paths exist, curl is in a
 #: root-owned directory, and it is the version the token commands will use.
-_PREFLIGHT = _LAUNCH + " -c 'command -v curl; curl -q --version'"
+_PREFLIGHT_LD = (
+    '[ -z "$LD_PRELOAD$LD_AUDIT$LD_LIBRARY_PATH" ] && echo "loader: clean" || echo "loader: STOP"'
+)
+_PREFLIGHT_LOOP = (
+    'for p in /usr/bin /bin /usr/bin/env /bin/bash "$(command -v curl)"; do '
+    'read -r o m < <(stat -L -c "%U %a" "$p"); m=${m: -3}; '
+    'if [[ $o == root && $m =~ ^[0-7][0145][0145]$ ]]; then echo "ok $p"; '
+    'else echo "STOP $p $o $m"; fi; done; curl -q --version'
+)
+_PREFLIGHT_LAUNCH = _LAUNCH + " -c '" + _PREFLIGHT_LOOP + "'"
+_PREFLIGHT = _PREFLIGHT_LD + "\n" + _PREFLIGHT_LAUNCH
 _TOKEN_CURL_FLAGS_NEVER = (" -v", "--verbose", "--trace", "--config", " -K", " -x ")
 
 
@@ -191,15 +203,23 @@ _GATE: dict[str, tuple[str, ...]] = {
         "also stops a curlrc found another way. Your shell may be bash, zsh or dash.",
         "What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either "
         "command and curl prints the token. Do not.",
-        "A shell that deliberately intercepts the launch itself (a bash function named "
-        "`/usr/bin/env`, a DEBUG trap under `extdebug`) is outside this guarantee: it already "
-        "runs as you and can read the token file.",
+        "Threat model. These commands protect the token from accidental disclosure by your own "
+        "shell and tool configuration: history, xtrace, curl config, aliases, functions, hash "
+        "entries, startup files, argv.",
+        "They do not protect against anyone who can already act as your user or as root, who can "
+        "read the token file directly: that includes a hostile `LD_PRELOAD` or loader "
+        "environment, writable system binaries or directories, `ptrace`, a function named "
+        "`/usr/bin/env` and a DEBUG trap under `extdebug`.",
+        "The preflight below stops the accidental versions of the first three.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
         "Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in "
-        "`/usr/bin` or `/bin` (`-H @file`):",
-        "It must print `/usr/bin/curl` (or `/bin/curl`), then curl's version lines, the first "
-        "`curl 7.55` or later.",
-        "**STOP, and run nothing below, if** it prints an error, another path, or an older curl.",
+        "`/usr/bin` or `/bin` (`-H @file`), each owned by root and writable by no one else, and "
+        "no loader override in your environment:",
+        "It must print `loader: clean`, then five lines `ok <path>` (`/usr/bin`, `/bin`, "
+        "`/usr/bin/env`, `/bin/bash` and the curl, `/usr/bin/curl` or `/bin/curl`), then curl's "
+        "version lines, the first `curl 7.55` or later.",
+        "**STOP, and run nothing below, if** it prints `loader: STOP`, any `STOP <path>` line, "
+        "an error, or an older curl.",
         _LAUNCH_C + 'curl -q -sS -w " HTTP %{http_code}\\n" ' + _HEADER_FROM_FILE + " "
         "http://127.0.0.1:<port>/autonomy/alerts'",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
@@ -374,7 +394,7 @@ def test_p11_every_token_bearing_command_runs_in_the_fresh_shell_with_q_first() 
     for launch in token_launches:
         assert launch.startswith(_LAUNCH_C)
     # the preflight uses the same launch, and no token-bearing line sits outside it
-    assert _PREFLIGHT in _launches(runbook)
+    assert _PREFLIGHT_LAUNCH in _launches(runbook)
 
 
 def test_p11_negative_control_each_unguarded_form_is_caught() -> None:
@@ -422,7 +442,7 @@ def _preflight_problems(step7: str) -> list[str]:
 
     flat = _flat(step7)
     problems = []
-    check_at = step7.find("```bash\n   " + _PREFLIGHT + "\n")
+    check_at = step7.find("```bash\n   " + _PREFLIGHT.replace("\n", "\n   ") + "\n")
     read_at = step7.find("curl -fsS http://127.0.0.1:<port>/health | python")
     ack_at = step7.find(_LAUNCH_C + "\n")
     if not 0 <= check_at < read_at < ack_at:
@@ -432,9 +452,16 @@ def _preflight_problems(step7: str) -> list[str]:
         problems.append("the STOP does not sit before the read block")
     for phrase in (
         "It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in `/usr/bin` or `/bin`",
-        "it prints an error, another path, or an older curl",
-        "A shell that deliberately intercepts the launch itself",
-        "(a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`)",
+        "each owned by root and writable by no one else, and no loader override in "
+        "your environment",
+        "it prints `loader: STOP`, any `STOP <path>` line, an error, or an older curl",
+        "Threat model. These commands protect the token from accidental disclosure by your own "
+        "shell and tool configuration",
+        "They do not protect against anyone who can already act as your user or as root, who can "
+        "read the token file directly",
+        "a hostile `LD_PRELOAD` or loader environment, writable system binaries or directories, "
+        "`ptrace`, a function named `/usr/bin/env` and a DEBUG trap under `extdebug`",
+        "The preflight below stops the accidental versions of the first three",
         "add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either command",
         "no `HOME` (so no `~/.curlrc`)",
         "no function, alias, hash entry, xtrace, `BASH_ENV` or startup file",
@@ -455,7 +482,7 @@ def _reword(text: str, phrase: str, replacement: str) -> str:
 def test_p5_the_preflight_precedes_each_token_command_and_carries_its_stop() -> None:
     step7 = _step7()
     assert _preflight_problems(step7) == []
-    assert step7.count(_PREFLIGHT) == 1
+    assert step7.count(_PREFLIGHT_LAUNCH) == 1 and step7.count(_PREFLIGHT_LD) == 1
     # the old per-name shell check is gone: nothing in the operator's shell is trusted any more
     assert "builtin type command curl" not in step7
 
@@ -464,24 +491,52 @@ def test_p5_negative_control_each_missing_piece_is_caught() -> None:
     step7 = _step7()
     assert _preflight_problems(step7) == []
     mutants = {
-        "9a14889 text (shell check, no fresh shell)": step7.replace(
-            _PREFLIGHT, "builtin type command curl printf"
+        "e0a02a7 text (no ownership or loader check)": step7.replace(
+            _PREFLIGHT_LAUNCH, _LAUNCH + " -c 'command -v curl; curl -q --version'"
+        ).replace(_PREFLIGHT_LD + "\n   ", ""),
+        "loader check dropped": step7.replace(_PREFLIGHT_LD + "\n   ", ""),
+        "ownership loop dropped": step7.replace(
+            _PREFLIGHT_LAUNCH, _LAUNCH + " -c 'curl -q --version'"
         ),
+        "loader variable dropped": step7.replace("$LD_AUDIT", ""),
+        "mode test allows group write": step7.replace("[0145][0145]", "[0-7][0145]"),
+        "owner test dropped": step7.replace("$o == root && ", ""),
+        "symlink not followed": step7.replace("stat -L -c", "stat -c"),
         "preflight moved after the read block": step7.replace(
-            "```bash\n   " + _PREFLIGHT + "\n   ```", "```bash\n   true\n   ```"
+            "```bash\n   " + _PREFLIGHT.replace("\n", "\n   ") + "\n   ```",
+            "```bash\n   true\n   ```",
         ),
         "STOP dropped": _reword(step7, "**STOP, and run nothing below, if**", "Note:"),
         "needs-line dropped": _reword(
             step7, "It needs `/usr/bin/env`, `/bin/bash`", "It needs things"
         ),
-        "error/path/older STOP dropped": _reword(
-            step7, "it prints an error, another path, or an older curl", "it fails"
+        "STOP list dropped": _reword(
+            step7,
+            "it prints `loader: STOP`, any `STOP <path>` line, an error, or an older curl",
+            "it fails",
         ),
-        "launch-intercept residual dropped": _reword(
-            step7, "A shell that deliberately intercepts the launch itself", "Nothing intercepts it"
+        "threat model dropped": _reword(step7, "Threat model.", "Note."),
+        "no-protection sentence dropped": _reword(
+            step7,
+            "They do not protect against anyone who can already act as your user or as root",
+            "They protect everyone",
         ),
-        "intercept examples dropped": _reword(
-            step7, "(a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`)", "(none)"
+        "hostile-principal list dropped": _reword(
+            step7,
+            "a hostile `LD_PRELOAD` or loader environment, writable system binaries or "
+            "directories,",
+            "nothing,",
+        ),
+        "accidental-versions sentence dropped": _reword(
+            step7,
+            "The preflight below stops the accidental versions of the first three",
+            "The preflight stops all",
+        ),
+        "needs-owner line dropped": _reword(
+            step7,
+            "each owned by root and writable by no one else, and no loader override in "
+            "your environment",
+            "each present",
         ),
         "operator-added flags residual dropped": _reword(
             step7,
@@ -522,6 +577,63 @@ def test_g2_the_restart_read_leaves_out_the_held_boots_log_line() -> None:
     assert _gate_problems(wrong) and all(
         problem.startswith("prove-cleared") for problem in _gate_problems(wrong)
     )
+
+
+def _run_loop(paths: str) -> list[str]:
+    """The runbook's ownership loop, its path list replaced by ``paths``, run by the local bash."""
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    loop = _PREFLIGHT_LOOP.replace(
+        '/usr/bin /bin /usr/bin/env /bin/bash "$(command -v curl)"', paths
+    )
+    loop = loop.replace("; curl -q --version", "")
+    done = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", loop], capture_output=True, text=True, timeout=60
+    )
+    return [line for line in done.stdout.splitlines() if line.startswith(("ok", "STOP"))]
+
+
+def test_p6_the_preflight_stops_on_a_writable_missing_or_foreign_path(tmp_path: Path) -> None:
+    group = tmp_path / "group"
+    world = tmp_path / "world"
+    group.mkdir()
+    world.mkdir()
+    group.chmod(0o775)
+    world.chmod(0o777)
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    quiet.chmod(0o755)
+    rows = {
+        "group-writable": _run_loop(f'"{group}"'),
+        "world-writable": _run_loop(f'"{world}"'),
+        "missing": _run_loop('"/nonexistent-for-the-preflight"'),
+        "empty (no curl found)": _run_loop('""'),
+    }
+    for name, lines in rows.items():
+        assert len(lines) == 1 and lines[0].startswith("STOP"), (name, lines)
+    # root-owned is part of the rule: a user-owned 0755 directory is not a system directory either
+    # (unless the suite itself runs as root, where the directory IS root-owned and passes)
+    owned = _run_loop(f'"{quiet}"')
+    assert owned[0].startswith("ok" if os.geteuid() == 0 else "STOP"), owned
+
+
+def test_p6_the_loader_line_stops_on_each_override_and_passes_clean() -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LD_")}
+    for shell in filter(None, (shutil.which("bash"), shutil.which("sh"))):
+        clean = subprocess.run(
+            [shell, "-c", _PREFLIGHT_LD], capture_output=True, text=True, env=env
+        )
+        assert clean.stdout.strip() == "loader: clean", (shell, clean.stdout)
+        for variable in ("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"):
+            hit = subprocess.run(
+                [shell, "-c", _PREFLIGHT_LD],
+                capture_output=True,
+                text=True,
+                env=env | {variable: "/x"},
+            )
+            assert hit.stdout.strip() == "loader: STOP", (shell, variable, hit.stdout)
 
 
 def test_c1rf2_the_routes_the_gate_reads_are_the_ones_it_says() -> None:

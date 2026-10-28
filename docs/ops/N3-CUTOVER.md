@@ -453,19 +453,27 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    (`-H @<(printf ...)`, so it is in no process's argv) and never exists in your shell; `-q`, as
    curl's FIRST argument, also stops a curlrc found another way. Your shell may be bash, zsh or
    dash. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
-   command and curl prints the token. Do not. A shell that deliberately intercepts the launch
-   itself (a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`) is outside this
-   guarantee: it already runs as you and can read the token file. The log is your `LOG_FILE`
-   (`logs/chronos.log` by default).
+   command and curl prints the token. Do not.
+
+   Threat model. These commands protect the token from accidental disclosure by your own shell
+   and tool configuration: history, xtrace, curl config, aliases, functions, hash entries,
+   startup files, argv. They do not protect against anyone who can already act as your user or
+   as root, who can read the token file directly: that includes a hostile `LD_PRELOAD` or
+   loader environment, writable system binaries or directories, `ptrace`, a function named
+   `/usr/bin/env` and a DEBUG trap under `extdebug`. The preflight below stops the accidental
+   versions of the first three. The log is your `LOG_FILE` (`logs/chronos.log` by default).
 
    Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in
-   `/usr/bin` or `/bin` (`-H @file`):
+   `/usr/bin` or `/bin` (`-H @file`), each owned by root and writable by no one else, and no
+   loader override in your environment:
    ```bash
-   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'command -v curl; curl -q --version'
+   [ -z "$LD_PRELOAD$LD_AUDIT$LD_LIBRARY_PATH" ] && echo "loader: clean" || echo "loader: STOP"
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'for p in /usr/bin /bin /usr/bin/env /bin/bash "$(command -v curl)"; do read -r o m < <(stat -L -c "%U %a" "$p"); m=${m: -3}; if [[ $o == root && $m =~ ^[0-7][0145][0145]$ ]]; then echo "ok $p"; else echo "STOP $p $o $m"; fi; done; curl -q --version'
    ```
-   It must print `/usr/bin/curl` (or `/bin/curl`), then curl's version lines, the first
-   `curl 7.55` or later. **STOP, and run nothing below, if** it prints an error, another path,
-   or an older curl. Then:
+   It must print `loader: clean`, then five lines `ok <path>` (`/usr/bin`, `/bin`, `/usr/bin/env`,
+   `/bin/bash` and the curl, `/usr/bin/curl` or `/bin/curl`), then curl's version lines, the
+   first `curl 7.55` or later. **STOP, and run nothing below, if** it prints `loader: STOP`, any
+   `STOP <path>` line, an error, or an older curl. Then:
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
