@@ -38,14 +38,18 @@ from chronos.autonomy import (
     DecisionKind,
     DecisionProvenance,
     EvidenceCitation,
+    ExitPlan,
     FamilyPromotion,
     InstrumentScope,
     MarketDataRequirements,
     OrderForm,
+    PriceReference,
+    PriceTrigger,
     PromotionLevel,
     SessionPolicy,
     StrategyForm,
     TradableAssetClass,
+    TriggerComparator,
     VersionPins,
 )
 from chronos.autonomy.enforcement import ENFORCED, INERT, LIMIT_ENFORCEMENT
@@ -1253,3 +1257,64 @@ def test_d17_the_four_limits_are_classified_refused() -> None:
     }
     assert refused == set(_SET_LIMITS)
     assert every_refused == {"ConcentrationLimits", "SessionPolicy"}
+
+
+# ---------------------------------------- D-17 (iii): protection is not available
+#
+# ADR-0021 Group B, ruled "forbid" by Kevin (D-17 (iii), D-52): nothing in Chronos
+# holds a position open, watches a trigger and sends a protective or closing
+# order, so a decision that asks for protection or carries an exit plan is
+# refused rather than admitted with a promise nothing keeps. As designed, this
+# applies to every executable kind: the ruling's carve-out is (ii)'s, and a
+# proposer that drops the unkeepable request is admitted as before.
+
+_TRIGGER = PriceTrigger(
+    comparator=TriggerComparator.AT_OR_BELOW, reference=PriceReference.LAST, value=Decimal(390)
+)
+
+_PROTECTION_REQUESTS: dict[str, dict[str, Any]] = {
+    "protective_order_required": {"protective_order_required": True},
+    "exit_plan.profit_target": {
+        "exit_plan": ExitPlan(
+            profit_target=PriceTrigger(
+                comparator=TriggerComparator.AT_OR_ABOVE,
+                reference=PriceReference.LAST,
+                value=Decimal(420),
+            )
+        )
+    },
+    "exit_plan.protective_stop": {"exit_plan": ExitPlan(protective_stop=_TRIGGER)},
+    "exit_plan.time_exit": {"exit_plan": ExitPlan(time_exit=_NOW + timedelta(hours=2))},
+    "exit_plan (empty)": {"exit_plan": ExitPlan()},
+}
+
+
+@pytest.mark.parametrize("kind", ["OPEN", "CLOSE"])
+@pytest.mark.parametrize("request_", sorted(_PROTECTION_REQUESTS))
+def test_d17_a_protection_request_is_refused(request_: str, kind: str) -> None:
+    base = _EXPOSURE_DECISIONS[kind] if kind == "OPEN" else _REDUCING_DECISIONS[kind]
+    # Positive control: without the request the same decision is admitted.
+    assert admit(_decision(**base), _mandate(), _state()).admitted is True
+
+    outcome = admit(_decision(**base, **_PROTECTION_REQUESTS[request_]), _mandate(), _state())
+    assert outcome.admitted is False
+    assert outcome.refusal == "PROTECTION_NOT_AVAILABLE"
+    assert outcome.failed_checks[-1].name == "protection_available"
+
+
+def test_d17_no_protection_request_is_admitted_exactly_as_today() -> None:
+    """The default values, written out, are not a request: the plain outcome, byte for byte."""
+
+    today = admit(_decision(), _mandate(), _state())
+    assert today.admitted is True
+    explicit = _decision(protective_order_required=False, exit_plan=None)
+    assert admit(explicit, _mandate(), _state()) == today
+
+
+def test_d17_the_protection_refusal_keeps_the_alerting_precedence() -> None:
+    outcome = admit(
+        _decision(protective_order_required=True),
+        _mandate(),
+        _state(degraded_reasons=(DegradedReason(subsystem="reconciliation", detail="stale"),)),
+    )
+    assert outcome.refusal is AdmissionRefusal.DEGRADED_STATE

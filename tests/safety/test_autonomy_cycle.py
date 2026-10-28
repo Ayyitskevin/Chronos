@@ -989,3 +989,17 @@ def test_d17_a_close_under_a_set_limit_still_compiles(session: Session) -> None:
     )
     assert closing.intent is not None, closing.refusal
     assert [entry["admitted"] for entry in _journal(session)] == [True]
+
+
+def test_d17_a_protection_request_is_refused_in_the_cycle_and_journalled(
+    session: Session,
+) -> None:
+    """D-17 (iii) end to end: no protective order exists, so the request is refused, typed."""
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = _run(session, mandate=mandate, payload=_proposal(protective_order_required=True))
+    assert outcome.stage is CycleStage.ADMISSION
+    assert outcome.refusal == "PROTECTION_NOT_AVAILABLE"
+    assert outcome.intent is None
+    assert [entry["refusal"] for entry in _journal(session)] == ["PROTECTION_NOT_AVAILABLE"]
