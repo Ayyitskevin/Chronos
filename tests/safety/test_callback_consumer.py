@@ -2582,3 +2582,47 @@ def test_fix4_p2_1_the_next_held_event_is_counted_after_a_terminal_drop(
         release.set()
         consumer.stop(timeout=1)
         file_rig.database.dispose()
+
+
+def test_fix4_an_event_taken_after_the_stop_gave_up_is_never_handled(tmp_path: Path) -> None:
+    """I8, made explicit by FIX4: the worker counts an event it took after the revoke and does not
+    start handling it. Since FIX4 the claim-based exit count would also count it, so the count alone
+    no longer shows that the post-get token check runs; this pins that it does (M48)."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    taken, release = threading.Event(), threading.Event()
+    events = consumer._queue
+    real_get = events.get
+    normalized: list[StreamEvent] = []
+    real_normalize = consumer._normalize
+
+    def slow_get(*args: Any, **kwargs: Any) -> Any:
+        item = real_get(*args, **kwargs)
+        if isinstance(item, StreamEvent):
+            taken.set()
+            assert release.wait(10)
+        return item
+
+    def spy_normalize(event: StreamEvent) -> Any:
+        normalized.append(event)
+        return real_normalize(event)
+
+    events.get = slow_get  # type: ignore[method-assign]
+    consumer._normalize = spy_normalize  # type: ignore[method-assign]
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(file_rig.foreign(1))
+        assert taken.wait(2)
+        thread = consumer._thread
+        assert thread is not None
+        consumer.stop(timeout=0.05)
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert consumer.health().dropped == 1
+        assert normalized == []  # never handled: counted at the take, under the revoked token
+    finally:
+        release.set()
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
