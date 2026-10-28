@@ -705,3 +705,40 @@ def test_fix1_both_roots_resolve_through_the_one_shared_snapshot() -> None:
         assert "persistence_key_source" not in called, name
         assert "resolve_persistence_key" not in called, name
         assert called.index("take_persistence_key_snapshot") < called.index("get_settings"), name
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+@pytest.mark.parametrize("what", ["count", "key"])
+def test_fix1_the_snapshot_reads_each_dotenv_once_for_the_count_and_the_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    root: str,
+    what: str,
+) -> None:
+    """A second read inside the snapshot is a second snapshot. The file changes right after the
+    first read to one line naming the key the loader will then honour, so a count (two lines
+    first) or a key (``a`` first) taken from another read would agree with the loader and
+    start. One read refuses: two lines counted, or ``a`` read where the loader honoured ``b``."""
+
+    a, b = _key("once-a"), _key("once-b")
+    first = [f"{_NAME}={a}", f"{_NAME}={b}"] if what == "count" else [f"{_NAME}={a}"]
+    path = _dotenv(tmp_path, *first)
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.delenv(_NAME)
+    real = pk._read_dotenv
+    reads: list[Path] = []
+
+    def read_then_change(target: Path) -> str | None:
+        text = real(target)
+        reads.append(target)
+        target.write_text(f"{_NAME}={b}\n", encoding="utf-8")
+        return text
+
+    monkeypatch.setattr(pk, "_read_dotenv", read_then_change)
+    outcome, text = _run_root(root, monkeypatch, capsys, _loading(lambda load: load()))
+
+    assert outcome == "refused"
+    assert ("named 2 times" if what == "count" else "changed while Chronos read it") in text
+    assert reads == [path]
+    assert _leaks(text, a, b, path=path) == []
