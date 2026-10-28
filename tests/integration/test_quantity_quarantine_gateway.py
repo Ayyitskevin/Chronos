@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tests.support import fake_ibapi
@@ -41,6 +41,7 @@ from tests.support.settle_rig import (
 )
 
 import chronos.broker.official_ibkr as official_module
+from chronos.broker.base import BrokerSafetyError
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.domain.enums import (
@@ -528,18 +529,29 @@ def _drop_replayed_status(name: str, args: tuple[Any, ...]) -> list[tuple[str, t
     return [] if name == "orderStatus" else [(name, args)]
 
 
+def _raising_hook(_reason: str) -> None:
+    raise RuntimeError("synthetic readiness invalidation failure")
+
+
 @contextmanager
 def _ready_window(
-    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, *, hook: str = "hooked"
 ) -> Iterator[tuple[OfficialIBKRBroker, BrokerConnectionManager, ReconciliationReadiness, Any]]:
     """Kimi's probe fixture: an own order, a prior READY proof, then that order's filled figure
-    poisoned through the real EWrapper."""
+    poisoned through the real EWrapper. ``hook`` is how the adapter was built (D43-FIX2, Kimi's
+    delta probe): ``hooked`` (the runtime's wiring), ``unhooked`` (no readiness hook) or
+    ``raising`` (a hook that raises)."""
 
     _wrap(monkeypatch, gateway, "open_orders", _drop_replayed_status)
     readiness = ReconciliationReadiness(session_id="d43-fix1-ready-window")
+    hooks: dict[str, Callable[[str], object] | None] = {
+        "hooked": readiness.invalidate,
+        "unhooked": None,
+        "raising": _raising_hook,
+    }
     broker = OfficialIBKRBroker(
         fake_ibapi.official_settings(),
-        on_connection_uncertain=readiness.invalidate,
+        on_connection_uncertain=hooks[hook],
         on_managed_account_scope_change=readiness.invalidating_transition,
         order_ownership=fake_ibapi.InstalledGatewayLedger(),
     )
@@ -651,3 +663,71 @@ def test_fix1_every_quarantined_read_invalidates_readiness_with_its_cause(
     }
     assert MANAGER_FAILURE not in readiness.reasons
     del cls
+
+
+# --- D43-FIX2 (D-53): the evidence path refuses on its own; a raising hook fails the read closed --
+# Kimi's delta review (HOLD P1=1 @ e3a975d): guard 1 is optional and fail-open. An adapter built
+# without the readiness hook, or with one that raises, left READY usable and the evidence
+# RECONCILED.
+
+
+@pytest.mark.parametrize("hook", ["hooked", "unhooked"])
+def test_fix2_the_evidence_refuses_a_quarantined_row_whatever_the_hook(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, hook: str
+) -> None:
+    """READY, then a poisoned own-order figure: the risk evidence is not RECONCILED and carries no
+    generation, so the submission guard, claimed the way the pipeline claims it (the evidence's
+    generation, re-checked against readiness at submit time), is never acquired."""
+
+    with _ready_window(gateway, monkeypatch, hook=hook) as (broker, manager, readiness, _client):
+        evidence = _gather(manager, readiness)
+        rows = {row.broker_order_id: row for row in manager.run(broker.open_orders())}
+        after = readiness.snapshot()
+        claim = evidence.reconciliation_generation
+        with readiness.submission_guard(expected_generation=cast(int, claim)) as acquired:
+            pass
+    assert rows[fake_ibapi.OWNED_ID].quantity_quarantine is not None
+    assert evidence.reconciliation_status is ReconciliationStatus.PENDING
+    assert claim is None
+    assert acquired is False
+    # unhooked, nothing demoted readiness: the refusal above is the evidence path's own
+    assert (after.ready, after.reason) == {
+        "hooked": (False, QUARANTINE_REASON),
+        "unhooked": (True, "synthetic prior parity proof"),
+    }[hook]
+
+
+def test_fix2_a_raising_hook_fails_the_quarantining_read_closed(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook raises: the read raises a typed BrokerSafetyError naming the order, the connection
+    manager's own invalidation demotes readiness, and the old READY proof can no longer be claimed
+    by the evidence path, position admission (its broker read fails) or the guard."""
+
+    with _ready_window(gateway, monkeypatch, hook="raising") as (broker, manager, readiness, _c):
+        generation = readiness.snapshot().generation
+        with pytest.raises(
+            BrokerSafetyError, match=rf"open order {fake_ibapi.OWNED_ID} .*not finite"
+        ):
+            manager.run(broker.open_orders())
+        with pytest.raises(BrokerSafetyError):
+            _gather(manager, readiness)
+        after = readiness.snapshot()
+        with readiness.submission_guard(expected_generation=generation) as acquired:
+            pass
+    assert after.ready is False
+    assert after.reason == MANAGER_FAILURE
+    assert acquired is False
+
+
+def test_fix2_control_a_working_hook_still_returns_the_quarantined_row(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2 stands when the hook works: the read returns the typed quarantine, it does not raise."""
+
+    with _ready_window(gateway, monkeypatch) as (broker, manager, readiness, _client):
+        rows = {row.broker_order_id: row for row in manager.run(broker.open_orders())}
+        after = readiness.snapshot()
+    assert rows[fake_ibapi.OWNED_ID].quantity_quarantine is not None
+    assert rows[fake_ibapi.FOREIGN_ID].quantity_quarantine is None
+    assert after.reason == QUARANTINE_REASON
