@@ -901,3 +901,141 @@ def test_fix1_the_snapshot_reads_each_dotenv_once_for_the_count_and_the_key(
         assert "named 2 times" in text
     assert reads == [path]
     assert _leaks(text, a, b, path=path) == []
+
+
+# --- 7. KEYSRC-FIX3: no key value from outside the snapshot (Kimi HOLD P1 @ 6ee990f) ---
+# python-dotenv interpolates every value from the LIVE process environment and from the file's
+# earlier bindings. The key's value now comes from the same interpolation-free parse as the count,
+# and a key binding whose raw value contains "$" is refused, typed, naming the file (a key is hex
+# and never needs it). Census rows (out/KEYSRC/DESIGN.md): F5 and F10 at both roots, B1, and E2.
+
+_INTERPOLATION_REFUSED = "contains '$'"
+
+
+def _late_environment(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """Kimi's injection point: right after the snapshot reads the dotenv bytes, before it parses
+    them, a key-named environment binding appears (after the snapshot's environment copy)."""
+
+    real = pk._read_dotenv
+
+    def read(target: Path) -> str | None:
+        text = real(target)
+        os.environ[_NAME] = value
+        return text
+
+    monkeypatch.setattr(pk, "_read_dotenv", read)
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+def test_fix3_kimi_self_referential_dotenv_refuses_at_both_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: str
+) -> None:
+    """Kimi's probe as a regression test: the file names the key once, as ``${CHRONOS_PERSISTENCE_
+    KEY}``; the value would come from an environment binding the snapshot never counted."""
+
+    path = _dotenv(tmp_path, f"{_NAME}=${{{_NAME}}}")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(_NAME)
+    _late_environment(monkeypatch, _key("swap-b"))
+
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, _loading(lambda load: load()))
+
+    assert outcome == "refused"  # never "b": the late, uncounted key
+    assert _INTERPOLATION_REFUSED in text
+    assert f"the dotenv file {path.absolute()}" in text
+    assert _leaks(text, _key("swap-a"), _key("swap-b"), path=path) == []
+
+
+def _interpolation_forms() -> dict[str, tuple[list[str], dict[str, str]]]:
+    """Census F5/F10: form -> (dotenv lines, environment set before the root runs)."""
+
+    a = _key("swap-a")
+    return {
+        "F5 ${VAR} from the environment": (
+            [f"{_NAME}=${{CHRONOS_REFERENCED}}"],
+            {"CHRONOS_REFERENCED": a},
+        ),
+        "F5 ${VAR:-default}, VAR unset": ([f"{_NAME}=${{CHRONOS_UNSET_FOR_FIX3:-{a}}}"], {}),
+        "F5 double-quoted ${VAR}": (
+            [f'{_NAME}="${{CHRONOS_REFERENCED}}"'],
+            {"CHRONOS_REFERENCED": a},
+        ),
+        "F5 single-quoted ${VAR}": (
+            [f"{_NAME}='${{CHRONOS_REFERENCED}}'"],
+            {"CHRONOS_REFERENCED": a},
+        ),
+        "F10 an earlier binding of another name": (
+            [f"CHRONOS_REFERENCED={a}", f"{_NAME}=${{CHRONOS_REFERENCED}}"],
+            {},
+        ),
+    }
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+@pytest.mark.parametrize("form", list(_interpolation_forms()))
+def test_fix3_a_key_binding_with_interpolation_syntax_refuses_at_both_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    root: str,
+    form: str,
+) -> None:
+    lines, environment = _interpolation_forms()[form]
+    path = _dotenv(tmp_path, *lines)
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(_NAME)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, _loading(lambda load: load()))
+
+    assert outcome == "refused", form  # never "a", the value interpolation would produce
+    assert _INTERPOLATION_REFUSED in text, form
+    assert _leaks(text, _key("swap-a"), path=path) == []
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+def test_fix3_e2_an_environment_value_is_never_interpolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: str
+) -> None:
+    """Census E2 (unchanged, the control): the environment source is used literally; "${X}" is
+    not 64 hex digits, so nothing starts, and the referenced variable never supplies the key."""
+
+    path = _dotenv(tmp_path, "OTHER=1")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHRONOS_REFERENCED", _key("swap-a"))
+    monkeypatch.setenv(_NAME, "${CHRONOS_REFERENCED}")
+
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, _loading(lambda load: load()))
+
+    assert outcome in {"refused", "absent"}  # malformed: refused at runtime, unavailable to mandate
+    assert _leaks(text, _key("swap-a"), path=path) == []
+
+
+def test_fix3_b1_refuses_a_key_binding_with_interpolation_syntax(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Census B1: python-dotenv would take B1's "file-only" key from the live environment. B1
+    refuses the binding like the backend does, and its settings get the raw value, never the
+    interpolated key."""
+
+    monkeypatch.setenv("CHRONOS_REFERENCED", _key("b1-live"))
+    captured: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        b1_preflight, "_load_settings", lambda values: captured.append(dict(values)) or "stopped"
+    )
+    report = b1_preflight.B1Report()
+
+    b1_preflight._env_lines(report, f"{_NAME}=${{CHRONOS_REFERENCED}}\n", {})
+
+    refusals = [f for f in report.findings if f.check == "key-source"]
+    assert [f.level for f in refusals] == ["REFUSE"]
+    assert _INTERPOLATION_REFUSED in refusals[0].text
+    assert _leaks(refusals[0].text, _key("b1-live")) == []
+    (values,) = captured
+    named = [value for name, value in values.items() if name.casefold() == _NAME.casefold()]
+    raw_kept = named == ["${CHRONOS_REFERENCED}"]  # a boolean: a failure never prints the key
+    assert raw_kept, "B1's settings did not get the raw binding value"
