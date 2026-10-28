@@ -45,6 +45,12 @@ runbooks.
   `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
   reconciliation pass then stays `PENDING` ("Broker evidence could not be captured") for the
   whole pass. That fails closed, but the offending row is not named.
+- **Two raise paths remain on the official adapter's order reads (D-43 R4, R5).** An open-orders
+  row whose figures are finite and non-negative but do not sum to its `totalQuantity`, or whose
+  `totalQuantity` is itself malformed, still fails `BrokerOrder` validation, so the whole
+  `open_orders()` read raises and reconciliation stays `PENDING` without naming the row. And the
+  `orderStatus` callback still passes `avgFillPrice` / `permId` through `float()` / `int()`, which
+  raise on a non-numeric value. Both fail closed; neither is a fill figure the D-43 quarantine types.
 - **The `ib_async` adapter keeps its own status mapper (D-43, Q4).** With
   `BROKER_ADAPTER=IB_ASYNC` (not the default; `OFFICIAL_IBKR` is) the mapper is
   `IBKRBroker._order_lifecycle` (`src/chronos/broker/ibkr.py`), and its `open_orders()` raises
