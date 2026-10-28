@@ -68,6 +68,11 @@ That is corrected here, and the honest list is kept in one place:
   still does not read them, which is what this section is about — but they are
   not inert, and a reader who took "not enforced anywhere" at face value would
   have believed a binding restriction was decoration.)*
+- **Refused, never honoured (D-17 (iii), D-52; ADR-0021 Group B ruled "forbid"):**
+  a decision's ``protective_order_required=True`` or any ``exit_plan``. Nothing
+  holds a position open, watches a trigger or sends a protective order, so the
+  decision is refused ``PROTECTION_NOT_AVAILABLE`` rather than admitted with a
+  promise nothing keeps.
 - **Not enforced by admission; deferred to the orders-plane risk engine and the
   ten-gate live stack, which run on every proposal:** margin, buying power,
   cash-secured collateral, and market-open session checks.
@@ -196,6 +201,10 @@ class AdmissionRefusal(StrEnum):
     #: D-17 (ii), D-52: the mandate sets a limit nothing can enforce, so it
     #: authorizes no new exposure. Risk-reducing kinds are not refused for it.
     MANDATE_INERT_LIMIT_SET = "MANDATE_INERT_LIMIT_SET"
+    #: D-17 (iii), D-52 (ADR-0021 Group B ruled "forbid"): the decision asks for a
+    #: protective order or carries an exit plan, and nothing in Chronos can keep
+    #: either promise, because no position-management lifecycle exists.
+    PROTECTION_NOT_AVAILABLE = "PROTECTION_NOT_AVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +468,18 @@ def admit(
     outcome = _check_unenforceable_limits(checks, decision, mandate)
     if outcome is not None:
         return outcome
+
+    # 10b. D-17 (iii): protection the system cannot provide is refused, not ignored.
+    #      Same placement rules as 10a: after the alerting refusals, silent on a pass.
+    if decision.protective_order_required or decision.exit_plan is not None:
+        return _fail(
+            checks,
+            "protection_available",
+            AdmissionRefusal.PROTECTION_NOT_AVAILABLE,
+            "the decision asks for a protective order or carries an exit plan, and no "
+            "position-management lifecycle exists to keep either (ADR-0021 Group B: forbid); "
+            "resubmit without them",
+        )
 
     # 11. Instrument scope.
     outcome = _check_instrument(checks, decision, mandate)
