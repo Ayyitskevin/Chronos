@@ -572,8 +572,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    again, pass step 7's recovery-hold gate again (the new store holds no acknowledgement, so
    the hold comes back), and repeat this step.
    Never change `DATABASE_URL`: a new URL leaves a store bound under
-   a key nobody escrowed (that REFUSE text's "choose a new absolute DATABASE_URL" is wrong for
-   this case; a follow-up fixes the message). No row, a second row, or a different value:
+   a key nobody escrowed (the REFUSE text names both causes, a different broker scope or a
+   different persistence key, and no longer prescribes a new URL). No row, a second row, or a
+   different value:
    stop; the store is not bound to the scope you think.
 
 9. **Re-author the mandate BEFORE the first start of autonomy — dated window = 0.** The
