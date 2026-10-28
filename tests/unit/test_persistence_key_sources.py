@@ -59,6 +59,8 @@ def _leaks(text: str, *keys: str, path: Path | None = None) -> list[str]:
     """What key material ``text`` carries, by kind only (an assertion never prints a value)."""
 
     scrubbed = text.replace(str(path.absolute()), "<path>") if path is not None else text
+    # the resolver's fixed statement of the REQUIRED shape (never derived from a value)
+    scrubbed = scrubbed.replace("64 lowercase hex digits", "<the required shape>")
     found: list[str] = []
     for key in keys:
         if key in scrubbed:
