@@ -624,12 +624,15 @@ class CallbackConsumer:
         """Enqueue one streamed callback. Never blocks, never raises, never touches the DB."""
 
         try:
+            # CB1-FIX3 P1-1: the check and the put are ONE critical section under the lock every
+            # _accepting flip takes, so no put can land after stop() flips and drains (DESIGN §11).
+            # put_nowait never blocks, and no database call ever runs under this lock.
             with self._lock:
                 accepting = self._accepting
+                if accepting:
+                    self._queue.put_nowait(event)
             if not accepting:
                 self._drop(event, "callback consumer is not running")
-                return
-            self._queue.put_nowait(event)
         except queue.Full:
             self._drop(event, "callback consumer queue is full")
         except Exception:  # pragma: no cover - defensive: the reader thread keeps its result
@@ -760,6 +763,13 @@ class CallbackConsumer:
                     self._inflight = item
                 try:
                     self._handle_with_retry(item)
+                except BaseException:
+                    # CB1-FIX3 P1-1b: a lost lease or a dying thread leaves the held event
+                    # unfinished; count it (an abandoned worker's event was counted by its stop)
+                    with self._lock:
+                        if token is self._token:
+                            self._dropped += 1
+                    raise
                 finally:
                     with self._lock:
                         self._inflight = None
