@@ -90,6 +90,9 @@ case_ "d47b:I3 main's 0002 renamed (0002_next.py → 0002_other.py) is refused" 
   'git -C $M mv $V/0002_next.py $V/0002_other.py'
 case_ "d47b:I3 main's 0001 made executable (mode 100755, same bytes) is refused" "\\[I3\\] main.s versions/0001_base.py was changed" \
   'chmod +x $M/$V/0001_base.py'
+case_ "d47b:I3 a replace ref cannot launder a rewritten main migration (the trusted step reads objects with replacements off)" "\\[I3\\] main.s versions/0001_base.py was changed" \
+  'printf "# laundered\\n" >> $M/$V/0001_base.py; git -C $M add -A; git -C $M replace "$(git -C $M rev-parse :$V/0001_base.py)" "$(git -C $M rev-parse $MAIN:$V/0001_base.py)"'
+git -C "$M" replace -l | xargs -r git -C "$M" replace -d > /dev/null
 
 # --- I4: one root, no dangling parent, no cycle, no branch, one head ------------------------------
 case_ "d47b:I4 a second head with distinct ids (0003 and 0004 both revise 0002) is refused" '\[I4\] revision 0002 has 2 children \(0003, 0004\); the chain is linear' \
