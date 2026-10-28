@@ -960,7 +960,12 @@ class CallbackConsumer:
             handled += 1
 
     def sweep(self) -> int:
-        """Re-drive PENDING journal rows (no outcome yet), oldest first, from stored facts."""
+        """Re-drive PENDING journal rows (no outcome yet), oldest first, from stored facts.
+
+        CB1-FIX5 P3-1: a row whose step fails stays PENDING and its failure is counted (and
+        demotes, once per streak) while the sweep goes on to the rows behind it. A lost lease or a
+        dying thread (``BaseException``) still ends the sweep.
+        """
 
         with self._write_lock:  # CB1-FIX4 P2-2: one write bound across the worker and stop
             return self._sweep_locked()
@@ -968,8 +973,11 @@ class CallbackConsumer:
     def _sweep_locked(self) -> int:
         closed = 0
         for entry in self.journal.pending():
-            if self._apply_and_close(entry, recovered=True):
-                closed += 1
+            try:
+                if self._apply_and_close(entry, recovered=True):
+                    closed += 1
+            except Exception as error:  # CB1-FIX5 P3-1: one poisoned row never starves the rest
+                self._note_failure(error)
         return closed
 
     def handle(self, event: StreamEvent) -> CallbackOutcome | None:
