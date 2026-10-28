@@ -160,7 +160,13 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 40 at KEYSRC-FIX1 (runtime.py: the one-snapshot key resolution supersedes KEYSRC's).
     # 41 at KEYSRC-FIX2 (runtime.py: the key resolved from the counted snapshot supersedes FIX1's).
     # 42 at KEYSRC-FIX4 (api/autonomy_wiring.py: the mandate-mismatch log names the key cause).
-    assert len(historical_candidates) == 42
+    # 41 at CB-1 (the callback consumer wired through runtime.py, official_ibkr.py and demo.py:
+    # their superseded source-inventory fingerprints, 3). 42 at CB1-FIX1 (runtime.py: the consumer
+    # stops before its sink detaches, superseding CB-1's runtime.py fingerprint).
+    # 47 at the KEYSRC/CB-1 merge: the union of both branches' entries (the shared N3-1 runtime.py
+    # entry once: 38 + 4 + 3), plus the two runtime.py fingerprints the merged file supersedes
+    # (CB1-FIX1's and KEYSRC-FIX2's).
+    assert len(historical_candidates) == 47
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

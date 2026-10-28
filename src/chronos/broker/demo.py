@@ -15,7 +15,7 @@ from chronos.broker.base import (
     BrokerSendGuard,
     OptionChainResponse,
 )
-from chronos.broker.callbacks import UnsolicitedObservationClassifier
+from chronos.broker.callbacks import StreamEvent, StreamKind, UnsolicitedObservationClassifier
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -91,6 +91,8 @@ class DemoBroker:
         self._unsolicited = UnsolicitedObservationClassifier(
             invalidate=on_connection_uncertain, client_id=None, logger=self._logger
         )
+        # CB-1: the callback consumer's ``offer``, attached only while a writer's consumer runs
+        self._stream_sink: Callable[[StreamEvent], object] | None = None
 
     @property
     def profile(self) -> DemoProfile:
@@ -200,6 +202,19 @@ class DemoBroker:
 
         self._executions = (*self._executions, execution)
         self._unsolicited.observe_execution(client_id=None, order_id=execution.broker_order_id)
+        sink = self._stream_sink
+        if sink is not None:  # CB-1: the demo stream reaches the consumer like the official one
+            sink(
+                StreamEvent(
+                    kind=StreamKind.EXECUTION,
+                    received_at=self._clock().astimezone(UTC),
+                    own_at_capture=False,  # the demo broker places no orders
+                    execution=execution,
+                )
+            )
+
+    def set_stream_sink(self, sink: Callable[[StreamEvent], object] | None) -> None:
+        self._stream_sink = sink
 
     async def executions(self, since: datetime | None = None) -> tuple[BrokerExecution, ...]:
         self._require_connection()
