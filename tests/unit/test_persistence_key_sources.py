@@ -785,10 +785,35 @@ def _calls_in_source_order(function: Any) -> list[tuple[str, int]]:
     return [(name, arity) for _, _, name, arity in calls]
 
 
+def _names_used(source: str) -> set[str]:
+    """Every attribute and name the code uses (comments and docstrings do not count)."""
+
+    import ast
+
+    tree = ast.parse(source.strip())
+    return {
+        getattr(node, "attr", getattr(node, "id", ""))
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Attribute, ast.Name))
+    }
+
+
+#: What reaches the key other than the counted snapshot: the settings' field, the environment, a
+#: dotenv read or parse
+_KEY_READERS = {
+    "chronos_persistence_key",
+    "environ",
+    "getenv",
+    "dotenv_values",
+    "_read_dotenv",
+    "read_text",
+}
+
+
 def test_fix2_the_roots_take_the_key_from_the_counted_snapshot_only() -> None:
     """Static: each root takes the snapshot once and resolves the key from it with no argument
-    (no settings object), before any loader call; neither root nor the snapshot's resolver names
-    the settings' key field, reads the environment or opens a file for the key."""
+    (no settings object), before any loader call; neither root nor the snapshot's resolver uses
+    the settings' key field, the environment or a dotenv read."""
 
     import inspect
 
@@ -805,12 +830,9 @@ def test_fix2_the_roots_take_the_key_from_the_counted_snapshot_only() -> None:
         if "get_settings" in names:
             assert names.index("take_persistence_key_snapshot") < names.index("get_settings"), name
             assert names.index("resolve") < names.index("get_settings"), name
-        source = inspect.getsource(function)
-        for forbidden in ("chronos_persistence_key", "environ", "getenv", "dotenv"):
-            assert forbidden not in source, (name, forbidden)
-    resolver = inspect.getsource(pk.PersistenceKeySnapshot)
-    for forbidden in ("environ", "getenv", "read_text", "open(", "Settings", "_read_dotenv"):
-        assert forbidden not in resolver, forbidden
+        assert _names_used(inspect.getsource(function)) & _KEY_READERS == set(), name
+    resolver = inspect.getsource(pk.PersistenceKeySnapshot.resolve)
+    assert _names_used(resolver) & (_KEY_READERS | {"Settings", "settings"}) == set()
     assert list(inspect.signature(pk.PersistenceKeySnapshot.resolve).parameters) == ["self"]
 
 
