@@ -954,8 +954,142 @@ def test_d17_a_set_unenforceable_limit_is_refused_in_the_cycle_and_journalled(
     assert alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT) == ()
 
 
-def test_d17_a_close_under_a_set_limit_still_compiles(session: Session) -> None:
-    """D-17 (ii) carve-out end to end: the exit is not trapped by the mandate's limit."""
+def _production_facts(mandate: AutonomyMandate) -> CycleFacts:
+    """CycleFacts built by the backend's own gatherer over a synthetic broker.
+
+    ``BackendGatherers.cycle_facts`` is what production calls each tick. Its
+    ``AccountEvidence`` carries net liquidation, cash and buying power only, so
+    ``position_quantity`` is ``None`` (pre-existing; wiring it is D-54).
+    """
+
+    import asyncio
+    from types import SimpleNamespace
+
+    from chronos.api.autonomy_wiring import BackendGatherers
+    from chronos.domain.models import MarketQuote
+
+    contract = UnderlyingContract(con_id=111, symbol="SPY")
+
+    class _Broker:
+        async def account_summary(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                account_id=_ACCOUNT,
+                net_liquidation=Decimal(100_000),
+                total_cash=Decimal(60_000),
+                buying_power=Decimal(60_000),
+            )
+
+        async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
+            return contract
+
+        async def request_underlying_quote(self, instrument: UnderlyingContract) -> MarketQuote:
+            return MarketQuote(
+                contract=instrument,
+                timestamp=_NOW,
+                data_quality=DataQuality.LIVE,
+                bid=Decimal("399.98"),
+                ask=Decimal("400.02"),
+            )
+
+    runtime = SimpleNamespace(
+        broker=_Broker(),
+        connection=SimpleNamespace(run=asyncio.run),
+        settings=SimpleNamespace(autonomy_market_timezone="America/New_York"),
+    )
+    gatherers = BackendGatherers(
+        runtime,
+        _FINGERPRINT,
+        7,
+        mandate=mandate,
+        mandate_digest="d" * 64,
+    )
+    facts = gatherers.cycle_facts(mandate)(_NOW)
+    assert facts is not None
+    return facts
+
+
+@pytest.mark.parametrize("kind", [DecisionKind.CLOSE, DecisionKind.REDUCE])
+def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
+    kind: DecisionKind,
+) -> None:
+    """D-17 never refuses an exit; it does not make one executable (Kimi P1-1, D-54).
+
+    Driven by the production fact shape: the exit under a set unenforceable limit
+    is ADMITTED, and what stops it is the pre-existing sizing refusal (no position
+    evidence is gathered in production), never ``MANDATE_INERT_LIMIT_SET``. The
+    same proposal under the plain mandate stops in exactly the same place, so
+    D-17 changes nothing about exits in production.
+    """
+
+    outcomes = {}
+    for label, mandate in (
+        (
+            "limit set",
+            _mandate(
+                concentration=ConcentrationLimits(
+                    max_symbol_exposure_pct=Decimal("0.50"), max_sector_exposure_pct=Decimal("0.25")
+                )
+            ),
+        ),
+        ("plain", _mandate()),
+    ):
+        database = Database("sqlite+pysqlite:///:memory:")
+        database.initialize()
+        db_session = database.sessions()
+        try:
+            _activate(db_session, mandate)
+            facts = _production_facts(mandate)
+            assert facts.account.position_quantity is None
+            outcomes[label] = _run(
+                db_session,
+                mandate=mandate,
+                facts=facts,
+                identity=queue.HarnessIdentity(
+                    provider="anthropic",
+                    model_id="model-x",
+                    model_version="1",
+                    prompt_version="1",
+                    tool_schema_version="1",
+                    decision_schema_version="1",
+                    policy_version="1",
+                    evidence_bundle_id=facts.evidence_bundle_id,
+                    evidence_bundle_digest=facts.evidence_bundle_digest,
+                ),
+                payload=_proposal(
+                    kind=kind,
+                    requested_strategy=None,
+                    requested_quantity=None,
+                    target_client_reference="CHR-ORD-" + "A" * 32,
+                ),
+            )
+            db_session.commit()
+        finally:
+            db_session.close()
+            database.dispose()
+    limited = outcomes["limit set"]
+    assert limited.admission is not None and limited.admission.admitted is True
+    assert limited.refusal != "MANDATE_INERT_LIMIT_SET"
+    assert limited.stage is CycleStage.SIZING
+    assert limited.refusal == "NO_EXECUTABLE_SIZE"
+    assert "without the position actually held" in (limited.detail or "")
+    assert limited.intent is None
+    plain = outcomes["plain"]
+    assert (plain.stage, plain.refusal, plain.detail) == (
+        limited.stage,
+        limited.refusal,
+        limited.detail,
+    )
+
+
+def test_d17_a_close_under_a_set_limit_compiles_when_position_evidence_is_supplied(
+    session: Session,
+) -> None:
+    """D-17 (ii) carve-out, ENRICHED evidence only: with a held quantity the CLOSE compiles.
+
+    Production does not gather ``position_quantity`` today (D-54), so this proves
+    the carve-out on the enriched path only; the production-shaped pin is
+    ``test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing``.
+    """
 
     mandate = _mandate(
         concentration=ConcentrationLimits(
