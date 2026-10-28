@@ -158,7 +158,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # digest (3); the two pre-N3 idempotency goldens (2).
     # 39 at KEYSRC (runtime.py: the persistence-key source check supersedes its fingerprint).
     # 40 at KEYSRC-FIX1 (runtime.py: the one-snapshot key resolution supersedes KEYSRC's).
-    assert len(historical_candidates) == 40
+    # 41 at KEYSRC-FIX2 (runtime.py: the key resolved from the counted snapshot supersedes FIX1's).
+    assert len(historical_candidates) == 41
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
