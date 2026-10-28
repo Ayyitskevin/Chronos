@@ -2246,3 +2246,250 @@ def test_fix3_an_abandoned_workers_event_is_counted_once_by_its_stop(tmp_path: P
         release.set()
         file_rig.consumer.stop(timeout=1)
         file_rig.database.dispose()
+
+
+# --- CB1-FIX4 (Kimi HOLD P2=2 @ 9b1ad17): one accounting owner per event, one write bound -----
+
+
+def _stopping(
+    consumer: CallbackConsumer, results: list[int], *, timeout: float
+) -> threading.Thread:
+    """``stop()`` on its own thread (the lifecycle actor), its return appended to ``results``."""
+
+    thread = threading.Thread(target=lambda: results.append(consumer.stop(timeout=timeout)))
+    thread.start()
+    return thread
+
+
+def test_fix4_p2_1_concurrent_stops_count_the_inflight_event_once(tmp_path: Path) -> None:
+    """I13, Kimi's ``test_concurrent_stops_count_one_inflight_event_once`` inverted: two stops over
+    one held event count it once, and only one of them demotes and records the stop."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    entered, release = _blocked_handle(consumer)
+    results: list[int] = []
+    stoppers: list[threading.Thread] = []
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(file_rig.foreign(1))
+        assert entered.wait(2)
+        worker = consumer._thread
+        assert worker is not None
+        stoppers = [_stopping(consumer, results, timeout=0.05) for _ in range(2)]
+        for thread in stoppers:
+            thread.join(2)
+            assert not thread.is_alive()
+        assert worker.is_alive()
+        assert sorted(results) == [0, 1]
+        assert consumer.health().dropped == 1
+        assert file_rig.invalidations == [DROPPED_EVENT_REASON]
+        assert [row["state"] for row in file_rig.health_rows()] == ["stopped"]
+    finally:
+        release.set()
+        for thread in stoppers:
+            thread.join(2)
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix4_p2_1_a_retry_exhaustion_drop_and_an_abandoning_stop_count_it_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I16, Kimi's ``test_retry_drop_and_abandoning_stop_count_event_once`` inverted: the worker's
+    terminal drop already counted the event it still holds, so the abandoning stop counts 0."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    monkeypatch.setattr(consumer_module, "_RETRY_BASE_SECONDS", 0)
+    dropped, release = threading.Event(), threading.Event()
+    real_drop = consumer._drop
+
+    def die(event: StreamEvent) -> Any:
+        raise RuntimeError("synthetic failure")
+
+    def blocked_drop(event: object, why: str) -> None:
+        real_drop(event, why)
+        dropped.set()
+        assert release.wait(10)
+
+    consumer.handle = die  # type: ignore[method-assign]
+    consumer._drop = blocked_drop  # type: ignore[method-assign]
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(file_rig.foreign(1))
+        worker = consumer._thread
+        assert worker is not None
+        assert dropped.wait(5)  # counted by the worker, still held (_inflight is cleared later)
+        assert (consumer.stop(timeout=0.05), consumer.health().dropped) == (0, 1)
+        assert worker.is_alive()
+    finally:
+        release.set()
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix4_p2_1_an_exceptional_exit_and_an_abandoning_stop_count_it_once(tmp_path: Path) -> None:
+    """I19, the sibling of I16 found while listing: the worker counted its held event on a lost
+    lease and has not yet released it when a stop abandons it; the stop must not count it again."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    counted, release = threading.Event(), threading.Event()
+    real_count = consumer._count_held_lost
+
+    def held_count() -> None:
+        real_count()
+        counted.set()
+        assert release.wait(10)
+
+    def lease_lost(event: StreamEvent) -> Any:
+        raise consumer_module._WriteAuthorityLost(abandoned=False)
+
+    consumer.handle = lease_lost  # type: ignore[method-assign]
+    consumer._count_held_lost = held_count  # type: ignore[method-assign]
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(file_rig.foreign(1))
+        worker = consumer._thread
+        assert worker is not None
+        assert counted.wait(5)
+        assert (consumer.stop(timeout=0.05), consumer.health().dropped) == (0, 1)
+        release.set()
+        worker.join(2)
+        assert not worker.is_alive()
+        assert consumer.health().dropped == 1
+    finally:
+        release.set()
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def _row_count(file_rig: _FileRig, *event_types: str) -> int:
+    with file_rig.database.sessions() as session:
+        return len(
+            session.scalars(
+                select(ApplicationEventRow).where(ApplicationEventRow.event_type.in_(event_types))
+            ).all()
+        )
+
+
+def test_fix4_p2_2_a_stop_health_write_waits_for_the_workers_write_and_rechecks_the_lease(
+    tmp_path: Path,
+) -> None:
+    """I18, Kimi's ``test_r10_bounds_worker_and_stop_health_writes_to_one_after_lease_loss``.
+
+    Her schedule (the worker past its journal check, the stop past its health check, the lease lost,
+    both released) cannot be reached any more: the stop's health write waits for the worker's
+    in-flight write and re-checks the lease after it. So one write commits after the loss, not two.
+    """
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    writer = [True]
+    worker_entered, release_worker = threading.Event(), threading.Event()
+    health_entered = threading.Event()
+    real_pending = consumer.journal.append_pending
+    real_health = consumer.journal.append_health
+
+    def held_pending(*args: Any, **kwargs: Any) -> Any:
+        worker_entered.set()
+        assert release_worker.wait(10)
+        return real_pending(*args, **kwargs)
+
+    def seen_health(*args: Any, **kwargs: Any) -> Any:
+        health_entered.set()
+        return real_health(*args, **kwargs)
+
+    consumer.journal.append_pending = held_pending  # type: ignore[method-assign]
+    consumer.journal.append_health = seen_health  # type: ignore[method-assign]
+    results: list[int] = []
+    stopper: threading.Thread | None = None
+    try:
+        consumer.start(is_writer=lambda: writer[0])
+        consumer.offer(file_rig.foreign(1))
+        assert worker_entered.wait(2)  # past its lease check, inside its journal write
+        worker = consumer._thread
+        assert worker is not None
+        stopper = _stopping(consumer, results, timeout=1)
+        assert _wait_until(lambda: consumer._token is None)  # the stop abandoned the worker
+        assert not health_entered.wait(0.3)  # and its health write waits for the in-flight one
+        writer[0] = False
+        release_worker.set()
+        stopper.join(5)
+        assert not stopper.is_alive()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert results == [1]
+        assert not health_entered.is_set()
+        written = (CALLBACK_JOURNAL, CALLBACK_OUTCOME, CALLBACK_CONSUMER_HEALTH)
+        assert _row_count(file_rig, *written) == 1  # the in-flight journal row, nothing after it
+        assert file_rig.invalidations == [DROPPED_EVENT_REASON]
+    finally:
+        release_worker.set()
+        if stopper is not None:
+            stopper.join(2)
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix4_p2_2_a_stop_over_a_sweep_write_records_no_health_row_after_the_lease_is_lost(
+    tmp_path: Path,
+) -> None:
+    """I17: the worker is inside a sweep's close write (no accepted event in hand) when a stop
+    abandons it and the lease goes: the sweep row is the one write, the stop records nothing."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    event = file_rig.foreign(1)
+    normalized = consumer._normalize(event)
+    consumer.journal.append_pending(
+        consumer_module.event_key(normalized.identity),
+        normalized.kind,
+        normalized.facts,
+        received_at=event.received_at,
+        own_at_capture=event.own_at_capture,
+    )  # one PENDING row for the start sweep to close
+    writer = [True]
+    worker_entered, release_worker = threading.Event(), threading.Event()
+    health_entered = threading.Event()
+    real_outcome = consumer.journal.append_outcome
+    real_health = consumer.journal.append_health
+
+    def held_outcome(*args: Any, **kwargs: Any) -> Any:
+        worker_entered.set()
+        assert release_worker.wait(10)
+        return real_outcome(*args, **kwargs)
+
+    def seen_health(*args: Any, **kwargs: Any) -> Any:
+        health_entered.set()
+        return real_health(*args, **kwargs)
+
+    consumer.journal.append_outcome = held_outcome  # type: ignore[method-assign]
+    consumer.journal.append_health = seen_health  # type: ignore[method-assign]
+    results: list[int] = []
+    stopper: threading.Thread | None = None
+    try:
+        consumer.start(is_writer=lambda: writer[0])
+        assert worker_entered.wait(2)  # the start sweep, past its check, inside the close write
+        worker = consumer._thread
+        assert worker is not None
+        stopper = _stopping(consumer, results, timeout=1)
+        assert _wait_until(lambda: consumer._token is None)
+        assert not health_entered.wait(0.3)
+        writer[0] = False
+        release_worker.set()
+        stopper.join(5)
+        assert not stopper.is_alive()
+        worker.join(5)
+        assert results == [0]
+        assert consumer.health().dropped == 0  # a sweep row is journaled, not an accepted event
+        assert not health_entered.is_set()
+        assert _row_count(file_rig, CALLBACK_OUTCOME, CALLBACK_CONSUMER_HEALTH) == 1
+        assert file_rig.invalidations == [CONSUMER_FAILED_REASON]
+    finally:
+        release_worker.set()
+        if stopper is not None:
+            stopper.join(2)
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
