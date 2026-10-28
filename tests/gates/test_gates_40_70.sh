@@ -542,6 +542,10 @@ check "d47b:4 40 FAIL: a second head → the named [I4] FAIL" "failed evidence-a
 d47b_cand 'mkdir -p "$R40/gates/lib"; printf "print(\"0002\")\n" > "$R40/gates/lib/migration_chain.py"; mig40 0003 "\"0002\""'
 check "d47b:trust 40 a candidate gates/lib/migration_chain.py that prints a forged head never runs: the trusted copy beside gate 40 still FAILs [I8]" \
   "failed evidence-at-head 'migration chain \\[I8\\]'"
+cp -r "$G" "$T/g40stub"; printf 'print("0002 and more")\n' > "$T/g40stub/lib/migration_chain.py"   # a trusted step that exits 0 with no head
+G40_REAL=$G40; G40="$T/g40stub/40-evidence-at-head.sh"; d47b_cand ':'; G40=$G40_REAL
+check "d47b:wire 40 a trusted step that exits 0 without printing one 4-digit head FAILs: gate 40 checks the head's shape (reader F2, M14)" \
+  "failed evidence-at-head 'the trusted migration step printed no head'"
 printf 'import importlib as _i, os as _o, sys as _s\ntry:\n    open("%s/ast", "a").write("ran\\n")\nexcept OSError:\n    pass\n_d = _o.path.dirname(_o.path.abspath(__file__))\n_s.modules.pop(__name__, None)\n_s.path[:] = [p for p in _s.path if _o.path.abspath(p or ".") != _d]\n_r = _i.import_module(__name__)\n_s.modules[__name__] = _r\nglobals().update(vars(_r))\n' "$MK" > "$T/ast-shadow.py"
 fresh_markers; (cd "$R40" && mkdir -p "$T/pp" && cp "$T/ast-shadow.py" "$T/pp/ast.py" && PYTHONPATH="$T/pp" python3 -c 'import ast; ast.parse("1")')
 check "d47b:iso positive control: the PYTHONPATH ast.py shadow runs under a plain python3 and still hands back the real ast" "[ -e $MK/ast ]"

@@ -146,6 +146,9 @@ hdr "an annotation-only second binding (revision: str) is refused" "\\[header\\]
   "printf 'revision: str\n' >> $M/$V/0003_step.py"
 hdr "an int down_revision (2) is refused" '\[header\] versions/0003_step.py: `down_revision` must be a 4-digit string or None' \
   "sed -i 's/^down_revision = .*/down_revision = 2/' $M/$V/0003_step.py"
+hdr "a 4-digit int down_revision (2000) is refused as a non-string, not left to the dangling-parent check (reader F2, M10)" \
+  '\[header\] versions/0003_step.py: `down_revision` must be a 4-digit string or None' \
+  "sed -i 's/^down_revision = .*/down_revision = 2000/' $M/$V/0003_step.py"
 hdr "branch_labels as a tuple is refused" '\[header\] versions/0003_step.py: `branch_labels` is not a literal' \
   "sed -i 's/^branch_labels = .*/branch_labels = (\"x\",)/' $M/$V/0003_step.py"
 hdr "branch_labels as a string is refused" '\[header\] versions/0003_step.py: `branch_labels` must be None' \
@@ -264,6 +267,13 @@ EOF
 mw "a lowercase sqlalchemy function (sa.text) is refused; only CamelCase constructors" "14: $ASG" <<'EOF'
 import sqlalchemy as sa
 _t = sa.text("select 1")
+EOF
+mw "a negative number (_D = -1, a UnaryOp) is refused: benign but not a literal (R2, reader F3)" "13: $ASG" <<'EOF'
+_D = -1
+EOF
+mw "an attribute alias of an imported module (_T = schema.SOME_TABLE) is refused (R2, reader F3)" "14: $ASG" <<'EOF'
+from chronos.persistence import schema
+_T = schema.SOME_TABLE
 EOF
 mw "a dotted sqlalchemy path (sa.types.Integer) is refused; only sa.<Name>" "14: $ASG" <<'EOF'
 import sqlalchemy as sa
