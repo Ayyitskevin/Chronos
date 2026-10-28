@@ -75,6 +75,12 @@ That is corrected here, and the honest list is kept in one place:
   ``max_symbol_exposure_pct`` binds (in :mod:`chronos.supervisor.sizing`);
   sector, family and correlated exposure do not. Of ``CapitalLimits``,
   ``max_leverage`` and ``max_margin_utilization_pct`` do not bind here.
+- **Refused when set, never enforced (D-17 (ii), D-52):** sector, family and
+  correlated exposure, and ``SessionPolicy.allow_overnight_holding``. Nothing can
+  enforce them (no sector/family/correlation map, no session clock), so a mandate
+  that sets one authorizes no new exposure: every exposure-creating decision is
+  refused ``MANDATE_INERT_LIMIT_SET``. Risk-reducing decisions are admitted exactly
+  as before, so the limit never traps an exit.
 
 ``tests/safety/test_supervisor_gateway.py`` pins this list, so a mandate field
 cannot be added without declaring whether it is enforced or inert.
@@ -133,6 +139,19 @@ _ACCEPTABLE_QUALITIES: frozenset[DataQuality] = frozenset(
     {DataQuality.LIVE, DataQuality.DELAYED, DataQuality.FROZEN, DataQuality.DEMO}
 )
 
+#: Mandate limits nothing can enforce: there is no sector, family or correlation
+#: map, and no session clock in the supervisor. D-17 (ii), ruled by the owner
+#: (D-52): a mandate that sets one refuses new exposure rather than carrying a
+#: limit that binds nothing. "Set" means "differs from the model's default"; the
+#: default is read from the model, never copied here.
+#: ``chronos.autonomy.enforcement`` labels exactly these REFUSED.
+_UNENFORCEABLE_MANDATE_LIMITS: tuple[tuple[str, str], ...] = (
+    ("concentration", "max_sector_exposure_pct"),
+    ("concentration", "max_family_exposure_pct"),
+    ("concentration", "max_correlated_exposure_pct"),
+    ("sessions", "allow_overnight_holding"),
+)
+
 #: How many times one economic decision may be re-submitted after refusal before
 #: the supervisor stops considering it at all (ADR-0016 §2 / R-31).
 MAX_RESUBMISSIONS = 3
@@ -174,6 +193,9 @@ class AdmissionRefusal(StrEnum):
     MARKET_DATA_STALE = "MARKET_DATA_STALE"
     DEGRADED_STATE = "DEGRADED_STATE"
     DEGRADED_RISK_REDUCTION_ONLY = "DEGRADED_RISK_REDUCTION_ONLY"
+    #: D-17 (ii), D-52: the mandate sets a limit nothing can enforce, so it
+    #: authorizes no new exposure. Risk-reducing kinds are not refused for it.
+    MANDATE_INERT_LIMIT_SET = "MANDATE_INERT_LIMIT_SET"
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +452,14 @@ def admit(
         )
     _ok(checks, "executable_kind", decision.kind.value)
 
+    # 10a. D-17 (ii): a mandate limit nothing can enforce refuses new exposure.
+    #      After the refusals that raise owner alerts (degraded state, activation,
+    #      re-submission), so it never masks one; silent when it passes, so an
+    #      admitted row keeps its pinned shape (ADR-0055).
+    outcome = _check_unenforceable_limits(checks, decision, mandate)
+    if outcome is not None:
+        return outcome
+
     # 11. Instrument scope.
     outcome = _check_instrument(checks, decision, mandate)
     if outcome is not None:
@@ -477,6 +507,35 @@ def admit(
         admitted=True,
         checks=tuple(checks),
         detail=f"{mandate.mode.value} admission for {decision.kind.value}",
+    )
+
+
+def _check_unenforceable_limits(
+    checks: list[AdmissionCheck], decision: AITradeDecision, mandate: AutonomyMandate
+) -> AdmissionOutcome | None:
+    """D-17 (ii): refuse new exposure under a mandate that sets an unenforceable limit.
+
+    The carve-out is the owner's (D-52): only kinds in
+    ``EXPOSURE_CREATING_DECISION_KINDS`` (``autonomy/enums.py``) are refused.
+    CLOSE and REDUCE (``RISK_REDUCING_DECISION_KINDS``) and CANCEL
+    (``CONTEXT_DEPENDENT_DECISION_KINDS``) create no exposure and are admitted
+    exactly as before, so a limit the owner wrote can never trap an exit.
+    """
+
+    set_limits = [
+        f"{section_name}.{field_name}"
+        for section_name, field_name in _UNENFORCEABLE_MANDATE_LIMITS
+        if getattr(getattr(mandate, section_name), field_name)
+        != type(getattr(mandate, section_name)).model_fields[field_name].default
+    ]
+    if not set_limits or decision.kind not in EXPOSURE_CREATING_DECISION_KINDS:
+        return None
+    return _fail(
+        checks,
+        "mandate_limits_enforceable",
+        AdmissionRefusal.MANDATE_INERT_LIMIT_SET,
+        "the mandate sets limits nothing can enforce, so it authorizes no new exposure "
+        f"(risk-reducing decisions are still admitted): {', '.join(set_limits)}",
     )
 
 
