@@ -38,10 +38,20 @@ _KELVIN = (
 _ACCOUNT = "DU7654321"
 
 
-def _key(label: str) -> str:
+class _Key(str):
+    """A synthetic key whose repr is redacted: pytest renders call arguments and frame arguments
+    with repr(), so a failing assertion or traceback can name the key but never print it."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<synthetic key>"
+
+
+def _key(label: str) -> _Key:
     """A synthetic key, derived at run time (never a literal, never a real key)."""
 
-    return derived_key_hex(f"keysrc:{label}")
+    return _Key(derived_key_hex(f"keysrc:{label}"))
 
 
 def _leaks(text: str, *keys: str, path: Path | None = None) -> list[str]:
@@ -122,7 +132,8 @@ def test_every_counted_line_form_is_one_the_loader_reads(
         loaded = Settings(_env_file=path).chronos_persistence_key  # type: ignore[call-arg]
         matches = loaded is not None and loaded.get_secret_value() == key
         assert matches, "a counted form did not load as the key"
-        assert pk.count_key_lines(line + "\n") == 1
+        counted = pk.count_key_lines(line + "\n")  # not inside the assert: the line holds the key
+        assert counted == 1
 
 
 # --- 2. the source check: more than one refuses, naming each source -------------------------------
@@ -342,8 +353,9 @@ def test_build_runtime_reports_the_one_source_it_used(
         logger.setLevel(previous)
 
     logged = stream.getvalue()
+    conftest_key = _Key(os.environ[_NAME])
     assert "persistence key from: the process environment" in logged
-    assert _leaks(logged, os.environ[_NAME]) == []
+    assert _leaks(logged, conftest_key) == []
 
 
 @pytest.fixture
