@@ -525,6 +525,32 @@ def test_d17_the_cli_exits_nonzero_for_a_set_unenforceable_limit(
     assert "sessions.allow_overnight_holding  <- set in this mandate" in printed
 
 
+def test_d17_the_refused_limit_finding_is_mode_independent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], authenticated_env: None
+) -> None:
+    """Owner residual R-P3-1 as decided: BLOCKING in SHADOW too, not only in submitting modes.
+
+    A shadow mandate is the one meant for promotion; once promoted it would open
+    nothing, so the finding is not scoped to ``SUBMITTING_AUTONOMY_MODES`` (Fable P2-1:
+    nothing pinned that choice). If the owner picks the submitting-mode scope instead,
+    this test inverts with it.
+    """
+
+    overnight = {"sessions": SessionPolicy(allow_overnight_holding=True)}
+    # Positive control: the plain shadow mandate has no such finding and exits clean.
+    assert "MANDATE_INERT_LIMIT_SET" not in _codes(_shadow())
+    assert _codes(_shadow(**overnight))["MANDATE_INERT_LIMIT_SET"] is Severity.BLOCKING
+
+    path = tmp_path / "mandate.json"
+    path.write_text(_shadow().model_dump_json(), encoding="utf-8")
+    assert main(_check(path)) == 0
+    capsys.readouterr()
+
+    path.write_text(_shadow(**overnight).model_dump_json(), encoding="utf-8")
+    assert main(_check(path)) == 1
+    assert "[BLOCKING] MANDATE_INERT_LIMIT_SET" in capsys.readouterr().out
+
+
 def test_t1_an_option_liquidity_floor_or_session_is_not_reported_as_inert() -> None:
     """F7-A T1: these three bind on the option-selection path, so none is "constrains nothing".
 
