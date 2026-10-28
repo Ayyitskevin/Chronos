@@ -2037,3 +2037,182 @@ def test_a_demo_writer_lifespan_starts_the_consumer_and_journals_the_demo_stream
         assert runtime.callback_consumer_health().state == "stopped"
     finally:
         get_settings.cache_clear()
+
+
+# --- CB1-FIX3: no accepted event ends neither journaled nor counted (DESIGN §11) ---------------
+
+
+class _OwnedLock:
+    """A ``threading.Lock`` that records its holder, so a pin can see WHO holds the consumer's lock
+    and whether ``stop()`` is waiting on a lock the offering thread holds (no sleeps, no timing)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.owner: threading.Thread | None = None
+        self.offer_thread: threading.Thread | None = None
+        self.stop_thread: threading.Thread | None = None
+        self.progress = threading.Event()  # stop is waiting on the offer's lock, or stop returned
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            self.owner = threading.current_thread()
+            return True
+        if (
+            threading.current_thread() is self.stop_thread
+            and self.owner is not None
+            and self.owner is self.offer_thread
+        ):
+            self.progress.set()
+        if not self._lock.acquire(blocking, timeout):
+            return False
+        self.owner = threading.current_thread()
+        return True
+
+    def release(self) -> None:
+        self.owner = None
+        self._lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+def _held_put(consumer: CallbackConsumer) -> tuple[threading.Event, threading.Event, list[Any]]:
+    """Hold an offer inside ``put_nowait`` (Kimi's probe seam); record who held the lock there."""
+
+    entered, release = threading.Event(), threading.Event()
+    holders: list[Any] = []
+    real_put = consumer._queue.put_nowait
+
+    def held(item: object) -> None:
+        holders.append(getattr(consumer._lock, "owner", None))
+        entered.set()
+        assert release.wait(10)
+        real_put(item)
+
+    consumer._queue.put_nowait = held  # type: ignore[method-assign]
+    return entered, release, holders
+
+
+def test_fix3_p1_the_accepting_check_and_the_put_are_one_critical_section(
+    tmp_path: Path,
+) -> None:
+    """P1-1: the put happens under the lock stop() takes to flip ``_accepting``."""
+
+    file_rig = _FileRig(tmp_path)
+    lock = _OwnedLock()
+    file_rig.consumer._lock = lock  # type: ignore[assignment]
+    entered, release, holders = _held_put(file_rig.consumer)
+    offered = threading.Thread(target=lambda: file_rig.consumer.offer(file_rig.foreign(1)))
+    lock.offer_thread = offered
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        offered.start()
+        assert entered.wait(2)
+        assert holders == [offered]  # inside put_nowait, the offering thread holds the lock
+    finally:
+        release.set()
+        offered.join(2)
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix3_p1_kimi_schedule_stop_cannot_complete_inside_the_offer(tmp_path: Path) -> None:
+    """Kimi's probe (out/CB1/kimi-probes/test_stop_offer_race.py), ``stop()`` on its own thread.
+
+    The offer is held after its accepting check and before its put; ``stop()`` runs; the offer is
+    released once stop has returned (the f0736a3 schedule: the put lands after the final drain) or
+    is waiting on the lock the offer holds. Either way the accepted event must end journaled, or
+    counted lost with one DROPPED demotion; never queued behind no worker.
+    """
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    lock = _OwnedLock()
+    consumer._lock = lock  # type: ignore[assignment]
+    entered, release, _ = _held_put(consumer)
+    offered = threading.Thread(target=lambda: consumer.offer(file_rig.foreign(1)))
+    result: dict[str, int] = {}
+
+    def stopping() -> None:
+        result["lost"] = consumer.stop(timeout=2)
+        lock.progress.set()
+
+    stopper = threading.Thread(target=stopping)
+    lock.offer_thread, lock.stop_thread = offered, stopper
+    try:
+        consumer.start(is_writer=lambda: True)
+        offered.start()
+        assert entered.wait(2)  # accepted, not yet queued
+        stopper.start()
+        assert lock.progress.wait(5)
+        release.set()
+        offered.join(2)
+        stopper.join(5)
+        assert not offered.is_alive() and not stopper.is_alive()
+        queued = consumer._queue.qsize()
+        journaled = file_rig.journaled()
+        observed = (result["lost"], consumer.health().dropped, list(file_rig.invalidations))
+        assert queued == 0, f"an accepted event is stranded behind no worker: {observed}"
+        if journaled:
+            assert observed == (0, 0, [])
+        else:
+            assert observed == (1, 1, [DROPPED_EVENT_REASON])
+    finally:
+        release.set()
+        offered.join(2)
+        stopper.join(5)
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix3_a_lease_lost_with_events_queued_counts_every_one(tmp_path: Path) -> None:
+    """I2 + I9: the event in hand when the lease goes and the one queued behind it are counted."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    entered, release = _blocked_handle(consumer)
+    writer = [True]
+    try:
+        consumer.start(is_writer=lambda: writer[0])
+        consumer.offer(file_rig.foreign(1))
+        assert entered.wait(2)  # event 1 in hand, before its journal append
+        consumer.offer(file_rig.foreign(2))  # event 2 queued behind it
+        writer[0] = False
+        release.set()  # handle re-checks the lease before its first write and halts
+        assert _wait_until(lambda: consumer.health().state == "halted")
+        assert consumer.health().dropped == 1  # event 1: in hand, never journaled
+        assert consumer.health().queued == 1
+        assert consumer.stop(timeout=1) == 1  # event 2: drained by the final accountant
+        assert consumer.health().dropped == 2
+        assert file_rig.journaled() == 0
+        assert file_rig.invalidations[0] == CONSUMER_FAILED_REASON
+        assert file_rig.invalidations[-1] == DROPPED_EVENT_REASON
+    finally:
+        release.set()
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix3_a_worker_that_dies_holding_an_event_counts_it_lost(tmp_path: Path) -> None:
+    """I10: the thread dies inside ``handle``; the event it held is counted, not only demoted."""
+
+    file_rig = _FileRig(tmp_path)
+
+    def die(event: StreamEvent) -> Any:
+        raise _Crash
+
+    file_rig.consumer.handle = die  # type: ignore[method-assign]
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(file_rig.foreign(3))
+        assert _wait_until(lambda: file_rig.consumer.health().state == "halted")
+        assert file_rig.consumer.health().dropped == 1
+        assert CONSUMER_FAILED_REASON in file_rig.invalidations
+        assert file_rig.consumer.stop(timeout=1) == 0  # nothing queued; counted once, not twice
+        assert file_rig.consumer.health().dropped == 1
+    finally:
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
