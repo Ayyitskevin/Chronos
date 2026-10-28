@@ -21,6 +21,16 @@ each a named FAIL ``[I1]``..``[I8]``:
      trusted-base defect, never a pass)
   I8 the candidate's ``scripts/verify_release_artifact.py`` declares the same head (what CI checks)
 
+Every revision file's MODULE LEVEL must also be data and imports only (named FAIL ``[module]``),
+so the body that runs when Alembic imports the file cannot rebind a header (``globals()[...]``,
+``exec``, a star import): an optional docstring, then ``from __future__ import annotations``
+(annotations never run), then only imports without ``*``, one-name assignments of literal values
+(constants, tuples/lists of them, and ``<sqlalchemy alias>.<CamelCase>(...)`` constructors on
+literals, as main's column tuples use), and undecorated defs without type parameters whose
+defaults are constants. Def bodies are NOT inspected (they run only in the sandbox), and an
+IMPORTED module is candidate code that runs at import: it can still rebind the importing file's
+globals, which this step cannot see (the README's trust model says so).
+
 On success the trusted overlay's one ``_MIGRATION_HEAD`` line is set to the derived head (no write
 when it is already main's) and the head is printed. Every other byte of the overlay stays main's.
 """
@@ -45,6 +55,7 @@ HEADER = ("revision", "down_revision", "branch_labels", "depends_on")
 MAX_FILES, MAX_BYTES, MAX_SCRIPT_BYTES = 256, 64 * 1024, 1024 * 1024
 REGULAR = ("100644", "100755")
 TRUSTED_DEFECT = "(trusted base: a trusted-base defect; fix main first)"
+CONSTRUCTOR = re.compile(r"[A-Z][A-Za-z0-9]*")
 
 
 class ChainError(Exception):
@@ -128,6 +139,84 @@ def module_scope_stores(tree: ast.Module) -> list[str]:
     return found
 
 
+def literal_value(node: ast.expr, sa_names: set[str]) -> bool:
+    """A constant, a tuple/list of literal values, or ``<sa>.<CamelCase>(literal args)``."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(literal_value(elt, sa_names) for elt in node.elts)
+    if isinstance(node, ast.Call):
+        func = node.func
+        return (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in sa_names
+            and CONSTRUCTOR.fullmatch(func.attr) is not None
+            and all(literal_value(arg, sa_names) for arg in node.args)
+            and all(k.arg is not None and literal_value(k.value, sa_names) for k in node.keywords)
+        )
+    return False
+
+
+def module_shape(tree: ast.Module, where: str, stores: Counter[str]) -> None:
+    """The ``[module]`` whitelist (see the module docstring); def bodies are not read."""
+    sa_names = {
+        alias.asname or alias.name
+        for stmt in tree.body
+        if isinstance(stmt, ast.Import)
+        for alias in stmt.names
+        if alias.name == "sqlalchemy"
+    }
+    sa_names = {name for name in sa_names if stores[name] == 1}
+    body = tree.body
+    has_doc = (
+        bool(body)
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    )
+    start = 1 if has_doc else 0
+    first = body[start] if len(body) > start else None
+    if not (
+        isinstance(first, ast.ImportFrom)
+        and first.module == "__future__"
+        and first.level == 0
+        and [(alias.name, alias.asname) for alias in first.names] == [("annotations", None)]
+    ):
+        raise ChainError(
+            f"[module] {where}: `from __future__ import annotations` must open the module "
+            "(after the docstring)"
+        )
+    for stmt in body[start + 1 :]:
+        at = f"[module] {where} line {stmt.lineno}"
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+                raise ChainError(f"{at}: a second `from __future__` import is not allowed")
+            if any(alias.name == "*" for alias in stmt.names):
+                raise ChainError(f"{at}: a star import is not allowed")
+            continue
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if (
+                len(targets) != 1
+                or not isinstance(targets[0], ast.Name)
+                or stmt.value is None
+                or not literal_value(stmt.value, sa_names)
+            ):
+                raise ChainError(f"{at}: an assignment binds one plain name to a literal value")
+            continue
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if stmt.decorator_list:
+                raise ChainError(f"{at}: a decorated def is not allowed")
+            if getattr(stmt, "type_params", None):
+                raise ChainError(f"{at}: a def with type parameters is not allowed")
+            defaults = [*stmt.args.defaults, *(d for d in stmt.args.kw_defaults if d is not None)]
+            if not all(isinstance(default, ast.Constant) for default in defaults):
+                raise ChainError(f"{at}: a def default must be a constant")
+            continue
+        raise ChainError(f"{at}: a module-level {type(stmt).__name__} statement is not allowed")
+
+
 def header(name: str, data: bytes) -> tuple[str, str | None]:
     """(revision, down_revision) from the file's literal module-level header; never executed."""
     where = f"versions/{shown(name)}"
@@ -166,6 +255,7 @@ def header(name: str, data: bytes) -> tuple[str, str | None]:
     for field in ("branch_labels", "depends_on"):
         if values[field] is not None:
             raise ChainError(f"[header] {where}: `{field}` must be None")
+    module_shape(tree, where, stores)
     return rev, down
 
 
