@@ -62,6 +62,12 @@ for k in ("MAKELEVEL", "MAKEFLAGS", "MFLAGS", "MAKE_TERMOUT", "MAKE_TERMERR", "M
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 target = sys.argv[1:]
 extra = ("PIP_NO_INDEX", "PIP_FIND_LINKS") if target == ["release-gate"] else ()
+if target == ["release-gate"]:                                                                # D-47(b): like the real installed smoke (get_heads()
+    import glob                                                                               # == [_MIGRATION_HEAD]), the overlay's literal must name
+    want = [l[-5:-1] for l in open("scripts/verify_release_artifact.py").read().split("\n")  # the snapshot chain's top revision file
+            if re.fullmatch(r'_MIGRATION_HEAD: Final\[str\] = "[0-9]{4}"', l)]
+    have = sorted(os.path.basename(p)[:4] for p in glob.glob("src/chronos/persistence/migrations/versions/[0-9][0-9][0-9][0-9]_*.py"))
+    if want != have[-1:]: print(f"installed migration chain must have head {want}, got {have[-1:]}"); sys.exit(2)
 found = probe_lib.leaks(lane="$T/r40", extra=extra)
 if len(target) != 1 or target[0] not in ("lint", "format-check", "type", "type-worker", "test", "release-gate"): found.append("argv")
 if extra and (os.environ.get("PIP_NO_INDEX") != "1" or not os.path.isdir(os.environ.get("PIP_FIND_LINKS", "")) or os.access(os.environ["PIP_FIND_LINKS"], os.W_OK)):
@@ -130,11 +136,15 @@ def verify_git_history_secrets(root, baseline):
 FAKE
 printf '.venv/\n.gates/\ndata/\n' > "$R40/.gitignore"   # as in the repo: .gates/, the venv and data/ are ignored
 printf '# TRUSTED-MAKEFILE (the trusted base)\nlint format-check type type-worker test release-gate:\n\t@%s $@\n' "$T/bin/stubmake" > "$R40/Makefile"
-printf '# TRUSTED release script\n' > "$R40/scripts/verify_release_artifact.py"; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
+MV40="$R40/src/chronos/persistence/migrations/versions"; mkdir -p "$MV40"   # D-47(b): main's migration chain 0001 → 0002
+mig40() { printf 'from __future__ import annotations\n\nrevision = "%s"\ndown_revision = %s\nbranch_labels = None\ndepends_on = None\n' "$1" "$2" > "$MV40/$1_${3:-step}.py"; }  # main's shape ([module] whitelist)
+lit40() { printf '# %s\n_MIGRATION_HEAD: Final[str] = "%s"\n' "$1" "$2" > "$R40/scripts/verify_release_artifact.py"; }
+mig40 0001 None base; mig40 0002 '"0001"' next
+lit40 'TRUSTED release script' 0002; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
 commit "$R40"; git -C "$R40" branch -q trusted-main; git -C "$R40" update-ref refs/remotes/origin/main trusted-main
 # the CANDIDATE on top: Daybreak's no-op Makefile and a gutted security script (its history scan checks nothing)
 printf 'lint format-check type type-worker test release-gate:\n\t@echo "12 passed in 0.1s"\n' > "$R40/Makefile"
-printf '# CANDIDATE\n' > "$R40/scripts/verify_release_artifact.py"; printf '# CANDIDATE\n' > "$R40/scripts/verify_pip_bootstrap.py"
+lit40 CANDIDATE 0002; printf '# CANDIDATE\n' > "$R40/scripts/verify_pip_bootstrap.py"
 cat > "$R40/scripts/verify_release_security.py" <<'GUT'
 class SecurityGateError(RuntimeError): pass
 class _Cmd:
@@ -507,6 +517,44 @@ done
 # a static guard so a NEW trusted Python call cannot slip in unisolated (gates/ and gates/lib/; sandboxed candidate-venv "$py" calls are not matched)
 check "iso:3 every trusted python invocation in gates/ and gates/lib/ (python3 -…, the tools venv's python -…, tools-venv.sh's \"\$base\" -…) is -I -B: found $(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l) calls, none without it" "[ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | grep -vc -- '-I -B')\" = 0 ] && [ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l)\" -ge 16 ]"
 check "iso:3 the README states the isolation rule" "grep -qF 'python3 -I -B' $G/README.md"
+
+# --- D-47(b): gate 40 derives the expected migration head from the candidate's chain, as DATA ---
+# The full variant table is tests/gates/test_gate40_migration_chain.sh; here: the wiring. The stub release-gate
+# fails like the real installed smoke when the trusted overlay's _MIGRATION_HEAD is not the chain's head.
+# The ast.py shadow is inert where it cannot write its marker: inside the sandbox <snap>/src is always on
+# PYTHONPATH (candidate code, by design), so only a host-side import can leave a marker.
+d47b_reset() { git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates; : > "$T/dl.log"; }
+d47b_cand() { d47b_reset; eval "$1"; commit "$R40"; g40 "$(git -C "$R40" rev-parse HEAD)"; }
+d47b_cand ':'
+check "d47b:5 40 with no new migration the PASS is unchanged and the receipt names main's head 0002" "passed evidence-at-head && [ \"\$(field \"r['migration_head']\")\" = 0002 ]"
+d47b_cand 'mig40 0003 "\"0002\""; lit40 CANDIDATE 0003'
+check "d47b:1 40 a candidate appending migration 0003 (its literal bumped) PASSes: release-gate ran on the trusted overlay with head 0003 (the #309 case; the unfixed gate FAILs it: 'make gates exited 2 ... (target release-gate)')" \
+  "passed evidence-at-head && [ \"\$(field \"r['migration_head'], r['targets']['release-gate']\")\" = '0003 0' ]"
+check "d47b:1 40 ...and only the trusted overlay copy took the head: the lane's tracked files are untouched" "git -C $R40 diff --quiet HEAD && grep -qx '# CANDIDATE' $R40/scripts/verify_release_artifact.py"
+d47b_cand 'printf "# edited\n" >> "$MV40/0001_base.py"'
+check "d47b:3 40 FAIL: a candidate rewriting main's migration 0001 → the named [I3] FAIL, before any network step or target (no wheel pre-fetch ran)" \
+  "failed evidence-at-head 'migration chain \\[I3\\] main.s versions/0001_base.py was changed' && [ ! -s $T/dl.log ]"
+d47b_cand 'mig40 0003 "\"0002\""'
+check "d47b:8 40 FAIL: a candidate appending 0003 but leaving its own literal at 0002 → the named [I8] FAIL (CI and gate 40 judge the same head)" \
+  "failed evidence-at-head 'migration chain \\[I8\\] the candidate.s _MIGRATION_HEAD is 0002, its chain.s head is 0003'"
+d47b_cand 'mig40 0003 "\"0002\""; mig40 0004 "\"0002\""; lit40 CANDIDATE 0004'
+check "d47b:4 40 FAIL: a second head → the named [I4] FAIL" "failed evidence-at-head 'migration chain \\[I4\\] revision 0002 has 2 children'"
+d47b_cand 'mkdir -p "$R40/gates/lib"; printf "print(\"0002\")\n" > "$R40/gates/lib/migration_chain.py"; mig40 0003 "\"0002\""'
+check "d47b:trust 40 a candidate gates/lib/migration_chain.py that prints a forged head never runs: the trusted copy beside gate 40 still FAILs [I8]" \
+  "failed evidence-at-head 'migration chain \\[I8\\]'"
+cp -r "$G" "$T/g40stub"; printf 'print("0002 and more")\n' > "$T/g40stub/lib/migration_chain.py"   # a trusted step that exits 0 with no head
+G40_REAL=$G40; G40="$T/g40stub/40-evidence-at-head.sh"; d47b_cand ':'; G40=$G40_REAL
+check "d47b:wire 40 a trusted step that exits 0 without printing one 4-digit head FAILs: gate 40 checks the head's shape (reader F2, M14)" \
+  "failed evidence-at-head 'the trusted migration step printed no head'"
+printf 'import importlib as _i, os as _o, sys as _s\ntry:\n    open("%s/ast", "a").write("ran\\n")\nexcept OSError:\n    pass\n_d = _o.path.dirname(_o.path.abspath(__file__))\n_s.modules.pop(__name__, None)\n_s.path[:] = [p for p in _s.path if _o.path.abspath(p or ".") != _d]\n_r = _i.import_module(__name__)\n_s.modules[__name__] = _r\nglobals().update(vars(_r))\n' "$MK" > "$T/ast-shadow.py"
+fresh_markers; (cd "$R40" && mkdir -p "$T/pp" && cp "$T/ast-shadow.py" "$T/pp/ast.py" && PYTHONPATH="$T/pp" python3 -c 'import ast; ast.parse("1")')
+check "d47b:iso positive control: the PYTHONPATH ast.py shadow runs under a plain python3 and still hands back the real ast" "[ -e $MK/ast ]"
+d47b_reset; mig40 0003 '"0002"'; lit40 CANDIDATE 0003; mkdir -p "$R40/src"; cp "$T/ast-shadow.py" "$R40/src/ast.py"; commit "$R40"; fresh_markers
+(PYTHONPATH="$R40/src" g40 "$(git -C "$R40" rev-parse HEAD)")
+check "d47b:iso 40 with PYTHONPATH naming the candidate's src/ (as the lane's own runs set it) and a tracked src/ast.py, the verdict is unchanged ..." \
+  "passed evidence-at-head && [ \"\$(field \"r['migration_head']\")\" = 0003 ]"
+check "d47b:iso 40 ...and the candidate's ast.py never ran in the trusted migration step (python3 -I -B; no marker)" "[ -z \"\$(markers)\" ]"
+d47b_reset
 
 # --- contract 4: the harness never edits existing tests or source ------------------------------
 check "4 this repo's tracked tree is unchanged by the harness (git status empty)" "[ -z \"\$(git -C $ROOT status --porcelain --untracked-files=no)\" ]"
