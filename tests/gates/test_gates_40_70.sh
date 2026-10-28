@@ -504,6 +504,10 @@ for pkg in venv pip; do
   check "iso:1 tools-venv: ...and the candidate's $pkg/ never ran (the venv build and the pip install are isolated; no marker)" "[ -z \"\$(markers)\" ]"
 done
 
+# a static guard so a NEW trusted Python call cannot slip in unisolated (gates/ and gates/lib/; sandboxed candidate-venv "$py" calls are not matched)
+check "iso:3 every trusted python invocation in gates/ and gates/lib/ (python3 -…, the tools venv's python -…, tools-venv.sh's \"\$base\" -…) is -I -B: found $(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l) calls, none without it" "[ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | grep -vc -- '-I -B')\" = 0 ] && [ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l)\" -ge 16 ]"
+check "iso:3 the README states the isolation rule" "grep -qF 'python3 -I -B' $G/README.md"
+
 # --- contract 4: the harness never edits existing tests or source ------------------------------
 check "4 this repo's tracked tree is unchanged by the harness (git status empty)" "[ -z \"\$(git -C $ROOT status --porcelain --untracked-files=no)\" ]"
 

@@ -50,7 +50,7 @@ sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-h
 # A. TRUSTED steps (network allowed; candidate bytes only as DATA): validate the locks, pre-fetch the wheel
 #    cache, audit the runtime lock — every tool from the trusted tools venv, never candidate code.
 LOCKS="bootstrap build runtime sbom"
-why="$(python3 - "$snap" $LOCKS <<'PY' 2>&1
+why="$(python3 -I -B - "$snap" $LOCKS <<'PY' 2>&1
 import re, sys
 snap, names = sys.argv[1], sys.argv[2:]
 ok = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+|\s+--hash=sha256:[0-9a-f]{64})(?: \\)?|\s*(?:#.*)?")
@@ -62,13 +62,13 @@ PY
 )" || fail "$(tail -n 1 <<< "$why"); the trusted steps read the locks only as pinned data"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/chronos-gates/wheels"; mkdir -p "$cache" && chmod 0700 "$cache" || fail "could not create the wheel cache"
 for l in $LOCKS; do
-  "$tools/bin/python" -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
+  "$tools/bin/python" -I -B -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
     -r "$snap/requirements-$l.lock" -d "$cache" > "$work/download-$l.log" 2>&1 \
     || fail "could not pre-fetch requirements-$l.lock as hash-pinned wheels (an sdist-only or yanked pin fails closed); see pip download"
 done
-"$tools/bin/python" -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
+"$tools/bin/python" -I -B -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
 acode=$?
-audit="$(python3 - "$work/audit.json" "$acode" <<'PY' 2>&1
+audit="$(python3 -I -B - "$work/audit.json" "$acode" <<'PY' 2>&1
 import json, re, sys
 try:
     deps = json.load(open(sys.argv[1]))["dependencies"]
@@ -120,7 +120,7 @@ if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name 
 fi
 cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
 lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
-out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
+out="$(python3 -I -B - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 targets = dict(line.split() for line in open(sys.argv[6]))
@@ -162,7 +162,7 @@ print(bad or ("the lane tree changed during make gates" if lane_dirty else "ok")
 PY
 )" || fail "could not verify the snapshot or write the receipt ($(tail -n 1 <<< "$out"))"
 [ "$out" = ok ] || fail "$out; the evidence does not name PR_HEAD_SHA's bytes — re-run on an untouched head"
-read -r rsha rexit nsum counts < <(python3 -c 'import json,os,sys; r=json.load(os.fdopen(os.open(sys.argv[1], os.O_RDONLY|os.O_NOFOLLOW))); p=r["pytest"]
+read -r rsha rexit nsum counts < <(python3 -I -B -c 'import json,os,sys; r=json.load(os.fdopen(os.open(sys.argv[1], os.O_RDONLY|os.O_NOFOLLOW))); p=r["pytest"]
 print(r["sha"], r["exit"], r["summaries"], "none" if p is None else "%d/%d/%d/%d" % (p["passed"], p["failed"], p["skipped"], p["errors"]))' .gates/40-evidence-at-head.json) \
   || fail "could not read back the receipt .gates/40-evidence-at-head.json"
 [ "$rexit" = 0 ] || fail "make gates exited $rexit at $rsha (target $first); re-run 'make $first' by hand at that head, fix, then re-run"

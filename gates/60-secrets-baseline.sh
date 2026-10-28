@@ -13,7 +13,7 @@ fail() { echo "FAIL: $g — $1" >&2; exit 1; }
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a git work tree; run the gate from the repo root"
 cd "$top" || fail "could not enter $top"
 [ -f .secrets.baseline ] || fail ".secrets.baseline is missing"
-inputs() { python3 - <<'PY'
+inputs() { python3 -I -B - <<'PY'
 import os, stat, subprocess
 out = subprocess.run(["git", "ls-files", "-s", "-z"], capture_output=True, check=True).stdout
 modes = {r.split(b"\t", 1)[1].decode(): r.split(b" ", 1)[0].decode() for r in out.split(b"\0") if r}
@@ -35,7 +35,7 @@ sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbo
 trusted_show .secrets.baseline > "$work/trusted.baseline" && [ -s "$work/trusted.baseline" ] || fail "cannot read .secrets.baseline from the trusted base (${GATES_TRUSTED_REF:-origin/main})"
 # The scanner CONFIGURATION (version, plugins, filters) is the trusted base's; the candidate baseline
 # contributes only its reviewed `results` as data, and its own configuration must equal the trusted one.
-why="$(python3 - .secrets.baseline "$work/trusted.baseline" "$work/scan.baseline" <<'PY' 2>&1
+why="$(python3 -I -B - .secrets.baseline "$work/trusted.baseline" "$work/scan.baseline" <<'PY' 2>&1
 import json, sys
 try:
     cand, trusted = (json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3])
@@ -55,10 +55,10 @@ PY
 cp "$work/scan.baseline" "$work/io/.secrets.baseline" || fail "could not place the scan baseline in the output dir"
 mapfile -d '' files < <(git ls-files -z | grep -zvxF '.secrets.baseline')  # a literal whole-name match
 [ "${#files[@]}" -gt 0 ] || fail "no tracked files; refusing an empty secret scan"
-SANDBOX_RO="$tools" sandbox_run "$work" "$tools/bin/python" -m detect_secrets.pre_commit_hook --baseline "$work/io/.secrets.baseline" \
+SANDBOX_RO="$tools" sandbox_run "$work" "$tools/bin/python" -I -B -m detect_secrets.pre_commit_hook --baseline "$work/io/.secrets.baseline" \
   --json -- "${files[@]}" > "$work/hook.out" 2>/dev/null
 code=$?
-judge() { python3 - "$work" "$code" "${#files[@]}" <<'PY'
+judge() { python3 -I -B - "$work" "$code" "${#files[@]}" <<'PY'
 import json, re, sys
 work, code, tracked = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 before = open(f"{work}/scan.baseline", "rb").read()  # built by the trusted gate: main's config + reviewed results
