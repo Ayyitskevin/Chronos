@@ -444,9 +444,41 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `installation_identity` row. A marker with no row reads as a database replaced beneath
    surviving state files, so the backend boots held: read-only, unreconciled, no autonomy
    runtime. Read the hold from `<checkout>`. The token comes from the backend's own token file
-   (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs): the
-   shell puts it in the header, and nothing prints it. The log is your `LOG_FILE`
-   (`logs/chronos.log` by default).
+   (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs).
+   The two commands that carry it run in a fresh shell, `/usr/bin/env -i PATH=/usr/bin:/bin
+   /bin/bash --noprofile --norc`, started by absolute path with an empty environment and given
+   the command as its `-c` argument. That shell has none of yours: no function, alias, hash
+   entry, xtrace, `BASH_ENV` or startup file, no `HOME` (so no `~/.curlrc`), and a `PATH` of two
+   root-owned directories. The token is read there, handed to curl as a header file
+   (`-H @<(printf ...)`, so it is in no process's argv) and never exists in your shell; `-q`, as
+   curl's FIRST argument, also stops a curlrc found another way. Your shell may be bash, zsh or
+   dash. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
+   command and curl prints the token. Do not.
+
+   Threat model. These commands protect the token from accidental disclosure by your own shell
+   and tool configuration: history, xtrace, curl config, aliases, functions, hash entries,
+   startup files, argv. They do not protect against anyone who can already act as your user or
+   as root, who can read the token file directly: that includes a hostile `LD_PRELOAD` or
+   loader environment, writable system binaries or directories, `ptrace`, a function named
+   `/usr/bin/env` and a DEBUG trap under `extdebug`. The preflight below checks two things only:
+   the loader variables in your own shell (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`), and the
+   owner and mode of the system paths it names. That path check runs `stat` and `bash` from
+   `/usr/bin` and `/bin`, so it catches a writable or non-root-owned path only while those tools
+   are intact: a compromised `/usr/bin` can forge its answers, and no check run from it can prove
+   otherwise. It does not check `ptrace`, the `/usr/bin/env` function or the DEBUG trap.
+   The log is your `LOG_FILE` (`logs/chronos.log` by default).
+
+   Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in
+   `/usr/bin` or `/bin` (`-H @file`), each owned by root and writable by no one else, and no
+   loader override in your environment:
+   ```bash
+   [ -z "$LD_PRELOAD$LD_AUDIT$LD_LIBRARY_PATH" ] && echo "loader: clean" || echo "loader: STOP"
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'for p in /usr/bin /bin /usr/bin/env /bin/bash "$(command -v curl)"; do read -r o m < <(stat -L -c "%U %a" "$p"); m=${m: -3}; if [[ $o == root && $m =~ ^[0-7][0145][0145]$ ]]; then echo "ok $p"; else echo "STOP $p $o $m"; fi; done; curl -q --version'
+   ```
+   It must print `loader: clean`, then five lines `ok <path>` (`/usr/bin`, `/bin`, `/usr/bin/env`,
+   `/bin/bash` and the curl, `/usr/bin/curl` or `/bin/curl`), then curl's version lines, the
+   first `curl 7.55` or later. **STOP, and run nothing below, if** it prints `loader: STOP`, any
+   `STOP <path>` line, an error, or an older curl. Then:
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
@@ -455,7 +487,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    print("reconciliation:", h["reconciliation_status"])
    print("tasks:", " ".join(t["name"] + "=" + t["state"] for t in o["tasks"]))
    '
-   curl -sS -w ' HTTP %{http_code}\n' -H "X-Chronos-Token: $(cat data/backend_api_token)" http://127.0.0.1:<port>/autonomy/alerts
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'curl -q -sS -w " HTTP %{http_code}\n" -H @<(printf "X-Chronos-Token: %s\n" "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts'
    grep -F '"event":"recovery_hold_engaged"' logs/chronos.log | tail -n 1
    ```
    It must print these four lines, then one log line whose message begins `This boot cannot
@@ -480,12 +512,14 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    as consistent: `recovery hold: CLEAR` and `PASS [ADR-0054] state identity`.
 
    **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
-   database replacement. The same token file, never printed:
+   database replacement. The same token file, in the same fresh shell:
    ```bash
-   curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
-     -H "X-Chronos-Token: $(cat data/backend_api_token)" \
-     -H 'Content-Type: application/json' \
-     -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}'
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c '
+     curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
+       -H @<(printf "X-Chronos-Token: %s\n" "$(<data/backend_api_token)") \
+       -H "Content-Type: application/json" \
+       -d "{\"note\": \"N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)\"}"
+   '
    ```
    Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>","effective":"next start"}`.
    A `reason` other than `database_replaced`: stop. The acknowledgement binds this exact
@@ -494,7 +528,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 
    **Restart, then prove the hold is gone, before step 8.** `systemctl --user restart
    chronos-backend`, then `systemctl --user is-active chronos-backend` → `active`, then the
-   `/health` and `/autonomy/alerts` commands above again. They must print:
+   `/health` and `/autonomy/alerts` commands above again, but not the `grep`: the log still holds
+   the held boot's `recovery_hold_engaged` line, which proves nothing now. They must print:
    ```
    startup_faults: none
    reconciliation: RECONCILED
