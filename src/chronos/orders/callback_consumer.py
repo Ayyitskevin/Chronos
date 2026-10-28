@@ -222,6 +222,18 @@ class ConsumerHealth:
     last_error_type: str | None
 
 
+class _WriteAuthorityLost(BaseException):
+    """Internal: this worker may write no more (CB1-FIX2). Raised immediately before a write.
+
+    A ``BaseException`` so no step's ``except Exception`` retries or swallows it: the event's
+    remaining writes are skipped (a journaled row stays PENDING) and ``_run`` ends the worker.
+    """
+
+    def __init__(self, *, abandoned: bool) -> None:
+        super().__init__("abandoned by stop" if abandoned else "writer lease lost")
+        self.abandoned = abandoned
+
+
 class _AlreadyJournaled(Exception):
     """Internal: an earlier row holds this key; the savepoint rolls the new one back."""
 
@@ -593,6 +605,11 @@ class CallbackConsumer:
         self._last_error_type: str | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        # CB1-FIX2 P1-1: the running worker's token. stop() revokes it, so a worker it could not
+        # join writes nothing further; the worker keeps its own copy in a thread-local.
+        self._token: object | None = None
+        self._worker = threading.local()
+        self._inflight: StreamEvent | None = None  # the event the worker holds right now
         # time.monotonic() of the last sweep; the cadence starts at construction, so the start
         # sweep in _run is the only immediate one
         self._last_sweep = time.monotonic()
@@ -644,16 +661,27 @@ class CallbackConsumer:
         self._is_writer = is_writer
         self._stopping.clear()
         self.open()
-        thread = threading.Thread(target=self._run, name="chronos-callback-consumer", daemon=True)
+        token = object()
+        self._token = token
+        thread = threading.Thread(
+            target=self._run, args=(token,), name="chronos-callback-consumer", daemon=True
+        )
         self._thread = thread
         thread.start()
 
     def stop(self, *, timeout: float = _STOP_DRAIN_SECONDS) -> int:
-        """Stop accepting, drain for up to ``timeout``, count what is left as lost."""
+        """Stop accepting, drain for up to ``timeout``, count what is left as lost.
+
+        CB1-FIX2 P1-1: a worker still alive after the joins is abandoned. Its token is revoked, so
+        it writes nothing further; the event it holds counts as lost; and readiness is demoted and
+        the stop recorded exactly as for queued losses, before the caller disposes the database.
+        """
 
         with self._lock:
             self._accepting = False
         thread = self._thread
+        lost = 0
+        abandoned = False
         if thread is not None:
             try:
                 self._queue.put(_STOP, timeout=timeout)
@@ -662,7 +690,11 @@ class CallbackConsumer:
             thread.join(timeout)
             self._stopping.set()
             thread.join(0.1)
-        lost = 0
+            with self._lock:
+                self._token = None
+                abandoned = thread.is_alive()
+                if abandoned and self._inflight is not None:
+                    lost += 1
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -674,14 +706,18 @@ class CallbackConsumer:
             self._state = "stopped"
             self._dropped += lost
         self._thread = None
-        if lost:
+        if lost or abandoned:
             _LOGGER.warning(
-                "Callback consumer stopped with %d unjournaled events",
+                "Callback consumer stopped with %d unjournaled events%s",
                 lost,
-                extra={"event": "callback_consumer_stopped", "lost": lost},
+                "; its worker did not exit and was abandoned" if abandoned else "",
+                extra={"event": "callback_consumer_stopped", "lost": lost, "abandoned": abandoned},
             )
-            self._invalidate(DROPPED_EVENT_REASON)
-            self._record_health("stopped", reason="stopped with unjournaled events")
+            self._invalidate(DROPPED_EVENT_REASON if lost else CONSUMER_FAILED_REASON)
+            reason = "stopped with unjournaled events" if lost else "stopped"
+            if abandoned:
+                reason += "; worker abandoned"
+            self._record_health("stopped", reason=reason)
         return lost
 
     def health(self) -> ConsumerHealth:
@@ -694,7 +730,8 @@ class CallbackConsumer:
                 last_error_type=self._last_error_type,
             )
 
-    def _run(self) -> None:
+    def _run(self, token: object) -> None:
+        self._worker.token = token
         try:
             if self._writer():
                 self._sweep_safely()
@@ -712,12 +749,34 @@ class CallbackConsumer:
                 if item is _STOP:
                     return
                 assert isinstance(item, StreamEvent)
-                self._handle_with_retry(item)
+                with self._lock:
+                    if token is not self._token:
+                        # stop() abandoned this worker after the get, so it could not count this
+                        # event; it is lost, and that stop already demoted readiness
+                        self._dropped += 1
+                        return
+                    self._inflight = item
+                try:
+                    self._handle_with_retry(item)
+                finally:
+                    with self._lock:
+                        self._inflight = None
+        except _WriteAuthorityLost as lost:
+            if not lost.abandoned:
+                self._halt("writer lease lost")
+            # abandoned: the stop that revoked the token already demoted and recorded it
         except BaseException as error:  # the thread dies loudly, never silently
             self._halt(f"consumer thread died ({type(error).__name__})")
         finally:
             with self._lock:
                 self._accepting = False
+
+    def _require_write_authority(self) -> None:
+        """CB1-FIX2: called immediately before every database write the consumer makes."""
+
+        token = getattr(self._worker, "token", None)  # None: synchronous mode (drain)
+        if token is not None and token is not self._token:
+            raise _WriteAuthorityLost(abandoned=True)
 
     def _writer(self) -> bool:
         try:
@@ -851,6 +910,7 @@ class CallbackConsumer:
 
         normalized = self._normalize(event)
         key = event_key(normalized.identity)
+        self._require_write_authority()
         try:
             appended = self.journal.append_pending(
                 key,
