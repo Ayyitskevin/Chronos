@@ -18,6 +18,7 @@ import os
 import re
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 from tests.support.persistence_keys import derived_key_hex
@@ -522,3 +523,185 @@ def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_u
     assert "runbook step 6" not in finding.text
     assert "would refuse to start" not in finding.text
     assert _leaks(finding.text, _key("bound"), _key("other")) == []
+
+
+# --- 6. KEYSRC-FIX1: the count and the honoured key are ONE snapshot (Kimi HOLD P1 @ cf702bf) ---
+# Kimi's probe: each root counted by re-opening the dotenv path apart from the loader's own read,
+# so a file (or environment) changed between the two reads let the loader honour a source the
+# count never saw. Each case below changes the source ONLY inside the loader's call, in the shapes
+# Kimi reproduced; every one must refuse at both roots, naming no key material.
+
+
+def _loading(change: Any) -> Any:
+    """A ``get_settings`` stand-in: the source changes around the loader's own read, once."""
+
+    state: dict[str, Any] = {}
+
+    def loader() -> Settings:
+        if "settings" not in state:
+            state["settings"] = change(Settings)
+        return state["settings"]
+
+    loader.calls = state  # type: ignore[attr-defined]
+    return loader
+
+
+def _swap_cases(path: Path) -> dict[str, tuple[Any, Any]]:
+    """case -> (setup, change): setup prepares what the count can see; change wraps the load."""
+
+    a, b = _key("swap-a"), _key("swap-b")
+    one, two = f"{_NAME}={a}\n", f"{_NAME}={a}\n{_NAME}={b}\n"
+
+    def file_one() -> None:
+        path.write_text(one, encoding="utf-8")
+
+    def two_then_back(load: Any) -> Settings:  # Kimi's runtime shape: loader 2, counter 1
+        path.write_text(two, encoding="utf-8")
+        settings = load()
+        path.write_text(one, encoding="utf-8")
+        return settings
+
+    def two_and_stay(load: Any) -> Settings:  # Kimi's mandate shape: counter 1, loader 2
+        path.write_text(two, encoding="utf-8")
+        return load()
+
+    def no_file() -> None:
+        path.unlink(missing_ok=True)
+
+    def appears_for_the_load(load: Any) -> Settings:  # counted none, honoured one
+        path.write_text(two, encoding="utf-8")
+        settings = load()
+        path.unlink()
+        return settings
+
+    def environment_a() -> None:
+        path.write_text("OTHER=1\n", encoding="utf-8")
+        os.environ[_NAME] = a
+
+    def environment_b_then_back(load: Any) -> Settings:
+        os.environ[_NAME] = b
+        settings = load()
+        os.environ[_NAME] = a
+        return settings
+
+    def environment_b_and_stay(load: Any) -> Settings:
+        os.environ[_NAME] = b
+        return load()
+
+    return {
+        "file: two lines for the loader, one again for the count": (file_one, two_then_back),
+        "file: one line for the count, two for the loader": (file_one, two_and_stay),
+        "file: none for the count, two for the loader": (no_file, appears_for_the_load),
+        "environment: changed for the loader, then back": (environment_a, environment_b_then_back),
+        "environment: changed for the loader and left": (environment_a, environment_b_and_stay),
+    }
+
+
+_SWAPS = list(_swap_cases(Path("unused")))
+
+
+def _run_root(
+    root: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], loader: Any
+) -> tuple[str, str]:
+    """('refused' | 'created' | 'other', the text the root emitted)."""
+
+    if root == "build_runtime":
+        monkeypatch.setattr(runtime_module, "get_settings", loader)
+        monkeypatch.setattr(runtime_module, "configure_logging", lambda *a, **k: None)
+
+        def stop(*args: object, **kwargs: object) -> None:
+            raise _Stop
+
+        monkeypatch.setattr(runtime_module, "Database", stop)
+        try:
+            runtime_module.build_runtime(register_atexit=False)
+        except PersistenceKeyError as refusal:
+            return "refused", str(refusal)
+        except _Stop:
+            return "created", ""
+        return "other", ""
+    monkeypatch.setattr("chronos.config.settings.get_settings", loader)
+    code = main(["mandate", "fingerprint", "--account-id", _ACCOUNT])
+    captured = capsys.readouterr()
+    if code == 1 and "persistence key refused:" in captured.err:
+        return "refused", captured.err
+    return ("created" if code == 0 else "other"), captured.out + captured.err
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+@pytest.mark.parametrize("case", _SWAPS)
+def test_fix1_a_source_changed_around_the_load_refuses_at_both_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    root: str,
+    case: str,
+) -> None:
+    path = tmp_path / "dotenv.synthetic"
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.delenv(_NAME)  # the conftest key; monkeypatch restores it, whatever a case sets
+    setup, change = _swap_cases(path)[case]
+    setup()
+
+    outcome, text = _run_root(root, monkeypatch, capsys, _loading(change))
+
+    assert outcome == "refused", case
+    assert _leaks(text, _key("swap-a"), _key("swap-b"), path=path) == []
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+def test_fix1_the_same_harness_starts_on_one_stable_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: str
+) -> None:
+    """The positive control: the harness above refuses only because the source moved."""
+
+    path = _dotenv(tmp_path, f"{_NAME}={_key('stable')}")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.delenv(_NAME)
+
+    outcome, text = _run_root(root, monkeypatch, capsys, _loading(lambda load: load()))
+
+    assert outcome == "created"
+    assert _leaks(text, _key("stable"), path=path) == []
+
+
+@pytest.mark.parametrize("root", ["build_runtime", "mandate"])
+def test_fix1_both_roots_count_before_the_loader_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: str
+) -> None:
+    """Same order at both roots: two sources refuse before ``get_settings()`` is ever called."""
+
+    path = _dotenv(tmp_path, f"{_NAME}={_key('order-file')}")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.setenv(_NAME, _key("order-env"))
+    loader = _loading(lambda load: load())
+
+    outcome, _ = _run_root(root, monkeypatch, capsys, loader)
+
+    assert outcome == "refused"
+    assert loader.calls == {}  # type: ignore[attr-defined]
+
+
+def test_fix1_both_roots_resolve_through_the_one_shared_snapshot() -> None:
+    """Static: each root takes the snapshot and resolves through it; neither counts or resolves
+    any other way (a second reader is how the two snapshots came apart)."""
+
+    import ast
+    import inspect
+
+    from chronos.cli import mandate_check
+
+    for function in (runtime_module.build_runtime, mandate_check._resolve_persistence_key):
+        tree = ast.parse(inspect.getsource(function).strip())
+        calls = sorted(
+            (node.lineno, node.col_offset, getattr(node.func, "attr", getattr(node.func, "id", "")))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        )
+        called = [name for _, _, name in calls]  # in source order
+        name = function.__name__
+        assert called.count("take_persistence_key_snapshot") == 1, name
+        assert called.count("resolve") == 1, name
+        assert "persistence_key_source" not in called, name
+        assert "resolve_persistence_key" not in called, name
+        assert called.index("take_persistence_key_snapshot") < called.index("get_settings"), name
