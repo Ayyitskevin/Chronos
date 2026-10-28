@@ -1069,6 +1069,24 @@ class _FileRig:
             ).all()
             return [str(row.event_data["outcome"]) for row in rows]
 
+    def journaled(self) -> int:
+        with self.database.sessions() as session:
+            rows = session.scalars(
+                select(ApplicationEventRow).where(
+                    ApplicationEventRow.event_type == CALLBACK_JOURNAL
+                )
+            ).all()
+            return len(rows)
+
+    def health_rows(self) -> list[dict[str, Any]]:
+        with self.database.sessions() as session:
+            rows = session.scalars(
+                select(ApplicationEventRow)
+                .where(ApplicationEventRow.event_type == CALLBACK_CONSUMER_HEALTH)
+                .order_by(ApplicationEventRow.id)
+            ).all()
+            return [dict(row.event_data) for row in rows]
+
 
 def _wait_until(predicate: Any, *, timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
@@ -1276,6 +1294,164 @@ def test_x04_start_closes_a_pending_row_without_waiting_for_the_cadence(tmp_path
         assert _wait_until(lambda: file_rig.outcomes() == ["unknown_execution"], timeout=3.0)
     finally:
         file_rig.consumer.stop()
+        file_rig.database.dispose()
+
+
+# --- CB1-FIX2 P1-1 (Kimi's security review): a stop never reports "no loss" over a live worker --
+
+
+def _blocked_handle(consumer: CallbackConsumer) -> tuple[threading.Event, threading.Event]:
+    """Hold the worker inside ``handle`` with one accepted event (Kimi's probe shape)."""
+
+    entered, release = threading.Event(), threading.Event()
+    real_handle = consumer.handle
+
+    def blocked(event: StreamEvent) -> Any:
+        entered.set()
+        assert release.wait(10)
+        return real_handle(event)
+
+    consumer.handle = blocked  # type: ignore[method-assign]
+    return entered, release
+
+
+def test_fix2_p1_a_stop_that_cannot_join_counts_the_inflight_event_lost_and_demotes(
+    tmp_path: Path,
+) -> None:
+    """Kimi's ``test_stop_reports_an_inflight_event_as_neither_lost_nor_invalidated``, inverted."""
+
+    file_rig = _FileRig(tmp_path)
+    entered, release = _blocked_handle(file_rig.consumer)
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(file_rig.foreign(1))
+        assert entered.wait(2)
+        thread = file_rig.consumer._thread
+        assert thread is not None
+
+        assert file_rig.consumer.stop(timeout=0.05) == 1
+        assert thread.is_alive()
+        assert file_rig.consumer.health().dropped == 1
+        assert file_rig.invalidations == [DROPPED_EVENT_REASON]
+        assert [row["state"] for row in file_rig.health_rows()] == ["stopped"]
+
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert file_rig.journaled() == 0  # the abandoned worker writes nothing after the stop
+    finally:
+        release.set()
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix2_p1_a_stop_that_cannot_join_an_idle_worker_still_demotes_and_records(
+    tmp_path: Path,
+) -> None:
+    file_rig = _FileRig(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    real_sweep = file_rig.consumer.sweep
+
+    def blocked() -> int:
+        entered.set()
+        assert release.wait(10)
+        return real_sweep()
+
+    file_rig.consumer.sweep = blocked  # type: ignore[method-assign]
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        assert entered.wait(2)  # the start sweep holds the worker; no event is in hand
+        thread = file_rig.consumer._thread
+        assert thread is not None
+
+        assert file_rig.consumer.stop(timeout=0.05) == 0
+        assert thread.is_alive()
+        assert file_rig.invalidations == [CONSUMER_FAILED_REASON]  # never green over a live worker
+        assert [row["state"] for row in file_rig.health_rows()] == ["stopped"]
+    finally:
+        release.set()
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix2_p1_an_event_taken_after_the_stop_gave_up_is_counted_and_never_journaled(
+    tmp_path: Path,
+) -> None:
+    file_rig = _FileRig(tmp_path)
+    taken, release = threading.Event(), threading.Event()
+    events = file_rig.consumer._queue
+    real_get = events.get
+
+    def slow_get(*args: Any, **kwargs: Any) -> Any:
+        item = real_get(*args, **kwargs)
+        if isinstance(item, StreamEvent):
+            taken.set()
+            assert release.wait(10)
+        return item
+
+    events.get = slow_get  # type: ignore[method-assign]
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(file_rig.foreign(1))
+        assert taken.wait(2)  # out of the queue, not yet in hand: stop() cannot see it
+        thread = file_rig.consumer._thread
+        assert thread is not None
+
+        file_rig.consumer.stop(timeout=0.05)
+        assert file_rig.invalidations == [CONSUMER_FAILED_REASON]
+
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert file_rig.consumer.health().dropped == 1  # the worker counts it itself
+        assert file_rig.journaled() == 0
+    finally:
+        release.set()
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix2_p1_runtime_close_never_disposes_under_a_live_worker_without_the_signal(
+    tmp_path: Path,
+) -> None:
+    """``AppRuntime.close`` stops the consumer before it disposes the database: the loss is
+    demoted and recorded first, and the worker it could not join writes nothing afterwards."""
+
+    class _Closeable:
+        def close(self) -> None:
+            pass
+
+        def clear_cache(self) -> None:
+            pass
+
+        def set_stream_sink(self, sink: Any) -> None:
+            pass
+
+    file_rig = _FileRig(tmp_path)
+    entered, release = _blocked_handle(file_rig.consumer)
+    runtime = runtime_module.AppRuntime.__new__(runtime_module.AppRuntime)
+    runtime.database = file_rig.database
+    runtime.connection = _Closeable()  # type: ignore[assignment]
+    runtime.market_data = _Closeable()  # type: ignore[assignment]
+    runtime.callback_source = _Closeable()
+    runtime.callback_consumer = file_rig.consumer
+    try:
+        file_rig.consumer.start(is_writer=lambda: True)
+        file_rig.consumer.offer(file_rig.foreign(1))
+        assert entered.wait(2)
+        thread = file_rig.consumer._thread
+        assert thread is not None
+
+        runtime.close()
+        assert file_rig.invalidations == [DROPPED_EVENT_REASON]
+        assert [row["state"] for row in file_rig.health_rows()] == ["stopped"]
+
+        release.set()
+        thread.join(2)
+        assert file_rig.journaled() == 0
+    finally:
+        release.set()
+        file_rig.consumer.stop(timeout=1)
         file_rig.database.dispose()
 
 
