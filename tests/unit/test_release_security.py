@@ -159,7 +159,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 39 at KEYSRC (runtime.py: the persistence-key source check supersedes its fingerprint).
     # 40 at KEYSRC-FIX1 (runtime.py: the one-snapshot key resolution supersedes KEYSRC's).
     # 41 at KEYSRC-FIX2 (runtime.py: the key resolved from the counted snapshot supersedes FIX1's).
-    assert len(historical_candidates) == 41
+    # 42 at KEYSRC-FIX4 (api/autonomy_wiring.py: the mandate-mismatch log names the key cause).
+    assert len(historical_candidates) == 42
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
