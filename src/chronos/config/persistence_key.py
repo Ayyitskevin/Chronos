@@ -117,7 +117,9 @@ class PersistenceKeySnapshot:
                 f"honoured a value that {counted} did not hold when it was counted. Chronos "
                 "refuses to start; the value is not shown"
             )
-        return _key_from(self._value)
+        # proven equal to the snapshot's value: ONE resolution, through the module's resolver (the
+        # N3 read-once pin counts it)
+        return resolve_persistence_key(settings)
 
 
 def _same(left: str | None, right: str | None) -> bool:
