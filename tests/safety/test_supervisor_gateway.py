@@ -1081,9 +1081,11 @@ def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> Non
 # correlation map, no session clock. Kevin's D-17 ruling, as admitted under D-52:
 # a mandate that sets one of them refuses new exposure with a typed code, instead
 # of being accepted with a warning, and risk reduction (CLOSE / CANCEL / REDUCE)
-# is admitted exactly as it is today, so a position is never trapped by its own
-# mandate. The field names and kinds below are written out here, not imported,
-# so that a change to the kernel's own lists cannot quietly move this pin.
+# is admitted exactly as it is today, so D-17 never refuses an exit. Admitted is not
+# executable: production cannot size an autonomous CLOSE/REDUCE until position
+# evidence is wired (D-54; pinned in test_autonomy_cycle.py). The field names and
+# kinds below are written out here, not imported, so that a change to the kernel's
+# own lists cannot quietly move this pin.
 
 _SET_LIMITS: dict[str, dict[str, Any]] = {
     "concentration.max_sector_exposure_pct": {
@@ -1160,7 +1162,7 @@ def test_d17_a_set_unenforceable_limit_refuses_new_exposure(limit: str, kind: st
 @pytest.mark.parametrize("kind", sorted(_REDUCING_DECISIONS))
 @pytest.mark.parametrize("limit", sorted(_SET_LIMITS))
 def test_d17_risk_reduction_is_admitted_exactly_as_today(limit: str, kind: str) -> None:
-    """The carve-out: a mandate's unenforceable limit never traps an exit."""
+    """The carve-out: a mandate's unenforceable limit never refuses an exit (admission only)."""
 
     decision = _decision(**_REDUCING_DECISIONS[kind])
     today = admit(decision, _mandate(), _state())

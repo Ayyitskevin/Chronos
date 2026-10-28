@@ -85,7 +85,9 @@ That is corrected here, and the honest list is kept in one place:
   enforce them (no sector/family/correlation map, no session clock), so a mandate
   that sets one authorizes no new exposure: every exposure-creating decision is
   refused ``MANDATE_INERT_LIMIT_SET``. Risk-reducing decisions are admitted exactly
-  as before, so the limit never traps an exit.
+  as before, so D-17 never refuses an exit. Admitted is not executable: production's
+  fact gatherer supplies no held quantity, so an autonomous CLOSE or REDUCE is still
+  refused at sizing (pre-existing; wiring it is D-54).
 
 ``tests/safety/test_supervisor_gateway.py`` pins this list, so a mandate field
 cannot be added without declaring whether it is enforced or inert.
