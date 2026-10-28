@@ -649,8 +649,10 @@ It does **not** enforce, and these are open gaps rather than decisions:
   they always needed and what did not exist before.
 - **Sector, family, and correlated concentration** — *refused when set since D-17 (ii), 2026-10-28
   (D-52): a mandate that sets one authorizes no new exposure (`MANDATE_INERT_LIMIT_SET`), while
-  CLOSE, CANCEL and REDUCE are admitted exactly as before: D-17 never refuses an exit, and it does
-  not make one executable (see the risk-reducing sizing item above: today an autonomous CLOSE or
+  CLOSE, CANCEL and REDUCE are admitted exactly as before: D-17 (ii) never refuses an exit, and
+  D-17 (iii) refuses one only when it asks for protection nothing can keep
+  (`PROTECTION_NOT_AVAILABLE`; the same decision without the request is admitted). Neither makes
+  an exit executable (see the risk-reducing sizing item above: today an autonomous CLOSE or
   REDUCE stops at sizing, D-54). Still never enforced.* ~~And the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
   does not gather.~~ *(Corrected by F7-A, 2026-09-27: both floors bind on the option-selection

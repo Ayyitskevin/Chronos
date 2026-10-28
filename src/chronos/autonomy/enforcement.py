@@ -28,8 +28,10 @@ there changes no decision — the mandate will still validate, activate, and loo
 complete. ``REFUSED`` (D-17 (ii), ruled by the owner, D-52) means nothing can
 enforce the limit, so admission reads the field only to refuse: a mandate that
 sets it authorizes no new exposure (``MANDATE_INERT_LIMIT_SET``), while
-risk-reducing decisions are admitted exactly as before, so D-17 never refuses an
-exit. Admitted is not executable: an autonomous CLOSE or REDUCE is still refused at
+risk-reducing decisions are admitted exactly as before, so (ii) never refuses an
+exit; (iii) refuses one only when it asks for protection nothing can keep
+(``PROTECTION_NOT_AVAILABLE``), and the same decision without the request is
+admitted. Admitted is not executable: an autonomous CLOSE or REDUCE is still refused at
 sizing in production, which gathers no held quantity (pre-existing; D-54).
 
 Neither label is a safety claim. ENFORCED says the kernel consults the field,

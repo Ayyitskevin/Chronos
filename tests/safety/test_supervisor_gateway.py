@@ -1081,7 +1081,8 @@ def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> Non
 # correlation map, no session clock. Kevin's D-17 ruling, as admitted under D-52:
 # a mandate that sets one of them refuses new exposure with a typed code, instead
 # of being accepted with a warning, and risk reduction (CLOSE / CANCEL / REDUCE)
-# is admitted exactly as it is today, so D-17 never refuses an exit. Admitted is not
+# is admitted exactly as it is today, so (ii) never refuses an exit ((iii) below refuses
+# one only when it asks for protection nothing can keep). Admitted is not
 # executable: production cannot size an autonomous CLOSE/REDUCE until position
 # evidence is wired (D-54; pinned in test_autonomy_cycle.py). The field names and
 # kinds below are written out here, not imported, so that a change to the kernel's

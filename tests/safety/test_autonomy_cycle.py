@@ -1012,13 +1012,13 @@ def _production_facts(mandate: AutonomyMandate) -> CycleFacts:
 def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
     kind: DecisionKind,
 ) -> None:
-    """D-17 never refuses an exit; it does not make one executable (Kimi P1-1, D-54).
+    """D-17 (ii) never refuses an exit; it does not make one executable (Kimi P1-1, D-54).
 
     Driven by the production fact shape: the exit under a set unenforceable limit
     is ADMITTED, and what stops it is the pre-existing sizing refusal (no position
     evidence is gathered in production), never ``MANDATE_INERT_LIMIT_SET``. The
     same proposal under the plain mandate stops in exactly the same place, so
-    D-17 changes nothing about exits in production.
+    D-17 (ii) changes nothing about exits in production.
     """
 
     outcomes = {}
