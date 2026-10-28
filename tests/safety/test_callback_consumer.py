@@ -1931,6 +1931,7 @@ def test_5m_no_raw_account_id_reaches_the_journal_or_the_log(rig: _Rig) -> None:
 # --- the runtime wiring: Demo through the real lifespan, refusals ---------------------------------
 
 
+@pytest.mark.in_memory_sqlite_is_the_subject  # CB1-FIX5 P2-1: the lane would make it file-backed
 def test_the_runtime_refuses_to_start_the_consumer_on_an_in_memory_database() -> None:
     started: list[object] = []
 
