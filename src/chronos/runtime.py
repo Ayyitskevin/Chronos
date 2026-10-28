@@ -289,11 +289,12 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     # N3: first, before the log file, the database file or any sidecar exists. An absent or
     # malformed key refuses here in every broker mode, demo included. KEYSRC: so does a key named
     # by more than one source (environment names + dotenv lines), whatever their values.
-    # KEYSRC-FIX1: ONE snapshot of those sources is taken before the loader runs, and the loader
-    # must have honoured the value it holds (same order as the mandate CLI).
+    # KEYSRC-FIX1/FIX2: ONE snapshot of those sources is taken before the loader runs, and the key
+    # this process uses is resolved FROM it; the settings' own copy of the key field is never read
+    # here, so no later read of the environment or the file can change it (same as the mandate CLI).
     key_snapshot = take_persistence_key_snapshot()
+    persistence_key = key_snapshot.resolve()
     settings = get_settings()
-    persistence_key = key_snapshot.resolve(settings)
     configure_logging(settings.log_level, settings.log_file)
     logging.getLogger("chronos.runtime").info("persistence key from: %s", key_snapshot.source)
     database = Database(settings.database_url)

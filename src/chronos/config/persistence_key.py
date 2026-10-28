@@ -16,22 +16,28 @@ both before anything resolves and refuses more than one, naming each source and 
 KEYSRC-FIX1 (Kimi HOLD P1 @ cf702bf): the count and the key must be ONE snapshot. A composition
 root calls :func:`take_persistence_key_snapshot` before the settings loader runs: it copies the
 process environment once and reads each dotenv file once, and both the count and the key come from
-those bytes, parsed with the loader's own ``dotenv_values``. :meth:`PersistenceKeySnapshot.resolve`
-then requires the key the loader honoured to be that same value, so a source changed between the
-two reads refuses instead of binding a key the count never saw.
+those bytes, parsed with the loader's own ``dotenv_values``.
+
+KEYSRC-FIX2 (Kimi HOLD P1 @ 3a040e8): comparing the loader's value with the snapshot's proved the
+values equal, not the sources: a same-value environment binding that appeared after the snapshot
+was honoured by the loader but never counted. So the key a root USES is resolved FROM the counted
+snapshot itself (:meth:`PersistenceKeySnapshot.resolve`, no settings object), and the roots never
+read the settings' copy of the key field: no later read of the environment or the file can change
+the key in use. ``Settings`` still loads the field (untouched); nothing at a root consults it.
 """
 
 from __future__ import annotations
 
-import hmac
 import io
 import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Protocol
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
+from pydantic import SecretStr
 
 from chronos.config.settings import Settings
 from chronos.utils.identifiers import PersistenceKey
@@ -48,11 +54,18 @@ class PersistenceKeyError(RuntimeError):
 
 
 class PersistenceKeySourceError(PersistenceKeyError):
-    """The key's sources are not exactly one: named more than once, or changed under a read."""
+    """The key's sources are not exactly one: it is named more than once."""
 
 
-def resolve_persistence_key(settings: Settings) -> PersistenceKey:
-    secret = settings.chronos_persistence_key
+class _KeyHolder(Protocol):
+    """What holds the key as a masked secret: a counted snapshot, or (B1) its file's settings."""
+
+    @property
+    def chronos_persistence_key(self) -> SecretStr | None: ...
+
+
+def resolve_persistence_key(holder: _KeyHolder) -> PersistenceKey:
+    secret = holder.chronos_persistence_key
     return _key_from(None if secret is None else secret.get_secret_value())
 
 
@@ -86,7 +99,8 @@ def count_key_lines(text: str) -> int:
 
 
 class PersistenceKeySnapshot:
-    """ONE read of every source the loader reads the key from (KEYSRC-FIX1).
+    """ONE read of every source the loader reads the key from (KEYSRC-FIX1), and the ONLY place a
+    composition root takes the key from (KEYSRC-FIX2).
 
     ``source`` names the one source (``None`` for none). The value is held privately and never
     rendered: no ``repr``, message or log line carries it or anything derived from it.
@@ -101,31 +115,20 @@ class PersistenceKeySnapshot:
     def __repr__(self) -> str:
         return f"PersistenceKeySnapshot(source={self.source!r})"
 
-    def resolve(self, settings: Settings) -> PersistenceKey:
-        """The key, provided the loader honoured exactly the value this snapshot read.
+    @property
+    def chronos_persistence_key(self) -> SecretStr | None:
+        """The counted value, masked, in the shape :func:`resolve_persistence_key` reads."""
 
-        A different value, or a value where this snapshot read none (or none where it read one),
-        means a source changed between the two reads: refused, the value not shown.
+        return None if self._value is None else SecretStr(self._value)
+
+    def resolve(self) -> PersistenceKey:
+        """The key the process uses: this snapshot's counted value, absent or malformed refused.
+
+        ONE resolution through the module's resolver (the N3 read-once pin counts it); nothing
+        here reads the environment, a file or a settings object.
         """
 
-        loaded = settings.chronos_persistence_key
-        honoured = None if loaded is None else loaded.get_secret_value()
-        if not _same(honoured, self._value):
-            counted = f"the one counted source, {self.source}," if self.source else "no source"
-            raise PersistenceKeySourceError(
-                f"{PERSISTENCE_KEY_ENV} changed while Chronos read it: the settings loader "
-                f"honoured a value that {counted} did not hold when it was counted. Chronos "
-                "refuses to start; the value is not shown"
-            )
-        # proven equal to the snapshot's value: ONE resolution, through the module's resolver (the
-        # N3 read-once pin counts it)
-        return resolve_persistence_key(settings)
-
-
-def _same(left: str | None, right: str | None) -> bool:
-    if left is None or right is None:
-        return left is right
-    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+        return resolve_persistence_key(self)
 
 
 def take_persistence_key_snapshot(
