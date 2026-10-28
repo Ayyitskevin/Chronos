@@ -650,7 +650,8 @@ def _observation_reasons(
     }
     reasons.extend(
         f"Broker open order {order_id} reports malformed fill figures ({cause}); "
-        "reconciliation remains locked."
+        "reconciliation remains locked until the venue sends a corrected status for it or the "
+        "session reconnects: check the order in TWS."
         for order_id, cause in sorted(quarantined.items())
     )
 

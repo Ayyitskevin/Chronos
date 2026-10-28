@@ -844,6 +844,9 @@ class OrderSubmissionBoundary:
                     f"broker acknowledged the send as {submission.lifecycle.value}; "
                     "the known broker identity was persisted without pretending it is active"
                 )
+                if submission.lifecycle is OrderLifecycle.SUBMISSION_UNKNOWN:
+                    # D43-FIX4: the order may be live at the venue
+                    failure_detail += "; reconcile before resubmitting"
             return SubmissionOutcome(
                 submitted=False,
                 refusal=SubmissionRefusalCode.BROKER_SUBMIT_FAILED,

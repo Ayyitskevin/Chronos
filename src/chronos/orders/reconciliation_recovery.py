@@ -468,7 +468,7 @@ def _unresolved_evidence_reason(
         return (
             f"owned broker order {quarantined.broker_order_id} reports malformed fill figures "
             f"({quarantined.quantity_quarantine}): nothing is settled from them, the intent stays "
-            "locked"
+            "locked: check the order in TWS, then reconcile again"
         )
     unsettled = next(
         (order for order in matching_orders if _fills_without_a_working_lifecycle(order)), None
@@ -1230,7 +1230,8 @@ class OrderRestartReconciler:
             if order.quantity_quarantine is not None:
                 return _SettlePlan(
                     "refuse",
-                    f"the venue's fill figures are malformed ({order.quantity_quarantine})",
+                    f"the venue's fill figures are malformed ({order.quantity_quarantine}): "
+                    "check the order in TWS, then reconcile again",
                 )
             if order.lifecycle not in _RECOGNISED_VENUE:
                 return _SettlePlan("refuse", f"{_UNRECOGNISED_STATUS} ({order.lifecycle.value})")

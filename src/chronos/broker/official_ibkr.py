@@ -2580,7 +2580,10 @@ class OfficialIBKRBroker:
             refusal = quantity_refusal(filled, remaining)
             if refusal is not None:
                 # D-43 (Q1): the mapper returns SUBMISSION_UNKNOWN; the message carries the cause
-                post_send_message = f"malformed broker fill figures ({refusal}); state unknown"
+                post_send_message = (
+                    f"malformed broker fill figures ({refusal}); state unknown: "
+                    "reconcile before resubmitting"
+                )
                 self.bridge.notices.append(
                     f"[order-quantity] submit acknowledgement for order {order_id}: {refusal}"
                 )
