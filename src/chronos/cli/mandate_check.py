@@ -348,8 +348,9 @@ def _review_account(
                 Severity.NOTE,
                 "account-check-skipped",
                 "the account binding was NOT checked: no account id was available (pass "
-                "--account-id, or set IB_ACCOUNT_ID). A mandate scoped to a different "
-                "account boots inert with one ERROR line in the log",
+                "--account-id, or set IB_ACCOUNT_ID), or no persistence key was (absent, "
+                "malformed, or refused: a refusal is named on stderr). A mandate scoped to a "
+                "different account boots inert with one ERROR line in the log",
             )
         ]
     if mandate.account_fingerprint != expected:
@@ -1088,7 +1089,8 @@ def cmd_mandate_fingerprint(args: argparse.Namespace) -> int:
     if key is None:
         print(
             "no persistence key available: the fingerprint is keyed by CHRONOS_PERSISTENCE_KEY, "
-            "which is absent or malformed here (or settings did not load); nothing is printed"
+            "which is absent or malformed here, or was refused (named by more than one source, or "
+            "with '$' in its line: the reason is on stderr); nothing is printed"
         )
         return 1
     account_id: str | None = args.account_id
