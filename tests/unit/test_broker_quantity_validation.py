@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -329,3 +330,30 @@ def test_a_quarantined_row_never_resolves_an_intent(intent_status: OrderLifecycl
     # positive control: the same row with real, well-formed figures does resolve
     control = _row(quantity_quarantine=None, lifecycle=OrderLifecycle.SUBMITTED)
     assert _resolve(intent_status, control) is not None
+
+
+# --- the recorded residuals (Q3, Q4) say what the source does ---------------------------------
+
+_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _limitations() -> str:
+    return " ".join((_ROOT / "docs" / "limitations.md").read_text(encoding="utf-8").split())
+
+
+def test_the_three_residual_lines_are_recorded_and_match_the_source() -> None:
+    from chronos.config.settings import Settings
+    from chronos.domain.enums import BrokerAdapter
+    from chronos.orders.tracker import quantity_refusal
+
+    text = _limitations()
+    # Q3: finite and non-negative only — executed, not asserted
+    assert "checked for finite and non-negative only, never for magnitude (D-43, Q3)" in text
+    assert quantity_refusal(HUGE, Decimal("0")) is None
+    # Q4: the positions and executions legs
+    assert "The positions and executions legs are outside D-43 (Q4)" in text
+    # Q4: the ib_async mapper, which is not the default adapter and still raises on a bad status
+    assert "The `ib_async` adapter keeps its own status mapper (D-43, Q4)" in text
+    assert Settings.model_fields["broker_adapter"].default is BrokerAdapter.OFFICIAL_IBKR
+    ib_async = (_ROOT / "src" / "chronos" / "broker" / "ibkr.py").read_text(encoding="utf-8")
+    assert 'raise BrokerDataError("IBKR open order has an unknown lifecycle status")' in ib_async
