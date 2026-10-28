@@ -359,7 +359,14 @@ def test_the_three_residual_lines_are_recorded_and_match_the_source() -> None:
     assert 'raise BrokerDataError("IBKR open order has an unknown lifecycle status")' in ib_async
 
 
-# --- D43-FIX1: position admission refuses a quarantined row on its own ------------------------
+# --- D43-FIX1: position admission refuses once a quarantined read demotes readiness ------------
+# position_admission.py is a byte-pinned QQQ campaign-readiness artifact
+# (tests/safety/test_qqq_campaign_readiness.py), so D43-FIX1 does not edit it. Its existing bracket
+# (readiness before and after its own broker observation must be the same READY generation)
+# refuses once the official adapter demotes readiness at a quarantining read: that adapter half is
+# pinned in tests/integration/test_quantity_quarantine_gateway.py (test_fix1_every_quarantined_*).
+
+_QUARANTINE_REASON = "broker open order fill figures quarantined; reconciliation required"
 
 
 def _admission_with(open_orders: tuple[BrokerOrder, ...]) -> object:
@@ -368,14 +375,25 @@ def _admission_with(open_orders: tuple[BrokerOrder, ...]) -> object:
     from chronos.persistence.database import Database
     from chronos.supervisor.position_admission import ManagedPositionAdmission
 
+    readiness = admission_suite._readiness()
+
+    class _AdapterContract(admission_suite._Broker):
+        """The suite's broker double, plus what the official adapter now does on a read."""
+
+        async def open_orders(self) -> tuple[BrokerOrder, ...]:
+            rows = await super().open_orders()
+            if any(row.quantity_quarantine is not None for row in rows):
+                readiness.invalidate(_QUARANTINE_REASON)
+            return rows
+
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
     try:
         admission_suite._seed_filled_opening(database)
         admission = ManagedPositionAdmission(
-            connection=admission_suite._Runner(admission_suite._Broker(open_orders=open_orders)),
+            connection=admission_suite._Runner(_AdapterContract(open_orders=open_orders)),
             sessions=database.sessions,
-            readiness=admission_suite._readiness(),
+            readiness=readiness,
             account_id=admission_suite._ACCOUNT,
             persistence_key=TEST_PERSISTENCE_KEY,
         )
@@ -384,17 +402,16 @@ def _admission_with(open_orders: tuple[BrokerOrder, ...]) -> object:
         database.dispose()
 
 
-def test_fix1_admission_refuses_a_quarantined_row() -> None:
+def test_fix1_admission_refuses_once_a_quarantined_read_demotes_readiness() -> None:
     from chronos.supervisor.position_admission import (
         AdmittedManagedPosition,
         OpeningAdmissionRefusalCode,
         RefusedManagedPositionAdmission,
     )
 
-    # another symbol's order, so only the quarantine itself can be the reason to refuse
+    # another symbol's order, so only the quarantine can be the reason to refuse
     working = _row(quantity_quarantine=None, lifecycle=OrderLifecycle.SUBMITTED)
     assert isinstance(_admission_with((working,)), AdmittedManagedPosition)  # control
     result = _admission_with((_row(),))
     assert isinstance(result, RefusedManagedPositionAdmission)
-    assert result.code is OpeningAdmissionRefusalCode.BROKER_EVIDENCE_UNSTABLE
-    assert CAUSE in result.detail
+    assert result.code is OpeningAdmissionRefusalCode.RECONCILIATION_NOT_READY
