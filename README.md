@@ -234,6 +234,11 @@ cp .env.example .env
 .venv/bin/python scripts/initialize_database.py
 ```
 
+The copied `.env` leaves `CHRONOS_PERSISTENCE_KEY` commented out, which is what the test suite needs:
+the suite sets its own key in the environment, and Chronos refuses a key named by more than one source
+(an empty `CHRONOS_PERSISTENCE_KEY=` line counts). A `.env` copied from an older template has that
+empty line uncommented: comment it out or delete it.
+
 **Quick local install (not reproducible).** `python3 -m venv .venv` followed by
 `.venv/bin/python -m pip install -e '.[dev]'` installs unpinned dependencies. Versions float, so a
 tool newer than the one in `requirements-dev.lock` (a newer `ruff`, for example) can fail a gate on
