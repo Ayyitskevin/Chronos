@@ -521,7 +521,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    <checkout>/.env`. It must name `<checkout>/.env`; `the process environment` means the key
    lives where step 5 forbids: stop. A refusal at start names every source and its count
    (`CHRONOS_PERSISTENCE_KEY is named 2 times: …`), or a `$` in the key line, never the value:
-   remove the extra source (step 5) and start again. The proof is one comparison: the fingerprint
+   remove the extra source or replace the malformed key line (step 5) and start again. The proof
+   is one comparison: the fingerprint
    computed from `<checkout>/.env`'s key ALONE — the key you escrowed in step 6; never the
    shell's, never the unit's — against the bound row. On an IBKR-paper host that is the scope
    line of `python -m chronos.cli b1-preflight`, which reads the file and nothing else:
