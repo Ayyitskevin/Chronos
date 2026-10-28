@@ -216,3 +216,96 @@ def test_preflight_preserves_landed_unsafe_artifact_state(monkeypatch, tmp_path,
     output = capsys.readouterr().out
     assert code == 1
     assert "mandate: UNSAFE" in output
+
+
+def _boot_writer():
+    from fastapi.testclient import TestClient
+
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+
+    get_settings.cache_clear()
+    return TestClient(create_app())
+
+
+def _synthetic_backend(monkeypatch, root):
+    """The real app over a synthetic store and state directory under ``root``."""
+
+    from chronos.config.settings import get_settings
+
+    for name, value in {
+        "BROKER_MODE": "demo",
+        "ALLOW_ORDER_TRANSMIT": "false",
+        "ALLOW_LIVE_TRADING": "false",
+        "DEMO_PROFILE": "empty_account",
+        "DATABASE_URL": f"sqlite:///{root / 'chronos.db'}",
+        "LOG_FILE": str(root / "chronos.log"),
+        "BACKEND_TOKEN_FILE": str(root / "backend_api_token"),
+        "LIVE_KILL_SWITCH_FILE": str(root / "live_kill_switch.json"),
+        "SESSION_BASELINE_FILE": str(root / "session_drawdown.json"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AUTONOMY_MANDATE_FILE", raising=False)
+    get_settings.cache_clear()
+
+
+def _state_identity_line(root, capsys):
+    cmd_campaign_preflight(_args(root, evidence=False))
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if "ADR-0054] state identity" in line
+    ]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def test_preflight_passes_state_identity_after_the_acknowledged_cutover_restart(
+    monkeypatch, tmp_path, capsys
+):
+    """PGAP-I: cutover, held boot, note, restart; the next preflight passes ADR-0054."""
+
+    _synthetic_backend(monkeypatch, tmp_path)
+    with _boot_writer():
+        pass
+    assert _state_identity_line(tmp_path, capsys) == (
+        "PASS [ADR-0054] state identity: marker/database pair consistent; no recovery hold"
+    )
+    (tmp_path / "chronos.db").rename(tmp_path / "chronos.db.archived-20261025T000000Z")
+    unverified = (
+        "FAIL [SHADOW_CAMPAIGN ADR-0054] state identity: UNVERIFIED; missing "
+        "installation_identity row; boot the backend writer once, then re-run preflight"
+    )
+    with _boot_writer() as client:
+        token = (tmp_path / "backend_api_token").read_text(encoding="utf-8").strip()
+        assert _state_identity_line(tmp_path, capsys) == unverified
+        acknowledged = client.post(
+            "/live/recovery/acknowledge",
+            json={"note": "synthetic N3 cutover"},
+            headers={"X-Chronos-Token": token},
+        )
+        assert acknowledged.status_code == 200
+        # the note takes effect at the next start, so this process changes nothing yet
+        assert _state_identity_line(tmp_path, capsys) == unverified
+    with _boot_writer() as client:
+        assert client.app.state.backend.recovery_hold is None
+    assert _state_identity_line(tmp_path, capsys) == (
+        "PASS [ADR-0054] state identity: marker/database pair consistent; no recovery hold"
+    )
+
+
+def test_preflight_stays_unverified_after_an_unacknowledged_cutover_restart(
+    monkeypatch, tmp_path, capsys
+):
+    """The regression: without the note, restarting the writer does not clear the gap."""
+
+    _synthetic_backend(monkeypatch, tmp_path)
+    with _boot_writer():
+        pass
+    (tmp_path / "chronos.db").rename(tmp_path / "chronos.db.archived-20261025T000000Z")
+    for _ in range(2):
+        with _boot_writer() as client:
+            hold = client.app.state.backend.recovery_hold
+            assert hold is not None and hold.reason.value == "database_replaced"
+    assert _state_identity_line(tmp_path, capsys) == (
+        "FAIL [SHADOW_CAMPAIGN ADR-0054] state identity: UNVERIFIED; missing "
+        "installation_identity row; boot the backend writer once, then re-run preflight"
+    )

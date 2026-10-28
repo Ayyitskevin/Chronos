@@ -565,3 +565,93 @@ def test_consumers_fail_closed_on_anchor_behind_and_ahead(
     assert "platform audit chain: TRIPPED" in output, output
     assert "crash window" in output, output
     assert _snapshot(tmp_path) == before
+
+
+def _synthetic_backend(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """The real app over a synthetic store and state directory under ``root``."""
+
+    from chronos.config.settings import get_settings
+
+    for name, value in {
+        "BROKER_MODE": "demo",
+        "ALLOW_ORDER_TRANSMIT": "false",
+        "ALLOW_LIVE_TRADING": "false",
+        "DEMO_PROFILE": "empty_account",
+        "DATABASE_URL": f"sqlite:///{root / 'chronos.db'}",
+        "LOG_FILE": str(root / "chronos.log"),
+        "BACKEND_TOKEN_FILE": str(root / "backend_api_token"),
+        "LIVE_KILL_SWITCH_FILE": str(root / "live_kill_switch.json"),
+        "SESSION_BASELINE_FILE": str(root / "session_drawdown.json"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AUTONOMY_MANDATE_FILE", raising=False)
+    get_settings.cache_clear()
+
+
+def _boot_writer() -> object:
+    from fastapi.testclient import TestClient
+
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+
+    get_settings.cache_clear()
+    return TestClient(create_app())
+
+
+def _recovery_line(root: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    cmd_campaign_status(_arguments(root, now=datetime(2026, 10, 25, 12, tzinfo=UTC)))
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("recovery hold:")
+    ]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+_MISSING_ROW = (
+    "recovery hold: UNVERIFIED [ADR-0054 / SHADOW_CAMPAIGN §5] missing installation_identity "
+    "row; repair: boot the backend writer once, then re-run campaign status"
+)
+_CLEAR = (
+    "recovery hold: CLEAR [ADR-0054 / SHADOW_CAMPAIGN §5] installation witnesses agree; "
+    "repair: preserve the state directory and database together"
+)
+
+
+def test_status_clears_the_recovery_hold_after_the_acknowledged_cutover_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PGAP-I: cutover, held boot, note, restart; status then reads the pair as agreeing."""
+
+    _synthetic_backend(monkeypatch, tmp_path)
+    with _boot_writer():
+        pass
+    assert _recovery_line(tmp_path, capsys) == _CLEAR
+    (tmp_path / "chronos.db").rename(tmp_path / "chronos.db.archived-20261025T000000Z")
+    with _boot_writer() as client:
+        token = (tmp_path / "backend_api_token").read_text(encoding="utf-8").strip()
+        assert _recovery_line(tmp_path, capsys) == _MISSING_ROW
+        acknowledged = client.post(  # type: ignore[attr-defined]
+            "/live/recovery/acknowledge",
+            json={"note": "synthetic N3 cutover"},
+            headers={"X-Chronos-Token": token},
+        )
+        assert acknowledged.status_code == 200
+        assert _recovery_line(tmp_path, capsys) == _MISSING_ROW
+    with _boot_writer() as client:
+        assert client.app.state.backend.recovery_hold is None  # type: ignore[attr-defined]
+    assert _recovery_line(tmp_path, capsys) == _CLEAR
+
+
+def test_status_stays_unverified_after_an_unacknowledged_cutover_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The regression: without the note, the fresh store stays row-less across restarts."""
+
+    _synthetic_backend(monkeypatch, tmp_path)
+    with _boot_writer():
+        pass
+    (tmp_path / "chronos.db").rename(tmp_path / "chronos.db.archived-20261025T000000Z")
+    for _ in range(2):
+        with _boot_writer():
+            pass
+    assert _recovery_line(tmp_path, capsys) == _MISSING_ROW

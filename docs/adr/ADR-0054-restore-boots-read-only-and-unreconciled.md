@@ -146,3 +146,46 @@ its independence from the kill switch — each over the real app and its real li
 booted twice with state deleted in between. Migration 0012's adoption sentinel is
 covered in `tests/integration/test_migrations.py`, and the restore witness in
 `tests/integration/test_recovery_measurement.py`.
+
+## Amendment (PGAP-I, 2026-10-25): an acknowledged database_replaced boot adopts the marker's id
+
+**Why.** The N3 cutover (`docs/ops/N3-CUTOVER.md` step 3) moves `chronos.db` aside and
+keeps the marker, so the fresh keyed store boots `database_replaced`, and step 7 has the
+owner acknowledge that hold with a note. The acknowledgement retired the hold but nothing
+wrote the identity row. Every later boot re-derived the same hold and retired it again,
+and `campaign status` and `campaign preflight`, which read the two witnesses directly,
+reported the missing row as UNVERIFIED for good, so no shadow campaign could pass its
+preflight after the cutover (`out/PREFLIGHT-GAP-RECORD.md`; shape (i), admitted by Muse
+2026-10-25). It failed closed: no write, reconciliation or autonomy safety was lost.
+
+**The rule.** On a writer boot whose hold is `database_replaced`, when an acknowledgement
+for that **exact** observation exists and no restore witness (`recovery_pending.json`) is
+present, `evaluate_startup_recovery_hold` writes the identity row with the marker's id, in
+the same session as the evaluation. The operator's note is what makes the replacement an
+adoption: without it, a marker beside a row-less store still belongs to an installation the
+database never witnessed (the Decision's row 2). The next boot then finds the pair
+consistent, and the readers report `CLEAR` / `PASS`.
+
+**What still holds**, each pinned in `tests/safety/test_restore_recovery_hold.py`:
+
+1. A row bearing a real id is never rewritten.
+2. A present marker is never reseeded; the write only reads it.
+3. With no acknowledgement, a marker beside a row-less store still holds
+   `database_replaced` on every boot and writes nothing.
+4. `state_directory_lost`, `marker_unreadable`, `installation_mismatch` and
+   `restore_pending` write no row when acknowledged, and neither does a
+   `database_replaced` seen beside a restore witness: that replacement belongs to the
+   restore that left the witness.
+5. An acknowledgement for a different observation (another marker id or witness token)
+   does not seed.
+6. Only the lease-holding writer writes the row; a read-only backend never evaluates, and
+   `campaign status` / `campaign preflight` stay read-only.
+7. The acknowledgement still does not disengage the kill switch, arm, activate a mandate
+   or grant trading authority.
+
+No migration and no schema change: the table is migration 0012's. The acknowledgement
+endpoint's contract is unchanged; only what the next start does with the note changes.
+Verification: the command above, plus
+`tests/integration/test_campaign_preflight.py`, `tests/integration/test_campaign_status.py`
+and `tests/unit/test_ops_cutover_recovery_hold.py` (cutover, hold, note, restart, then
+`PASS [ADR-0054] state identity`).

@@ -474,8 +474,10 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `restore_pending`), another startup fault beside `recovery_unverified`, and no hold at all:
    `startup_faults: none` here means the marker was not where the backend looks, so the
    live-safety state this host ran with is missing. `python -m chronos.cli campaign status` and
-   `campaign preflight` cannot show this reason: they report the fresh store's missing
-   `installation_identity` row as UNVERIFIED, before and after the acknowledgement.
+   `campaign preflight` cannot show this reason: until the restart after your acknowledgement they
+   report the fresh store's missing `installation_identity` row as UNVERIFIED. That restart writes
+   the row from the marker's id (ADR-0054, amended 2026-10-25), and from then on both read the pair
+   as consistent: `recovery hold: CLEAR` and `PASS [ADR-0054] state identity`.
 
    **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
    database replacement. The same token file, never printed:
