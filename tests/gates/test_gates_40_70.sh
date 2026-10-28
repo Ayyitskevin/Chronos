@@ -521,6 +521,8 @@ check "iso:3 the README states the isolation rule" "grep -qF 'python3 -I -B' $G/
 # --- D-47(b): gate 40 derives the expected migration head from the candidate's chain, as DATA ---
 # The full variant table is tests/gates/test_gate40_migration_chain.sh; here: the wiring. The stub release-gate
 # fails like the real installed smoke when the trusted overlay's _MIGRATION_HEAD is not the chain's head.
+# The ast.py shadow is inert where it cannot write its marker: inside the sandbox <snap>/src is always on
+# PYTHONPATH (candidate code, by design), so only a host-side import can leave a marker.
 d47b_reset() { git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates; : > "$T/dl.log"; }
 d47b_cand() { d47b_reset; eval "$1"; commit "$R40"; g40 "$(git -C "$R40" rev-parse HEAD)"; }
 d47b_cand ':'
@@ -540,7 +542,7 @@ check "d47b:4 40 FAIL: a second head → the named [I4] FAIL" "failed evidence-a
 d47b_cand 'mkdir -p "$R40/gates/lib"; printf "print(\"0002\")\n" > "$R40/gates/lib/migration_chain.py"; mig40 0003 "\"0002\""'
 check "d47b:trust 40 a candidate gates/lib/migration_chain.py that prints a forged head never runs: the trusted copy beside gate 40 still FAILs [I8]" \
   "failed evidence-at-head 'migration chain \\[I8\\]'"
-printf 'import importlib as _i, os as _o, sys as _s\nopen("%s/ast", "a").write("ran\\n")\n_d = _o.path.dirname(_o.path.abspath(__file__))\n_s.modules.pop(__name__, None)\n_s.path[:] = [p for p in _s.path if _o.path.abspath(p or ".") != _d]\n_r = _i.import_module(__name__)\n_s.modules[__name__] = _r\nglobals().update(vars(_r))\n' "$MK" > "$T/ast-shadow.py"
+printf 'import importlib as _i, os as _o, sys as _s\ntry:\n    open("%s/ast", "a").write("ran\\n")\nexcept OSError:\n    pass\n_d = _o.path.dirname(_o.path.abspath(__file__))\n_s.modules.pop(__name__, None)\n_s.path[:] = [p for p in _s.path if _o.path.abspath(p or ".") != _d]\n_r = _i.import_module(__name__)\n_s.modules[__name__] = _r\nglobals().update(vars(_r))\n' "$MK" > "$T/ast-shadow.py"
 fresh_markers; (cd "$R40" && mkdir -p "$T/pp" && cp "$T/ast-shadow.py" "$T/pp/ast.py" && PYTHONPATH="$T/pp" python3 -c 'import ast; ast.parse("1")')
 check "d47b:iso positive control: the PYTHONPATH ast.py shadow runs under a plain python3 and still hands back the real ast" "[ -e $MK/ast ]"
 d47b_reset; mig40 0003 '"0002"'; lit40 CANDIDATE 0003; mkdir -p "$R40/src"; cp "$T/ast-shadow.py" "$R40/src/ast.py"; commit "$R40"; fresh_markers
