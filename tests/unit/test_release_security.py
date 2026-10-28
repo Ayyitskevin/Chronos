@@ -156,7 +156,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # api/autonomy_wiring.py source-inventory fingerprints (3); the QQQ readiness pins of the
     # pre-N3 position_admission.py bytes in the spec and the compiler, and the pre-re-pin readiness
     # digest (3); the two pre-N3 idempotency goldens (2).
-    assert len(historical_candidates) == 38
+    # 39 at KEYSRC (runtime.py: the persistence-key source check supersedes its fingerprint).
+    assert len(historical_candidates) == 39
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
