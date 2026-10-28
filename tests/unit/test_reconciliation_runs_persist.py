@@ -561,8 +561,51 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
             "except Exception as error:\n"
             '            return None, f"net liquidation unavailable: {error}"',
         ),
+        # D43-FIX3 (Kimi HOLD P2 @ ec32fc8): the whole consuming expression, not only the direct
+        # parent of the bound name, so arithmetic or a wrapper around the read is an edit of it
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.net_liquidation * 0, ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.net_liquidation + 1, ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return abs(account.net_liquidation), ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return round(account.net_liquidation), ""',
+        ),
+        (
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=_redacted(account),",
+        ),
+        (
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=account if evidence_provenance_is_current else None,",
+        ),
     ],
-    ids=["evidence-call", "evidence-use", "submission-use", "submission-handler"],
+    ids=[
+        "evidence-call",
+        "evidence-use",
+        "submission-use",
+        "submission-handler",
+        "submission-times-zero",
+        "submission-plus-one",
+        "submission-abs",
+        "submission-wrapped-call",
+        "evidence-wrapped-call",
+        "evidence-conditional",
+    ],
 )
 def test_3b3_the_read_scan_sees_an_edited_read(path: str, old: str, new: str) -> None:
     """Positive control: each edit of an AccountSummary read is seen by the scan test_3b runs."""
@@ -580,6 +623,21 @@ def test_3b4_the_read_scan_ignores_the_rest_of_the_module() -> None:
     old = "readiness_after = self._reconciliation_readiness.snapshot()\n"
     assert source.count(old) == 1
     edited = source.replace(old, old + "        unrelated_safety_check = True\n")
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
+
+
+def test_3b5_a_sibling_argument_of_the_read_s_consumer_stays_free() -> None:
+    """Negative control for FIX3's wider slice: it stops at the keyword the read binds into.
+
+    Another argument of the same ``RiskEvidence(...)`` call is not the read; D-53 keeps it free.
+    """
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "opening_orders_today=opening_today,"
+    assert source.count(old) == 1
+    edited = source.replace(old, "opening_orders_today=opening_today + 0,")
     assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
     assert _account_summary_reads(source) == _account_summary_reads(edited)
 
