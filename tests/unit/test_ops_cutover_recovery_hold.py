@@ -75,9 +75,10 @@ _HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api
 
 
 #: The guard every token-bearing curl wears (P1-1): a subshell that turns xtrace off before curl is
-#: expanded, and ``-q`` as curl's FIRST argument (curl ignores it anywhere else), so no ambient
-#: ``.curlrc`` can switch on ``verbose``/``trace``.
-_GUARD = "( set +x; curl -q "
+#: expanded, ``command`` so an alias or function named ``curl`` cannot interpose, and ``-q`` as
+#: curl's FIRST argument (curl ignores it anywhere else), so no ambient ``.curlrc`` can switch on
+#: ``verbose``/``trace``.
+_GUARD = "( set +x; command curl -q "
 _TOKEN_CURL_FLAGS_NEVER = (" -v", "--verbose", "--trace", "--config", " -K", " -x ")
 
 
@@ -89,7 +90,7 @@ def _curl_commands(text: str) -> list[str]:
         if info != "bash":
             continue
         for logical in re.sub(r"\\\n\s*", " ", body).splitlines():
-            if re.match(r"\s*(\(\s*(set \+x;\s*)?)?curl\b", logical):
+            if re.match(r"\s*(\(\s*(set \+x;\s*)?)?(command\s+)?curl\b", logical):
                 commands.append(logical)
     return commands
 
@@ -102,7 +103,7 @@ def _token_curl_guard_problems(text: str) -> list[str]:
         if "backend_api_token" not in command:
             continue
         if not command.startswith(_GUARD):
-            problems.append(f"no `( set +x; curl -q ` guard: {command[:70]}")
+            problems.append(f"no `( set +x; command curl -q ` guard: {command[:70]}")
         if not command.endswith(" )"):
             problems.append(f"the guard subshell is not closed on this command: {command[-30:]}")
         for flag in _TOKEN_CURL_FLAGS_NEVER:
@@ -148,14 +149,16 @@ _GATE: dict[str, tuple[str, ...]] = {
         "file and hands curl a header file through process substitution.",
         "That needs **bash or zsh** (dash and sh refuse it with a syntax error before curl runs) "
         "and **curl 7.55 or newer** (`-H @file`).",
-        "What the two token-bearing commands guarantee: the token is never in any process's argv "
+        "What the two token-bearing commands neutralise: the token is never in any process's argv "
         "(`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path); the subshell's `set +x` "
-        "keeps an xtrace you already have on from printing it; and `-q`, as curl's FIRST "
+        "keeps an xtrace you already have on from printing it; `command` keeps an alias or shell "
+        "function named `curl` (one that adds `-v`, say) from running; and `-q`, as curl's FIRST "
         "argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing it.",
-        "What they cannot guarantee: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to "
-        "either command and curl prints the token. Do not.",
+        "What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either "
+        "command and curl prints the token; so does another `curl` earlier in your `PATH` "
+        "(`command -v curl` names the one that runs). Do not.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
-        "( set +x; curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
+        "( set +x; command curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
         "http://127.0.0.1:<port>/autonomy/alerts )",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
         "prove it does not follow a restore (database_replaced)`:",
@@ -180,9 +183,8 @@ _GATE: dict[str, tuple[str, ...]] = {
         "**Then you acknowledge it: your act, with a typed note** saying this is the expected N3 "
         "database replacement.",
         "The same token file, in the same guarded form:",
-        "( set +x; curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \\ "
-        + _HEADER_FROM_FILE
-        + " \\ "
+        "( set +x; command curl -q -fsS -X POST "
+        "http://127.0.0.1:<port>/live/recovery/acknowledge \\ " + _HEADER_FROM_FILE + " \\ "
         "-H 'Content-Type: application/json' \\",
         'Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>",'
         '"effective":"next start"}`.',
@@ -334,14 +336,22 @@ def test_p11_negative_control_each_unguarded_form_is_caught() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
     assert _token_curl_guard_problems(runbook) == []
     mutants = {
-        "no -q": runbook.replace("( set +x; curl -q -sS", "( set +x; curl -sS"),
-        "-q not first": runbook.replace("( set +x; curl -q -sS", "( set +x; curl -sS -q"),
-        "no set +x": runbook.replace("( set +x; curl -q -fsS", "( curl -q -fsS"),
+        "no -q": runbook.replace("command curl -q -sS", "command curl -sS"),
+        "-q not first": runbook.replace("command curl -q -sS", "command curl -sS -q"),
+        "no set +x": runbook.replace("( set +x; command curl -q -fsS", "( command curl -q -fsS"),
+        "no command (alias/function can interpose), alerts": runbook.replace(
+            "( set +x; command curl -q -sS", "( set +x; curl -q -sS"
+        ),
+        "no command (alias/function can interpose), ack": runbook.replace(
+            "( set +x; command curl -q -fsS", "( set +x; curl -q -fsS"
+        ),
+        "command after -q": runbook.replace("command curl -q -sS", "curl -q command -sS"),
         "unclosed subshell": runbook.replace("/autonomy/alerts )", "/autonomy/alerts"),
         "-v": runbook.replace("curl -q -sS", "curl -q -v -sS"),
         "--trace-ascii": runbook.replace("curl -q -fsS", "curl -q --trace-ascii - -fsS"),
         "--config": runbook.replace("curl -q -fsS", "curl -q --config x -fsS"),
         "-K": runbook.replace("curl -q -sS", "curl -q -K x -sS"),
+        "6b8c755 text": runbook.replace("command curl", "curl"),
         "fed2d81 text": runbook.replace(_GUARD, "curl ").replace("alerts )", "alerts"),
     }
     for name, mutant in mutants.items():
@@ -358,7 +368,7 @@ def test_p11_the_runbook_no_longer_claims_nothing_prints_the_token() -> None:
     assert "never printed" not in step7
     assert "bash or zsh" in step7 and "curl 7.55 or newer" in step7
     # a runbook that goes back to the claim is caught by the gate text pin as well
-    wrong = runbook.replace("What they cannot guarantee", "Nothing prints it")
+    wrong = runbook.replace("What stays with you", "Nothing prints it")
     assert _gate_problems(_step7(wrong))
 
 
