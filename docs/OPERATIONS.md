@@ -249,7 +249,7 @@ three sources:
 | Cause | `/health` `observations.startup_faults` | Owner alert `kind` | Server log (`journalctl --user -u chronos-backend`) |
 |---|---|---|---|
 | mandate file missing, or present but invalid JSON/schema | none | `autonomy.mandate_invalid` (CRITICAL) | `Autonomy mandate file … does not exist` / `… does not validate; autonomy stays inert` |
-| mandate scoped to a different account | none | `autonomy.mandate_invalid` | `Persistent mandate is scoped to a different account; autonomy stays inert` |
+| mandate scoped to a different account, or authored under a different persistence key | none | `autonomy.mandate_invalid` | `Persistent mandate is scoped to a different account; autonomy stays inert (…: the mandate names another account, or it was authored under a different persistence key …)` |
 | mandate file unsafe: symlink, group/other-writable, foreign owner | `authority_file_unsafe` | `autonomy.mandate_unsafe` (CRITICAL) for the mandate | `An owner-authored grant is unsafe; autonomy stays inert: …` |
 | this mandate version was revoked | none | `autonomy.revoked_mandate_present` (WARNING) | none beyond the alert |
 | submitting-mode mandate on a static proposer posture | `autonomy_posture_unauthenticated` | `autonomy.posture_unauthenticated` | `A submitting mandate met a static proposer posture; autonomy stays inert …` |

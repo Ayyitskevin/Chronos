@@ -902,7 +902,14 @@ def build_autonomy_runtime(
         _alert_bad_mandate(runtime, fingerprint, now)
         return None
     if loaded.mandate.account_fingerprint != fingerprint:
-        _logger.error("Persistent mandate is scoped to a different account; autonomy stays inert")
+        # KEYSRC-FIX4 (R6): the fingerprint is keyed, so a different persistence key looks the same
+        # as a different account; name both (never the key). The prefix is quoted by the runbooks.
+        _logger.error(
+            "Persistent mandate is scoped to a different account; autonomy stays inert (its "
+            "account fingerprint does not match this install's: the mandate names another account, "
+            "or it was authored under a different persistence key than the one this process "
+            "resolved; re-author it under this install's key, never change the key to fit it)"
+        )
         _alert_bad_mandate(runtime, fingerprint, now)
         return None
     if submitting_posture_is_unauthenticated(settings, loaded.mandate):
