@@ -628,6 +628,11 @@ found the code contradicting its own published claims on both:
   headroom ceilings do not apply, because an account already over a ceiling has negative
   headroom and would be refused the very order that brings it back under. Such an order is
   bounded by the position actually held, and refused outright when that position is unknown.
+  *Measured 2026-10-28 (Kimi, D-17 review): production never knows it. `BackendGatherers.cycle_facts`
+  (`api/autonomy_wiring.py`) builds `AccountEvidence` from net liquidation, cash and buying power
+  only, so `position_quantity` is unset and every autonomous CLOSE or REDUCE is refused
+  `NO_EXECUTABLE_SIZE`. Pre-existing, not caused by D-17; exits are operator-managed until position
+  evidence is wired (D-54, not admitted).*
 
 Degraded state follows ADR-0016 §8 in both halves: no new exposure, but risk-reducing
 decisions may still proceed — unless the degradation is one that leaves position truth
@@ -644,7 +649,9 @@ It does **not** enforce, and these are open gaps rather than decisions:
   they always needed and what did not exist before.
 - **Sector, family, and correlated concentration** — *refused when set since D-17 (ii), 2026-10-28
   (D-52): a mandate that sets one authorizes no new exposure (`MANDATE_INERT_LIMIT_SET`), while
-  CLOSE, CANCEL and REDUCE are admitted exactly as before. Still never enforced.* ~~And the option-liquidity floors
+  CLOSE, CANCEL and REDUCE are admitted exactly as before: D-17 never refuses an exit, and it does
+  not make one executable (see the risk-reducing sizing item above: today an autonomous CLOSE or
+  REDUCE stops at sizing, D-54). Still never enforced.* ~~And the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
   does not gather.~~ *(Corrected by F7-A, 2026-09-27: both floors bind on the option-selection
   path. `supervisor/option_selection.py` filters on them, and `supervisor/loop.py` refuses a

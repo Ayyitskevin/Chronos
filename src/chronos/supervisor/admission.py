@@ -540,7 +540,9 @@ def _check_unenforceable_limits(
     ``EXPOSURE_CREATING_DECISION_KINDS`` (``autonomy/enums.py``) are refused.
     CLOSE and REDUCE (``RISK_REDUCING_DECISION_KINDS``) and CANCEL
     (``CONTEXT_DEPENDENT_DECISION_KINDS``) create no exposure and are admitted
-    exactly as before, so a limit the owner wrote can never trap an exit.
+    exactly as before, so D-17 never refuses an exit. Admitted is not executable:
+    production's fact gatherer supplies no held quantity, so an autonomous CLOSE
+    or REDUCE is still refused at sizing (pre-existing; wiring it is D-54).
     """
 
     set_limits = [

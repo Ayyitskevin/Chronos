@@ -559,6 +559,13 @@ def _review_refused_fields(mandate: AutonomyMandate) -> list[Finding]:
     that same code, BLOCKING, on the ``SUBMITTING_MODE_ON_STATIC_POSTURE``
     precedent (ADR-0051): a backend refusal the owner should meet here, not in
     the journal.
+
+    Unlike that finding it is deliberately NOT scoped to
+    ``SUBMITTING_AUTONOMY_MODES`` (reader P3-1, owner residual). In SHADOW the
+    mode check refuses first, so this refusal is never the one that fires; but a
+    shadow mandate is the one meant for promotion, and once promoted it would
+    open nothing, so shadow evidence gathered under it rehearses a mandate that
+    cannot trade. Resetting the field is the fix in every mode.
     """
 
     findings: list[Finding] = []
@@ -580,7 +587,9 @@ def _review_refused_fields(mandate: AutonomyMandate) -> list[Finding]:
                     f"{_attr_path(model_name)}.{field} = {_render_value(value)} is a limit "
                     "nothing can enforce, so admission refuses every decision that opens or "
                     "adds exposure under this mandate; risk-reducing decisions (CLOSE, "
-                    "REDUCE, CANCEL) are still admitted. Reset it to its default to trade",
+                    "REDUCE, CANCEL) are not refused by it, though an autonomous CLOSE or "
+                    "REDUCE cannot be sized until position evidence is gathered (D-54). "
+                    "Reset it to its default to trade",
                 )
             )
     return findings
