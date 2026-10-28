@@ -2546,3 +2546,39 @@ def test_fix4_p2_2_with_the_lease_kept_the_stop_records_its_row_after_the_in_fli
             stopper.join(2)
         consumer.stop(timeout=1)
         file_rig.database.dispose()
+
+
+def test_fix4_p2_1_the_next_held_event_is_counted_after_a_terminal_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counted flag belongs to ONE held event. Event 1 is dropped after its retries (the worker
+    counts it); event 2 is then held when a stop abandons the worker, and must still be counted.
+    A flag that outlived event 1 would make the stop skip event 2: an accepted event never counted.
+    """
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    monkeypatch.setattr(consumer_module, "_RETRY_BASE_SECONDS", 0)
+    entered, release = threading.Event(), threading.Event()
+    first, second = file_rig.foreign(1), file_rig.foreign(2)
+
+    def handle(event: StreamEvent) -> Any:
+        if event is first:
+            raise RuntimeError("synthetic failure")
+        entered.set()
+        assert release.wait(10)
+        return None
+
+    consumer.handle = handle  # type: ignore[method-assign]
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(first)
+        consumer.offer(second)
+        assert entered.wait(5)  # event 1 dropped by the worker, event 2 in hand
+        assert consumer.health().dropped == 1
+        assert consumer.stop(timeout=0.05) == 1
+        assert consumer.health().dropped == 2
+    finally:
+        release.set()
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
