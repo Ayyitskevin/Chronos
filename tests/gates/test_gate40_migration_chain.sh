@@ -365,9 +365,85 @@ hdr "a unary-operator stack bomb (60000 minus signs, under the cap) is refused" 
   "python3 -c 'print(\"x = \" + \"-\" * 60000 + \"1\")' >> $M/$V/0003_step.py"
 hdr "a syntax error is refused" '\[parse\] versions/0003_step.py cannot be parsed as data \(SyntaxError\)' \
   "printf 'def (\n' >> $M/$V/0003_step.py"
-case_ "d47b:module V4 a BOM-prefixed new revision is refused at parse (fails closed, as before the whitelist)" \
-  '\[parse\] versions/0003_step.py cannot be parsed as data \(SyntaxError\)' \
-  "mig 0003 '\"0002\"'; { printf '\\357\\273\\277'; cat $M/$V/0003_step.py; } > $T/bom.py; mv $T/bom.py $M/$V/0003_step.py; lit 0003"
+
+# --- [encoding]: the trusted step parses exactly the text the interpreter runs (D47B-FIX2, reader F1) -------
+# CPython decodes a source file with its BOM or PEP 263 coding cookie, so a parse of the same bytes as plain
+# UTF-8 can see a different program: under `# coding: utf-7`, `+AAo-` is a newline to the interpreter and
+# comment text to a UTF-8 reader, so a header rebinding or a call hides inside a "comment". The trusted step
+# refuses any file the interpreter would not read as plain UTF-8 (a BOM, a non-utf-8 cookie, an undecidable
+# encoding) and any coding cookie at all; every variant's payload is shown live by the interpreter's own parse.
+cat > "$T/enc.py" <<'EOF'
+import sys
+path, kind, arg = sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
+data = open(path, "rb").read()
+def hide(code):  # ASCII "comment" text that a utf-7 decoder reads as: newline, `code`, newline
+    return b"# x +AAo-" + code.encode() + b"+AAo-\n"
+if kind == "utf7":       # cookie on line 1, `arg` hidden at the end
+    data = b"# coding: utf-7\n" + data + hide(arg)
+elif kind == "cr-utf7":  # the cookie after a lone CR on line 1, `arg` hidden at the end
+    data = b"# note\r# coding: utf-7\n" + data + hide(arg)
+elif kind == "line1":    # `arg` as line 1
+    data = arg.encode() + b"\n" + data
+elif kind == "line2":    # `arg` as line 2, after a comment line
+    data = b"# synthetic\n" + arg.encode() + b"\n" + data
+elif kind == "bom":
+    data = b"\xef\xbb\xbf" + data
+elif kind == "utf16":    # the whole file re-encoded as UTF-16 (with its BOM), its cookie saying so
+    data = ("# coding: utf-16\n" + data.decode()).encode("utf-16")
+open(path, "wb").write(data)
+EOF
+enc() { python3 -I "$T/enc.py" "$@"; }
+seen() {  # seen <file> <name>: how many module-level stores of <name> the INTERPRETER's own parse (of the bytes) sees
+  python3 -I -c 'import ast, sys; t = ast.parse(open(sys.argv[1], "rb").read()); print(sum(1 for n in t.body if isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n.targets[0] if isinstance(n, ast.Assign) else n.target, "id", None) == sys.argv[2]))' "$1" "$2"
+}
+E3='\[encoding\] versions/0003_step.py'
+DEC='the interpreter would decode it as'
+UND='the interpreter cannot determine its encoding \(SyntaxError\)'
+COOK='a coding cookie is not allowed'
+case_ "d47b:encoding F1 a utf-7 cookie hiding down_revision rebindings (runtime fork at 0001, merge at 0004: the reader's probe) is refused" \
+  "$E3: $DEC utf-7" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py utf7 'down_revision = \"0001\"'; mig 0004 '\"0003\"'; enc $M/$V/0004_step.py utf7 'down_revision = (\"0002\", \"0003\")'; lit 0004"
+check "d47b:encoding F1 ...positive control: the interpreter's parse of 0003's bytes sees TWO down_revision stores (the payload is live)" \
+  "[ \"\$(seen $M/$V/0003_step.py down_revision)\" = 2 ]"
+mark7=$T/utf7-ran
+case_ "d47b:encoding F1 a utf-7 cookie hiding a module-level call is refused ..." "$E3: $DEC utf-7" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py utf7 'open(\"$mark7\", \"w\").write(\"ran\")'; lit 0003"
+check "d47b:encoding F1 ...and the trusted step never ran it (no marker)" "[ ! -e $mark7 ]"
+(cd "$T" && python3 -I -B "$M/$V/0003_step.py")
+check "d47b:encoding F1 ...positive control: the interpreter running that file executes the hidden call (marker written)" "[ -e $mark7 ]"
+case_ "d47b:encoding a utf-7 cookie after a lone CR on line 1 is refused" "$E3: $DEC utf-7" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py cr-utf7 'down_revision = \"0001\"'; lit 0003"
+case_ "d47b:encoding a latin-1 cookie on an otherwise honest ASCII revision is refused" "$E3: $DEC iso-8859-1" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# -*- coding: latin-1 -*-'; lit 0003"
+case_ "d47b:encoding a utf-16 cookie on ASCII text is refused" "$E3: $UND" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# coding: utf-16'; lit 0003"
+case_ "d47b:encoding a revision encoded as UTF-16 with its BOM is refused" "$E3: $UND" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py utf16; lit 0003"
+case_ "d47b:module V4 a UTF-8 BOM (the interpreter decodes utf-8-sig) is refused by name" "$E3: $DEC utf-8-sig" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py bom; lit 0003"
+case_ "d47b:encoding an undecidable cookie (BOM plus latin-1) is refused" "$E3: $UND" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# coding: latin-1'; enc $M/$V/0003_step.py bom; lit 0003"
+case_ "d47b:encoding a utf-8 cookie spelled UTF8 is refused (the interpreter reports UTF8, not utf-8)" "$E3: $DEC UTF8" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# coding: UTF8'; lit 0003"
+case_ "d47b:encoding an honest utf-8 cookie on line 1 is refused: no cookie at all (plain UTF-8 is the default)" "$E3: $COOK" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# -*- coding: utf-8 -*-'; lit 0003"
+case_ "d47b:encoding a utf-8 cookie on line 2 (vim fileencoding=) is refused" "$E3: $COOK" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line2 '# vim: set fileencoding=utf-8 :'; lit 0003"
+case_ "d47b:encoding positive control: non-ASCII UTF-8 text (as main's files carry) passes" PASS:0003 \
+  "mig 0003 '\"0002\"'; sed -i '1s/Synthetic revision/Synthetic — naïve revision/' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:encoding positive control: a coding comment past line 2 is not a cookie to the interpreter and passes" PASS:0003 \
+  "mig 0003 '\"0002\"'; printf '# coding: latin-1\n' >> $M/$V/0003_step.py; lit 0003"
+case_ "d47b:encoding the candidate's release script under a utf-7 cookie hiding a second _MIGRATION_HEAD is refused ..." \
+  "\\[encoding\\] scripts/verify_release_artifact.py: $DEC utf-7" \
+  "mig 0003 '\"0002\"'; lit 0003; enc $M/$S utf7 '_MIGRATION_HEAD = \"0002\"'"
+check "d47b:encoding ...positive control: the interpreter's parse of that script sees TWO _MIGRATION_HEAD stores" "[ \"\$(seen $M/$S _MIGRATION_HEAD)\" = 2 ]"
+case_ "d47b:encoding the candidate's release script with a utf-8 cookie is refused" "\\[encoding\\] scripts/verify_release_artifact.py: $COOK" \
+  "mig 0003 '\"0002\"'; lit 0003; enc $M/$S line1 '# coding: utf-8'"
+cp "$T/overlay.orig" "$T/overlay.main"; enc "$T/overlay.orig" utf7 '_MIGRATION_HEAD: Final[str] = "0001"'
+fresh; mig 0003 '"0002"'; lit 0003; commit cand; run_chain
+check "d47b:encoding a trusted overlay under a utf-7 cookie FAILs as a trusted-base defect" \
+  "refused '\\[encoding\\] scripts/verify_release_artifact.py: $DEC utf-7; only plain UTF-8 is read \\(trusted base: a trusted-base defect; fix main first\\)'"
+cp "$T/overlay.main" "$T/overlay.orig"
 
 # --- I8: the candidate's own literal agrees with its chain (what CI checks) --------------------------
 case_ "d47b:I8 appending 0003 but leaving the candidate's literal at 0002 is refused" "\\[I8\\] the candidate.s _MIGRATION_HEAD is 0002, its chain.s head is 0003" \
