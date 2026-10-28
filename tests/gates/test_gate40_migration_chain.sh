@@ -215,6 +215,10 @@ case_ "d47b:module \`from __future__ import annotations\` after another import i
   "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/import os\\nfrom __future__ import annotations/' $M/$V/0003_step.py; lit 0003"
 case_ "d47b:module a first __future__ import naming more than annotations is refused" "$FUT" \
   "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/from __future__ import annotations, generator_stop/' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module a first import of \`annotations\` from another module is not the future import (annotations would run)" "$FUT" \
+  "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/from typing import annotations/' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module a relative \`from .__future__ import annotations\` is not the future import" "$FUT" \
+  "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/from .__future__ import annotations/' $M/$V/0003_step.py; lit 0003"
 case_ "d47b:module a second __future__ import is refused" "$M3 line 13: a second \`from __future__\` import is not allowed" \
   "mig 0003 '\"0002\"'; printf 'from __future__ import annotations\n' >> $M/$V/0003_step.py; lit 0003"
 case_ "d47b:module a revision without a docstring (the future import first) passes" PASS:0003 \
