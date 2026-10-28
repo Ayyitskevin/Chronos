@@ -229,12 +229,17 @@ def test_a_malformed_status_figure_quarantines_that_row_and_only_that_row(
     assert generation_after == generation
 
 
-def test_one_poisoned_status_cache_entry_no_longer_locks_every_snapshot(
+def test_one_poisoned_status_cache_entry_is_named_and_contained_until_corrected(
     gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Threat map row 8: ONE unsolicited orderStatus with filled=nan for a foreign order is cached;
     # every later open_orders() read it and raised until reconnect. The snapshot below does not
     # re-send that order's status, so the poisoned cache entry is what the adapter reads.
+    # D43-FIX4 (reader F3): what changed is NAMED and CONTAINED, not liveness. The entry is
+    # replaced only by a corrected orderStatus for that order (callbacks.py on_order_status) or
+    # cleared by reset_for_reconnect; until then every read quarantines that row and
+    # reconciliation stays PENDING, the same duration as before. The heal below is the venue's
+    # corrected status, not anything Chronos does on its own.
     def drop_foreign_status(name: str, args: tuple[Any, ...]) -> list[tuple[str, tuple]]:
         if name == "orderStatus" and args[0] == fake_ibapi.FOREIGN_ID:
             return []
