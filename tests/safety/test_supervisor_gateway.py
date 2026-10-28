@@ -1311,6 +1311,23 @@ def test_d17_no_protection_request_is_admitted_exactly_as_today() -> None:
     assert admit(explicit, _mandate(), _state()) == today
 
 
+@pytest.mark.parametrize("request_", sorted(_PROTECTION_REQUESTS))
+def test_d17_a_hold_carrying_a_protection_request_stays_not_executable(request_: str) -> None:
+    """Reader P3-2: HOLD is refused NOT_EXECUTABLE (check 10) before (iii) is consulted.
+
+    The contract has no validator against HOLD + a protection request, so the case
+    is constructible. A HOLD compiles nothing either way; this keeps the journalled
+    code the one HOLD has always had.
+    """
+
+    hold = _decision(
+        kind=DecisionKind.HOLD, requested_strategy=None, **_PROTECTION_REQUESTS[request_]
+    )
+    outcome = admit(hold, _mandate(), _state())
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.NOT_EXECUTABLE
+
+
 def test_d17_the_protection_refusal_keeps_the_alerting_precedence() -> None:
     outcome = admit(
         _decision(protective_order_required=True),
