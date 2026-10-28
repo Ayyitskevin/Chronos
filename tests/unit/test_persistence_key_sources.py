@@ -525,11 +525,15 @@ def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_u
     assert _leaks(finding.text, _key("bound"), _key("other")) == []
 
 
-# --- 6. KEYSRC-FIX1: the count and the honoured key are ONE snapshot (Kimi HOLD P1 @ cf702bf) ---
-# Kimi's probe: each root counted by re-opening the dotenv path apart from the loader's own read,
-# so a file (or environment) changed between the two reads let the loader honour a source the
-# count never saw. Each case below changes the source ONLY inside the loader's call, in the shapes
-# Kimi reproduced; every one must refuse at both roots, naming no key material.
+# --- 6. KEYSRC-FIX1/FIX2: the key the process USES is the counted snapshot's (Kimi HOLDs) -------
+# FIX1 (Kimi P1 @ cf702bf): each root counted by re-opening the dotenv path apart from the loader,
+# so a source changed between the two reads was honoured but never counted. FIX2 (Kimi P1 @
+# 3a040e8): comparing the loader's VALUE to the snapshot's still let a same-value environment
+# binding that appeared after the snapshot be honoured uncounted. The shape now: the key is
+# resolved FROM the counted snapshot (one environment copy, one read per dotenv) and the roots
+# never consult the loader's copy, so no later read can change the key in use. Each case changes a
+# source ONLY around the loader's call; the root must start under the COUNTED key ("a") or, when
+# the snapshot counted nothing, refuse as absent. Never "b", never a key the count did not see.
 
 
 def _loading(change: Any) -> Any:
@@ -539,98 +543,172 @@ def _loading(change: Any) -> Any:
 
     def loader() -> Settings:
         if "settings" not in state:
-            state["settings"] = change(Settings)
+            state["settings"] = change(state["load"])
         return state["settings"]
 
     loader.calls = state  # type: ignore[attr-defined]
     return loader
 
 
-def _swap_cases(path: Path) -> dict[str, tuple[Any, Any]]:
-    """case -> (setup, change): setup prepares what the count can see; change wraps the load."""
+def _swap_cases(path: Path) -> dict[str, tuple[Any, Any, str]]:
+    """case -> (setup, change, expected). ``setup(load)`` prepares what the snapshot can see and
+    may return a settings object loaded now (a cache); ``change(load, cached)`` wraps the load."""
 
     a, b = _key("swap-a"), _key("swap-b")
     one, two = f"{_NAME}={a}\n", f"{_NAME}={a}\n{_NAME}={b}\n"
 
-    def file_one() -> None:
+    def file_one(load: Any) -> None:
         path.write_text(one, encoding="utf-8")
 
-    def two_then_back(load: Any) -> Settings:  # Kimi's runtime shape: loader 2, counter 1
+    def two_then_back(load: Any, cached: Any) -> Settings:  # Kimi FIX1 runtime shape
         path.write_text(two, encoding="utf-8")
         settings = load()
         path.write_text(one, encoding="utf-8")
         return settings
 
-    def two_and_stay(load: Any) -> Settings:  # Kimi's mandate shape: counter 1, loader 2
+    def two_and_stay(load: Any, cached: Any) -> Settings:  # Kimi FIX1 mandate shape
         path.write_text(two, encoding="utf-8")
         return load()
 
-    def no_file() -> None:
+    def same_value_second_line(load: Any, cached: Any) -> Settings:  # same-value file swap
+        path.write_text(f"{_NAME}={a}\n{_NAME}={a}\n", encoding="utf-8")
+        return load()
+
+    def no_file(load: Any) -> None:
         path.unlink(missing_ok=True)
 
-    def appears_for_the_load(load: Any) -> Settings:  # counted none, honoured one
+    def appears_for_the_load(load: Any, cached: Any) -> Settings:  # counted none, honoured one
         path.write_text(two, encoding="utf-8")
         settings = load()
         path.unlink()
         return settings
 
-    def environment_a() -> None:
-        path.write_text("OTHER=1\n", encoding="utf-8")
-        os.environ[_NAME] = a
+    def environment_value(value: str, *, then_back: bool) -> Any:
+        def change(load: Any, cached: Any) -> Settings:
+            os.environ[_NAME] = value
+            settings = load()
+            if then_back:
+                del os.environ[_NAME]
+            return settings
 
-    def environment_b_then_back(load: Any) -> Settings:
-        os.environ[_NAME] = b
-        settings = load()
-        os.environ[_NAME] = a
-        return settings
+        return change
 
-    def environment_b_and_stay(load: Any) -> Settings:
-        os.environ[_NAME] = b
-        return load()
+    def cached_from_environment(value: str) -> Any:
+        def setup(load: Any) -> Settings:  # get_settings() ran earlier, under another source
+            os.environ[_NAME] = value
+            settings = load()
+            del os.environ[_NAME]
+            path.write_text(one, encoding="utf-8")
+            return settings
+
+        return setup
+
+    def cached(load: Any, cached: Any) -> Settings:
+        return cached
 
     return {
-        "file: two lines for the loader, one again for the count": (file_one, two_then_back),
-        "file: one line for the count, two for the loader": (file_one, two_and_stay),
-        "file: none for the count, two for the loader": (no_file, appears_for_the_load),
-        "environment: changed for the loader, then back": (environment_a, environment_b_then_back),
-        "environment: changed for the loader and left": (environment_a, environment_b_and_stay),
+        "file: two lines for the loader, one again for the count": (file_one, two_then_back, "a"),
+        "file: one line for the count, two for the loader": (file_one, two_and_stay, "a"),
+        "file: the same value on a second line for the loader": (
+            file_one,
+            same_value_second_line,
+            "a",
+        ),
+        "file: none for the count, two for the loader": (no_file, appears_for_the_load, "absent"),
+        "environment: the same value appears for the loader (Kimi FIX2)": (
+            file_one,
+            environment_value(a, then_back=False),
+            "a",
+        ),
+        "environment: another value appears for the loader, then goes": (
+            file_one,
+            environment_value(b, then_back=True),
+            "a",
+        ),
+        "environment: another value appears for the loader and stays": (
+            file_one,
+            environment_value(b, then_back=False),
+            "a",
+        ),
+        "cached: settings loaded earlier under another value": (
+            cached_from_environment(b),
+            cached,
+            "a",
+        ),
+        "cached: settings loaded earlier under the same value": (
+            cached_from_environment(a),
+            cached,
+            "a",
+        ),
     }
 
 
 _SWAPS = list(_swap_cases(Path("unused")))
 
 
-def _run_root(
-    root: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], loader: Any
-) -> tuple[str, str]:
-    """('refused' | 'created' | 'other', the text the root emitted)."""
+def _store(tmp_path: Path) -> Path:
+    store = tmp_path / "store"
+    store.mkdir(exist_ok=True)
+    return store
 
+
+def _store_settings(tmp_path: Path) -> Any:
+    """The loader's own load (environment + the dotenv), with the store under ``tmp_path``."""
+
+    store = _store(tmp_path)
+    return lambda: Settings.model_validate(
+        {"database_url": f"sqlite:///{store / 'chronos.db'}", "log_file": store / "chronos.log"}
+    )
+
+
+def _run_root(
+    root: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    loader: Any,
+) -> tuple[str, str]:
+    """(the key the root USED: 'a' | 'b' | 'other' | 'absent' | 'refused', the text it emitted).
+
+    build_runtime runs to the end on a temporary demo store; the key it used is read back from
+    the stored scope fingerprint (the keyed HMAC, computed independently by the N3 test). The
+    mandate CLI's key is read from the fingerprint it prints. Labels only: no value is shown.
+    """
+
+    from tests.integration.test_persistence_key_n3 import _keyed, _stored_scope
+
+    from chronos.broker.demo import DEMO_ACCOUNT_ID
+
+    a, b = _key("swap-a"), _key("swap-b")
+    store = _store(tmp_path)
+    loader.calls.setdefault("load", _store_settings(tmp_path))
     if root == "build_runtime":
         monkeypatch.setattr(runtime_module, "get_settings", loader)
         monkeypatch.setattr(runtime_module, "configure_logging", lambda *a, **k: None)
-
-        def stop(*args: object, **kwargs: object) -> None:
-            raise _Stop
-
-        monkeypatch.setattr(runtime_module, "Database", stop)
         try:
-            runtime_module.build_runtime(register_atexit=False)
+            runtime_module.build_runtime(register_atexit=False).close()
         except PersistenceKeyError as refusal:
-            return "refused", str(refusal)
-        except _Stop:
-            return "created", ""
-        return "other", ""
+            text = str(refusal)
+            return ("absent" if "is not set" in text else "refused"), text
+        stored = _stored_scope(store)[2]
+        used = {_keyed(a, DEMO_ACCOUNT_ID): "a", _keyed(b, DEMO_ACCOUNT_ID): "b"}
+        return used.get(stored, "other"), ""
     monkeypatch.setattr("chronos.config.settings.get_settings", loader)
     code = main(["mandate", "fingerprint", "--account-id", _ACCOUNT])
     captured = capsys.readouterr()
+    text = captured.out + captured.err
     if code == 1 and "persistence key refused:" in captured.err:
-        return "refused", captured.err
-    return ("created" if code == 0 else "other"), captured.out + captured.err
+        return "refused", text
+    if code == 1 and captured.out.startswith("no persistence key available"):
+        return "absent", text
+    printed = captured.out.splitlines()[0] if code == 0 and captured.out else ""
+    used = {_keyed(a, _ACCOUNT): "a", _keyed(b, _ACCOUNT): "b"}
+    return used.get(printed, "other"), text
 
 
 @pytest.mark.parametrize("root", ["build_runtime", "mandate"])
 @pytest.mark.parametrize("case", _SWAPS)
-def test_fix1_a_source_changed_around_the_load_refuses_at_both_roots(
+def test_fix2_a_source_changed_around_the_load_never_changes_the_key_in_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -639,13 +717,18 @@ def test_fix1_a_source_changed_around_the_load_refuses_at_both_roots(
 ) -> None:
     path = tmp_path / "dotenv.synthetic"
     monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(_NAME)  # the conftest key; monkeypatch restores it, whatever a case sets
-    setup, change = _swap_cases(path)[case]
-    setup()
+    setup, change, expected = _swap_cases(path)[case]
+    loader = _loading(lambda load: change(load, loader.calls.get("cached")))
+    loader.calls["load"] = _store_settings(tmp_path)
+    cached = setup(loader.calls["load"])
+    if cached is not None:
+        loader.calls["cached"] = cached
 
-    outcome, text = _run_root(root, monkeypatch, capsys, _loading(change))
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, loader)
 
-    assert outcome == "refused", case
+    assert outcome == expected, case
     assert _leaks(text, _key("swap-a"), _key("swap-b"), path=path) == []
 
 
@@ -653,16 +736,17 @@ def test_fix1_a_source_changed_around_the_load_refuses_at_both_roots(
 def test_fix1_the_same_harness_starts_on_one_stable_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], root: str
 ) -> None:
-    """The positive control: the harness above refuses only because the source moved."""
+    """The positive control: one source, nothing moves, the counted key ("a") is used."""
 
-    path = _dotenv(tmp_path, f"{_NAME}={_key('stable')}")
+    path = _dotenv(tmp_path, f"{_NAME}={_key('swap-a')}")
     monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(_NAME)
 
-    outcome, text = _run_root(root, monkeypatch, capsys, _loading(lambda load: load()))
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, _loading(lambda load: load()))
 
-    assert outcome == "created"
-    assert _leaks(text, _key("stable"), path=path) == []
+    assert outcome == "a"
+    assert _leaks(text, _key("swap-a"), path=path) == []
 
 
 @pytest.mark.parametrize("root", ["build_runtime", "mandate"])
@@ -673,38 +757,61 @@ def test_fix1_both_roots_count_before_the_loader_runs(
 
     path = _dotenv(tmp_path, f"{_NAME}={_key('order-file')}")
     monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(_NAME, _key("order-env"))
     loader = _loading(lambda load: load())
 
-    outcome, _ = _run_root(root, monkeypatch, capsys, loader)
+    outcome, _ = _run_root(root, tmp_path, monkeypatch, capsys, loader)
 
     assert outcome == "refused"
-    assert loader.calls == {}  # type: ignore[attr-defined]
+    assert set(loader.calls) == {"load"}  # the stand-in was armed, never called
 
 
-def test_fix1_both_roots_resolve_through_the_one_shared_snapshot() -> None:
-    """Static: each root takes the snapshot and resolves through it; neither counts or resolves
-    any other way (a second reader is how the two snapshots came apart)."""
-
+def _calls_in_source_order(function: Any) -> list[tuple[str, int]]:
     import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(function).strip())
+    calls = sorted(
+        (
+            node.lineno,
+            node.col_offset,
+            getattr(node.func, "attr", getattr(node.func, "id", "")),
+            len(node.args) + len(node.keywords),
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    )
+    return [(name, arity) for _, _, name, arity in calls]
+
+
+def test_fix2_the_roots_take_the_key_from_the_counted_snapshot_only() -> None:
+    """Static: each root takes the snapshot once and resolves the key from it with no argument
+    (no settings object), before any loader call; neither root nor the snapshot's resolver names
+    the settings' key field, reads the environment or opens a file for the key."""
+
     import inspect
 
     from chronos.cli import mandate_check
 
     for function in (runtime_module.build_runtime, mandate_check._resolve_persistence_key):
-        tree = ast.parse(inspect.getsource(function).strip())
-        calls = sorted(
-            (node.lineno, node.col_offset, getattr(node.func, "attr", getattr(node.func, "id", "")))
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-        )
-        called = [name for _, _, name in calls]  # in source order
         name = function.__name__
-        assert called.count("take_persistence_key_snapshot") == 1, name
-        assert called.count("resolve") == 1, name
-        assert "persistence_key_source" not in called, name
-        assert "resolve_persistence_key" not in called, name
-        assert called.index("take_persistence_key_snapshot") < called.index("get_settings"), name
+        calls = _calls_in_source_order(function)
+        names = [called for called, _ in calls]
+        assert names.count("take_persistence_key_snapshot") == 1, name
+        assert [arity for called, arity in calls if called == "resolve"] == [0], name
+        assert "persistence_key_source" not in names, name
+        assert "resolve_persistence_key" not in names, name
+        if "get_settings" in names:
+            assert names.index("take_persistence_key_snapshot") < names.index("get_settings"), name
+            assert names.index("resolve") < names.index("get_settings"), name
+        source = inspect.getsource(function)
+        for forbidden in ("chronos_persistence_key", "environ", "getenv", "dotenv"):
+            assert forbidden not in source, (name, forbidden)
+    resolver = inspect.getsource(pk.PersistenceKeySnapshot)
+    for forbidden in ("environ", "getenv", "read_text", "open(", "Settings", "_read_dotenv"):
+        assert forbidden not in resolver, forbidden
+    assert list(inspect.signature(pk.PersistenceKeySnapshot.resolve).parameters) == ["self"]
 
 
 @pytest.mark.parametrize("root", ["build_runtime", "mandate"])
@@ -717,14 +824,14 @@ def test_fix1_the_snapshot_reads_each_dotenv_once_for_the_count_and_the_key(
     what: str,
 ) -> None:
     """A second read inside the snapshot is a second snapshot. The file changes right after the
-    first read to one line naming the key the loader will then honour, so a count (two lines
-    first) or a key (``a`` first) taken from another read would agree with the loader and
-    start. One read refuses: two lines counted, or ``a`` read where the loader honoured ``b``."""
+    first read to one line naming ``b``, so a count (two lines first) or a key (``a`` first)
+    taken from another read would see ``b``. One read refuses the two lines, or uses ``a``."""
 
-    a, b = _key("once-a"), _key("once-b")
+    a, b = _key("swap-a"), _key("swap-b")
     first = [f"{_NAME}={a}", f"{_NAME}={b}"] if what == "count" else [f"{_NAME}={a}"]
     path = _dotenv(tmp_path, *first)
     monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(_NAME)
     real = pk._read_dotenv
     reads: list[Path] = []
@@ -736,9 +843,10 @@ def test_fix1_the_snapshot_reads_each_dotenv_once_for_the_count_and_the_key(
         return text
 
     monkeypatch.setattr(pk, "_read_dotenv", read_then_change)
-    outcome, text = _run_root(root, monkeypatch, capsys, _loading(lambda load: load()))
+    outcome, text = _run_root(root, tmp_path, monkeypatch, capsys, _loading(lambda load: load()))
 
-    assert outcome == "refused"
-    assert ("named 2 times" if what == "count" else "changed while Chronos read it") in text
+    assert outcome == ("refused" if what == "count" else "a")
+    if what == "count":
+        assert "named 2 times" in text
     assert reads == [path]
     assert _leaks(text, a, b, path=path) == []
