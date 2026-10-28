@@ -910,6 +910,21 @@ def test_a_venue_rejection_persists_rejected_and_leaves_no_working_order(venue: 
         assert h.service.reconcile_on_restart_report(now=h.now).remaining_active == ()
 
 
+def test_d43_fix4_an_unknown_ack_outcome_says_reconcile_before_resubmitting(
+    venue: _Venue,
+) -> None:
+    # D43-FIX4 (reader F4): the boundary's outcome detail for a SUBMISSION_UNKNOWN ack named what
+    # was persisted and not what to do. The order may be live at the venue.
+    with harness(venue, plans={_ref("A"): FillPlan(ambiguous=True)}, silent_refs=(_ref("A"),)) as h:
+        intent = h.buy(ref=_ref("A"), intent_id="intent-1")
+        h.confirm(intent)
+        outcome = h.submit(intent)
+        assert outcome.submission is not None
+        assert outcome.submission.lifecycle is OrderLifecycle.SUBMISSION_UNKNOWN
+        assert "reconcile before resubmitting" in outcome.detail
+        assert h.account not in outcome.detail
+
+
 def test_an_ambiguous_send_persists_submission_unknown_then_recovers_without_resending(
     venue: _Venue,
 ) -> None:

@@ -807,3 +807,57 @@ def test_fix4_the_evidence_refuses_when_only_a_later_row_of_the_book_is_quaranti
     assert evidence.reconciliation_status is ReconciliationStatus.PENDING
     assert evidence.reconciliation_generation is None
     assert (after.ready, after.reason) == (True, "synthetic prior parity proof")  # nothing demoted
+
+
+# --- D43-FIX4 (reader F4): each operator notice says what to do next, never a raw account id ---
+
+ACK_NEXT = "reconcile before resubmitting"
+LOCKED_NEXT = "check the order in TWS"
+
+
+def test_fix4_a_malformed_submit_ack_says_reconcile_before_resubmitting(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The order WAS sent; the operator must not simply resubmit."""
+
+    submission, _broker, _readiness = _submit(gateway, monkeypatch, float("nan"), 1.0)
+    assert submission.lifecycle is UNKNOWN
+    assert ACK_NEXT in submission.message
+    assert fake_ibapi.ACCOUNT not in submission.message
+
+
+def test_fix4_the_reconciler_reason_says_what_clears_it_and_what_to_check(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wrap(
+        monkeypatch,
+        gateway,
+        "open_orders",
+        _poison_status(fake_ibapi.OWNED_ID, "filled", float("nan")),
+    )
+    with _session() as (_broker, manager, _readiness):
+        result = _reconcile(manager)
+    named = [reason for reason in result.reasons if str(fake_ibapi.OWNED_ID) in reason]
+    assert named, result.reasons
+    assert LOCKED_NEXT in named[0]
+    assert "corrected status" in named[0]
+    assert fake_ibapi.ACCOUNT not in " ".join(result.reasons)
+
+
+def test_fix4_the_restart_reason_says_what_to_check(rig: Rig) -> None:
+    rig.venue.open = [_quarantined()]
+    report = rig.reconcile()
+    reasons = [reason for reason in issues(report) if CAUSE in reason]
+    assert reasons, issues(report)
+    assert LOCKED_NEXT in reasons[0]
+    assert rig.account not in " ".join(issues(report))
+
+
+def test_fix4_the_settle_reason_says_what_to_check(rig: Rig) -> None:
+    rig.pending()
+    rig.venue.open = [_quarantined()]
+    report = rig.reconcile()
+    reasons = [reason for reason in issues(report) if CAUSE in reason]
+    assert reasons, issues(report)
+    assert LOCKED_NEXT in reasons[0]
+    assert rig.account not in " ".join(issues(report))
