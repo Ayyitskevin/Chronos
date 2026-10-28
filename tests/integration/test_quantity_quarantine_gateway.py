@@ -212,6 +212,16 @@ def test_a_malformed_status_figure_quarantines_that_row_and_only_that_row(
     assert (foreign.filled_quantity, foreign.remaining_quantity) == (Decimal("0"), Decimal("1"))
     # the operator can see which order, and no exception reached the connection manager
     assert any(str(fake_ibapi.OWNED_ID) in note for note in _notices(broker, "[order-quantity]"))
+    # a value float() cannot read is NaN to the check; the EWrapper's own notice keeps that it was
+    # unreadable (the type only, never the raw text)
+    unreadable = [note for note in _notices(broker, "[order-quantity]") if "unreadable" in note]
+    if isinstance(value, str) or (isinstance(value, Decimal) and value.is_snan()):
+        assert unreadable == [
+            f"[order-quantity] orderStatus for order {fake_ibapi.OWNED_ID} carried an unreadable "
+            f"{side} figure ({type(value).__name__})"
+        ]
+    else:
+        assert unreadable == []
     assert MANAGER_FAILURE not in readiness.reasons
     assert generation_after == generation
 
