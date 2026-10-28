@@ -43,6 +43,7 @@ from chronos.autonomy import (
     OrderForm,
     PromotionLevel,
     ProposedDecision,
+    SessionPolicy,
     StrategyForm,
     TradableAssetClass,
     VersionPins,
@@ -921,3 +922,70 @@ def test_the_cycle_row_and_the_admission_row_agree_on_the_posture(session: Sessi
     cycle_block = _latest_posture("autonomy.cycles")
     assert cycle_block == _latest_posture(durable.DECISION_STREAM)
     assert cycle_block["identity"] == "authenticated"
+
+
+# ---------------------------------------------- D-17: refusals reach the journal
+
+
+def _journal(session: Session) -> list[dict[str, Any]]:
+    stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
+    rows = session.query(HashChainRow).filter(HashChainRow.stream == stream).all()
+    return [json.loads(row.payload_json) for row in rows]
+
+
+def test_d17_a_set_unenforceable_limit_is_refused_in_the_cycle_and_journalled(
+    session: Session,
+) -> None:
+    """D-17 (ii) end to end: the typed code reaches the cycle outcome and the decision journal."""
+
+    from chronos.supervisor import alerts
+
+    mandate = _mandate(sessions=SessionPolicy(allow_overnight_holding=True))
+    _activate(session, mandate)
+    outcome = _run(session, mandate=mandate)
+    assert outcome.stage is CycleStage.ADMISSION
+    assert outcome.refusal == "MANDATE_INERT_LIMIT_SET"
+    assert outcome.intent is None
+    journal = _journal(session)
+    assert [entry["refusal"] for entry in journal] == ["MANDATE_INERT_LIMIT_SET"]
+    assert "sessions.allow_overnight_holding" in journal[0]["detail"]
+    assert _ACCOUNT not in json.dumps(journal)
+    # An ordinary policy refusal: in the journal, not an owner alert.
+    assert alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT) == ()
+
+
+def test_d17_a_close_under_a_set_limit_still_compiles(session: Session) -> None:
+    """D-17 (ii) carve-out end to end: the exit is not trapped by the mandate's limit."""
+
+    mandate = _mandate(
+        concentration=ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"), max_sector_exposure_pct=Decimal("0.25")
+        )
+    )
+    _activate(session, mandate)
+    closing = _run(
+        session,
+        mandate=mandate,
+        payload=_proposal(
+            kind=DecisionKind.CLOSE,
+            requested_strategy=None,
+            requested_quantity=None,
+            target_client_reference="CHR-ORD-" + "A" * 32,
+        ),
+        facts=_facts(
+            account=AccountEvidence(
+                net_liquidation_usd=Decimal(100_000),
+                total_cash_usd=Decimal(60_000),
+                buying_power_usd=Decimal(60_000),
+                symbol_exposure_usd=Decimal(0),
+                gross_exposure_usd=Decimal(0),
+                net_exposure_usd=Decimal(0),
+                position_notional_usd=Decimal(0),
+                maintenance_margin_usd=Decimal(0),
+                deployed_capital_usd=Decimal(0),
+                position_quantity=Decimal(10),
+            )
+        ),
+    )
+    assert closing.intent is not None, closing.refusal
+    assert [entry["admitted"] for entry in _journal(session)] == [True]

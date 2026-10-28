@@ -144,6 +144,10 @@ def _codes(mandate: AutonomyMandate, **kwargs: object) -> dict[str, Severity]:
     return {finding.code: finding.severity for finding in findings}
 
 
+#: The report heading for limits admission refuses when set (D-17 (ii)).
+_REFUSED_HEADING = "REFUSED BY ADMISSION WHEN SET (new exposure only)"
+
+
 def _check(path: Path, *extra: str) -> list[str]:
     """``mandate check`` argv for a fixture file, judged at the fixtures' own instant.
 
@@ -402,7 +406,13 @@ def test_an_empty_registry_is_reported_as_the_lockdown_it_is() -> None:
 
 
 def test_a_limit_written_into_an_inert_field_is_reported() -> None:
-    """The defect this tool exists for: a number that constrains nothing."""
+    """The defect this tool exists for: a number that constrains nothing.
+
+    D-17 (ii), ruled by Kevin (D-52): these four limits are no longer accepted with a
+    warning. Admission refuses new exposure under a mandate that sets one
+    (``MANDATE_INERT_LIMIT_SET``), so the authoring tool says so as BLOCKING with the
+    same code, and no longer calls them ``inert-limit-set``.
+    """
 
     mandate = _paper(
         concentration=ConcentrationLimits(
@@ -418,13 +428,97 @@ def test_a_limit_written_into_an_inert_field_is_reported() -> None:
         fingerprint_source="test",
         ingress_pins=dict(_INGRESS_PINS),
     )
-    inert = [item for item in findings if item.code == "inert-limit-set"]
-    reported = {item.message.split(" ", 1)[0] for item in inert}
+    refused = [item for item in findings if item.code == "MANDATE_INERT_LIMIT_SET"]
+    reported = {item.message.split(" ", 1)[0] for item in refused}
     assert reported == {
         "concentration.max_sector_exposure_pct",
         "sessions.allow_overnight_holding",
     }
-    assert all(item.severity is Severity.IMPORTANT for item in inert)
+    assert all(item.severity is Severity.BLOCKING for item in refused)
+    assert not [item for item in findings if item.code == "inert-limit-set"]
+
+
+@pytest.mark.parametrize(
+    ("path", "overrides"),
+    [
+        (
+            "concentration.max_sector_exposure_pct",
+            {
+                "concentration": ConcentrationLimits(
+                    max_symbol_exposure_pct=Decimal("0.5"), max_sector_exposure_pct=Decimal("0.2")
+                )
+            },
+        ),
+        (
+            "concentration.max_family_exposure_pct",
+            {
+                "concentration": ConcentrationLimits(
+                    max_symbol_exposure_pct=Decimal("0.5"), max_family_exposure_pct=Decimal("0.2")
+                )
+            },
+        ),
+        (
+            "concentration.max_correlated_exposure_pct",
+            {
+                "concentration": ConcentrationLimits(
+                    max_symbol_exposure_pct=Decimal("0.5"),
+                    max_correlated_exposure_pct=Decimal("0.2"),
+                )
+            },
+        ),
+        (
+            "sessions.allow_overnight_holding",
+            {"sessions": SessionPolicy(allow_overnight_holding=True)},
+        ),
+    ],
+)
+def test_d17_each_set_unenforceable_limit_is_blocking(
+    path: str, overrides: dict[str, object]
+) -> None:
+    """What the backend's admission will refuse, said at authoring time (D-17 (ii))."""
+
+    findings = review_mandate(
+        _paper(**overrides),
+        now=_NOW,
+        expected_fingerprint=_FINGERPRINT,
+        fingerprint_source="test",
+        ingress_pins=dict(_INGRESS_PINS),
+    )
+    refused = [item for item in findings if item.code == "MANDATE_INERT_LIMIT_SET"]
+    assert [item.message.split(" ", 1)[0] for item in refused] == [path]
+    assert refused[0].severity is Severity.BLOCKING
+    # The message says what is still allowed, so the owner is not told exits are refused.
+    assert "risk-reducing" in refused[0].message
+
+
+def test_d17_a_default_valued_mandate_has_no_refused_limit_finding() -> None:
+    codes = _codes(
+        _paper(
+            concentration=ConcentrationLimits(
+                max_symbol_exposure_pct=Decimal("0.5"), max_sector_exposure_pct=Decimal("0")
+            ),
+            sessions=SessionPolicy(allow_overnight_holding=False),
+        )
+    )
+    assert "MANDATE_INERT_LIMIT_SET" not in codes
+
+
+def test_d17_the_cli_exits_nonzero_for_a_set_unenforceable_limit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], authenticated_env: None
+) -> None:
+    path = tmp_path / "mandate.json"
+    path.write_text(_paper().model_dump_json(), encoding="utf-8")
+    assert main(_check(path)) == 0  # positive control: clean on this posture
+    capsys.readouterr()
+
+    path.write_text(
+        _paper(sessions=SessionPolicy(allow_overnight_holding=True)).model_dump_json(),
+        encoding="utf-8",
+    )
+    assert main(_check(path)) == 1
+    printed = capsys.readouterr().out
+    assert "[BLOCKING] MANDATE_INERT_LIMIT_SET" in printed
+    assert "sessions.allow_overnight_holding  <- set in this mandate" in printed
 
 
 def test_t1_an_option_liquidity_floor_or_session_is_not_reported_as_inert() -> None:
@@ -624,10 +718,13 @@ def test_strict_turns_important_findings_into_a_nonzero_exit(
 ) -> None:
     # A PAPER mandate is BLOCKING on the static posture (ADR-0051); this test is
     # about --strict promoting IMPORTANT, so it runs on the authenticated one.
+    # D-17 (ii): a set sector limit is BLOCKING now, so the IMPORTANT-only finding
+    # here is the zero spread ceiling (``no-spread-ceiling``).
     mandate = _paper(
-        concentration=ConcentrationLimits(
-            max_symbol_exposure_pct=Decimal("0.5"),
-            max_sector_exposure_pct=Decimal("0.25"),
+        market_data=MarketDataRequirements(
+            max_quote_age_seconds=Decimal(5),
+            permitted_data_qualities=(DataQuality.LIVE,),
+            max_relative_spread=Decimal(0),
         )
     )
     path = tmp_path / "mandate.json"
@@ -718,12 +815,19 @@ def test_the_report_lists_every_inert_field_not_only_the_ones_set(
     path.write_text(_shadow().model_dump_json(), encoding="utf-8")
     assert main(_check(path)) == 0
     printed = capsys.readouterr().out
+    # D-17 (ii): the four are refused when set, not inert, so they are listed under
+    # their own heading and no longer under "not enforced".
+    not_enforced = printed.split("NOT ENFORCED BY THE SUPERVISOR TODAY", 1)[1]
+    not_enforced, refused = not_enforced.split(_REFUSED_HEADING, 1)
+    refused = refused.split("FINDINGS", 1)[0]
     for field in (
         "concentration.max_sector_exposure_pct",
         "concentration.max_family_exposure_pct",
+        "concentration.max_correlated_exposure_pct",
         "sessions.allow_overnight_holding",
     ):
-        assert field in printed
+        assert field in refused
+        assert field not in not_enforced
     # F7-A: the option-path limits bind, so the disclosure must not list them.
     for field in (
         "market_data.min_option_volume",

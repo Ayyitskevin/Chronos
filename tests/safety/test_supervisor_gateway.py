@@ -43,6 +43,7 @@ from chronos.autonomy import (
     MarketDataRequirements,
     OrderForm,
     PromotionLevel,
+    SessionPolicy,
     StrategyForm,
     TradableAssetClass,
     VersionPins,
@@ -1068,3 +1069,187 @@ def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> Non
         requested_quantity=None,
     )
     assert outcome.quantity == Decimal(100)  # max_shares_per_order
+
+
+# ------------------------------------------- D-17 (ii): refuse, don't enforce
+#
+# Four mandate limits have nothing that could enforce them: no sector, family or
+# correlation map, no session clock. Kevin's D-17 ruling, as admitted under D-52:
+# a mandate that sets one of them refuses new exposure with a typed code, instead
+# of being accepted with a warning, and risk reduction (CLOSE / CANCEL / REDUCE)
+# is admitted exactly as it is today, so a position is never trapped by its own
+# mandate. The field names and kinds below are written out here, not imported,
+# so that a change to the kernel's own lists cannot quietly move this pin.
+
+_SET_LIMITS: dict[str, dict[str, Any]] = {
+    "concentration.max_sector_exposure_pct": {
+        "concentration": ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"), max_sector_exposure_pct=Decimal("0.25")
+        )
+    },
+    "concentration.max_family_exposure_pct": {
+        "concentration": ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"), max_family_exposure_pct=Decimal("0.25")
+        )
+    },
+    "concentration.max_correlated_exposure_pct": {
+        "concentration": ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"), max_correlated_exposure_pct=Decimal("0.25")
+        )
+    },
+    "sessions.allow_overnight_holding": {"sessions": SessionPolicy(allow_overnight_holding=True)},
+}
+
+#: Each kind that opens or adds exposure, as a decision admission would otherwise admit.
+_EXPOSURE_DECISIONS: dict[str, dict[str, Any]] = {
+    "OPEN": {},
+    "INCREASE": {"kind": DecisionKind.INCREASE, "target_client_reference": _TARGET_REF},
+    "HEDGE": {"kind": DecisionKind.HEDGE},
+    "ROLL": {"kind": DecisionKind.ROLL, "target_client_reference": _TARGET_REF},
+    "REPLACE": {"kind": DecisionKind.REPLACE, "target_client_reference": _TARGET_REF},
+}
+
+#: The risk-reducing kinds the ruling carves out, plus HOLD (recorded, never executable).
+_REDUCING_DECISIONS: dict[str, dict[str, Any]] = {
+    "CLOSE": {
+        "kind": DecisionKind.CLOSE,
+        "requested_strategy": None,
+        "target_client_reference": _TARGET_REF,
+    },
+    "REDUCE": {
+        "kind": DecisionKind.REDUCE,
+        "requested_strategy": None,
+        "target_client_reference": _TARGET_REF,
+    },
+    "CANCEL": {
+        "kind": DecisionKind.CANCEL,
+        "requested_strategy": None,
+        "target_client_reference": _TARGET_REF,
+    },
+    "HOLD": {
+        "kind": DecisionKind.HOLD,
+        "requested_strategy": None,
+        "evidence": (),
+        "invalidation_conditions": (),
+    },
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_EXPOSURE_DECISIONS))
+@pytest.mark.parametrize("limit", sorted(_SET_LIMITS))
+def test_d17_a_set_unenforceable_limit_refuses_new_exposure(limit: str, kind: str) -> None:
+    # Positive control: the same decision under the plain mandate reaches a later check
+    # or is admitted, so the refusal below is caused by the limit and nothing else.
+    plain = admit(_decision(**_EXPOSURE_DECISIONS[kind]), _mandate(), _state())
+    assert plain.refusal != "MANDATE_INERT_LIMIT_SET"
+
+    outcome = admit(
+        _decision(**_EXPOSURE_DECISIONS[kind]), _mandate(**_SET_LIMITS[limit]), _state()
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal == "MANDATE_INERT_LIMIT_SET"
+    assert limit in outcome.detail
+    assert outcome.failed_checks[-1].name == "mandate_limits_enforceable"
+    assert _FINGERPRINT not in outcome.detail
+
+
+@pytest.mark.parametrize("kind", sorted(_REDUCING_DECISIONS))
+@pytest.mark.parametrize("limit", sorted(_SET_LIMITS))
+def test_d17_risk_reduction_is_admitted_exactly_as_today(limit: str, kind: str) -> None:
+    """The carve-out: a mandate's unenforceable limit never traps an exit."""
+
+    decision = _decision(**_REDUCING_DECISIONS[kind])
+    today = admit(decision, _mandate(), _state())
+    outcome = admit(decision, _mandate(**_SET_LIMITS[limit]), _state())
+    assert outcome == today
+
+
+@pytest.mark.parametrize("kind", ["CLOSE", "REDUCE", "CANCEL"])
+def test_d17_risk_reduction_under_a_set_limit_is_actually_admitted(kind: str) -> None:
+    """Positive control for the equality above: these are admissions, not two equal refusals."""
+
+    every_limit = _mandate(
+        concentration=ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"),
+            max_sector_exposure_pct=Decimal("0.25"),
+            max_family_exposure_pct=Decimal("0.25"),
+            max_correlated_exposure_pct=Decimal("0.25"),
+        ),
+        sessions=SessionPolicy(allow_overnight_holding=True),
+    )
+    outcome = admit(_decision(**_REDUCING_DECISIONS[kind]), every_limit, _state())
+    assert outcome.admitted is True, outcome.detail
+
+
+def test_d17_every_set_limit_is_named_in_the_refusal() -> None:
+    every_limit = _mandate(
+        concentration=ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"),
+            max_sector_exposure_pct=Decimal("0.25"),
+            max_family_exposure_pct=Decimal("0.25"),
+            max_correlated_exposure_pct=Decimal("0.25"),
+        ),
+        sessions=SessionPolicy(allow_overnight_holding=True),
+    )
+    outcome = admit(_decision(), every_limit, _state())
+    assert outcome.refusal == "MANDATE_INERT_LIMIT_SET"
+    for limit in _SET_LIMITS:
+        assert limit in outcome.detail, limit
+
+
+def test_d17_a_default_valued_mandate_is_admitted_exactly_as_today() -> None:
+    """Defaults written out explicitly are not "set": the plain mandate's outcome, byte for byte."""
+
+    explicit_defaults = _mandate(
+        concentration=ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.50"),
+            max_sector_exposure_pct=Decimal("0"),
+            max_family_exposure_pct=Decimal("0.00"),
+            max_correlated_exposure_pct=Decimal(0),
+        ),
+        sessions=SessionPolicy(allow_overnight_holding=False),
+    )
+    today = admit(_decision(), _mandate(), _state())
+    assert today.admitted is True
+    assert admit(_decision(), explicit_defaults, _state()) == today
+
+
+def test_d17_the_alerting_refusals_keep_their_precedence() -> None:
+    """The limit refusal must not mask a refusal that raises an owner alert.
+
+    Degraded state and a revoked mandate alert (``supervisor/alerts.py``); a limit
+    refusal does not. If the limit check ran first, a degraded system or a revoked
+    grant would go unannounced for every opening decision.
+    """
+
+    mandate = _mandate(**_SET_LIMITS["sessions.allow_overnight_holding"])
+    degraded = admit(
+        _decision(),
+        mandate,
+        _state(degraded_reasons=(DegradedReason(subsystem="reconciliation", detail="stale"),)),
+    )
+    assert degraded.refusal is AdmissionRefusal.DEGRADED_STATE
+    revoked = admit(_decision(), mandate, _state(activation=_activation(revoked=True)))
+    assert revoked.refusal is AdmissionRefusal.MANDATE_REVOKED
+
+
+def test_d17_the_four_limits_are_classified_refused() -> None:
+    """The shared map says what admission does: these four are neither ENFORCED nor INERT."""
+
+    refused = {
+        f"{section}.{field}"
+        for section, model in (
+            ("concentration", "ConcentrationLimits"),
+            ("sessions", "SessionPolicy"),
+        )
+        for field, status in _LIMIT_ENFORCEMENT[model].items()
+        if status == "REFUSED"
+    }
+    every_refused = {
+        model_name
+        for model_name, classified in _LIMIT_ENFORCEMENT.items()
+        for status in classified.values()
+        if status == "REFUSED"
+    }
+    assert refused == set(_SET_LIMITS)
+    assert every_refused == {"ConcentrationLimits", "SessionPolicy"}
