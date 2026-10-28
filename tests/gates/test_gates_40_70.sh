@@ -137,7 +137,7 @@ FAKE
 printf '.venv/\n.gates/\ndata/\n' > "$R40/.gitignore"   # as in the repo: .gates/, the venv and data/ are ignored
 printf '# TRUSTED-MAKEFILE (the trusted base)\nlint format-check type type-worker test release-gate:\n\t@%s $@\n' "$T/bin/stubmake" > "$R40/Makefile"
 MV40="$R40/src/chronos/persistence/migrations/versions"; mkdir -p "$MV40"   # D-47(b): main's migration chain 0001 → 0002
-mig40() { printf 'revision = "%s"\ndown_revision = %s\nbranch_labels = None\ndepends_on = None\n' "$1" "$2" > "$MV40/$1_${3:-step}.py"; }
+mig40() { printf 'from __future__ import annotations\n\nrevision = "%s"\ndown_revision = %s\nbranch_labels = None\ndepends_on = None\n' "$1" "$2" > "$MV40/$1_${3:-step}.py"; }  # main's shape ([module] whitelist)
 lit40() { printf '# %s\n_MIGRATION_HEAD: Final[str] = "%s"\n' "$1" "$2" > "$R40/scripts/verify_release_artifact.py"; }
 mig40 0001 None base; mig40 0002 '"0001"' next
 lit40 'TRUSTED release script' 0002; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
