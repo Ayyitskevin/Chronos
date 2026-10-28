@@ -47,9 +47,12 @@ case_ "d47b:1 two appended revisions (0003, 0004) pass with head 0004" PASS:0004
 case_ "d47b:header an annotated literal header (revision: str = \"0003\") is a literal assignment too" PASS:0003 \
   'mig 0003 "\"0002\""; sed -i "s/^revision = /revision: str = /" $M/$V/0003_step.py; lit 0003'
 mark=$T/payload-ran
-case_ "d47b:data a revision whose module body runs code (writes a marker, os.system) still passes on its literal header ..." PASS:0003 \
-  "mig 0003 '\"0002\"'; printf 'open(\"%s\", \"w\").write(\"ran\")\nimport os\nos.system(\"touch %s.sys\")\nraise SystemExit(3)\n' $mark $mark >> $M/$V/0003_step.py; lit 0003"
+case_ "d47b:data a revision whose upgrade() body runs code (writes a marker, os.system) passes on its literal header ..." PASS:0003 \
+  "mig 0003 '\"0002\"'; printf '    open(\"%s\", \"w\").write(\"ran\")\n    import os\n    os.system(\"touch %s.sys\")\n    raise SystemExit(3)\n' $mark $mark >> $M/$V/0003_step.py; lit 0003"
 check "d47b:data ...and the trusted step never imported or executed it (no marker from open() or os.system)" "[ ! -e $mark ] && [ ! -e $mark.sys ]"
+case_ "d47b:data the same payload at module level is refused by the module whitelist ..." '\[module\] versions/0003_step.py line 13: a module-level Expr statement is not allowed' \
+  "mig 0003 '\"0002\"'; printf 'open(\"%s\", \"w\").write(\"ran\")\nimport os\nos.system(\"touch %s.sys\")\nraise SystemExit(3)\n' $mark $mark >> $M/$V/0003_step.py; lit 0003"
+check "d47b:data ...and the trusted step never executed it either (no marker)" "[ ! -e $mark ] && [ ! -e $mark.sys ]"
 
 # --- I1: versions/ holds only regular NNNN_lowercase.py blobs -------------------------------------
 for name in zz.py __init__.py 0003_X.py 0003.py 0003_x.pyc README 0003-x.py; do
@@ -152,6 +155,199 @@ hdr "depends_on naming a revision is refused" '\[header\] versions/0003_step.py:
 check "d47b:header a function-local variable named revision is NOT a module-level binding (no false refusal)" \
   "fresh; mig 0003 '\"0002\"'; printf 'def downgrade() -> None:\n    revision = 1\n    del revision\n' >> $M/$V/0003_step.py; lit 0003; commit cand; run_chain; passes 0003"
 
+# --- [module]: module level is data and imports only (D47B-FIX1, review P1-1) ---------------------------
+# A literal header can be rebound when the module body runs (globals()[...] store, exec, star import); the
+# runtime graph then forks at main's head and merges back to the declared head. The trusted step refuses every
+# module-level statement outside a whitelist instead. mig() writes 12 lines, so an appended payload starts at
+# line 13. Payloads live in files so no shell quoting reaches the Python text.
+P=$T/payloads; mkdir "$P"
+pl() { cat > "$P/$1"; }  # pl <name> <<'EOF' ... EOF
+app() { cat "$P/$1" >> "$M/$V/${2:-0003_step.py}"; }
+pl v1a <<'EOF'
+globals()["down_revision"] = "0002"
+EOF
+pl v1b <<'EOF'
+globals()["down_revision"] = ("0003", "0004")
+EOF
+pl v3a <<'EOF'
+exec('down_revision = "0002"')
+EOF
+pl v3b <<'EOF'
+exec('down_revision = ("0003", "0004")')
+EOF
+pl v8a <<'EOF'
+from chronos_fork import *
+EOF
+pl v8b <<'EOF'
+from chronos_merge import *
+EOF
+pl v2a <<'EOF'
+import sys as _s, types as _t
+class _M(_t.ModuleType):
+    down_revision = property(lambda self: "0002")
+_s.modules[__name__].__class__ = _M
+EOF
+pl v2b <<'EOF'
+import sys as _s, types as _t
+class _M(_t.ModuleType):
+    down_revision = property(lambda self: ("0003", "0004"))
+_s.modules[__name__].__class__ = _M
+EOF
+fork() {  # fork <payload 0004> <payload 0005>: honest literal headers 0003 → 0004 → 0005 whose bodies fork at 0002 and merge
+  mig 0003 '"0002"'; mig 0004 '"0003"' b; app "$1" 0004_b.py; mig 0005 '"0004"' c; app "$2" 0005_c.py; lit 0005
+}
+MF='\[module\] versions/0004_b.py line'
+case_ "d47b:module V1 globals()[\"down_revision\"] = ... (runtime fork at 0002, merge at 0005) is refused at the trusted step" \
+  "$MF 13: an assignment binds one plain name to a literal value" 'fork v1a v1b'
+case_ "d47b:module V3 exec('down_revision = ...') at module level is refused at the trusted step" \
+  "$MF 13: a module-level Expr statement is not allowed" 'fork v3a v3b'
+case_ "d47b:module V8 a star import of a helper on the sandbox PYTHONPATH (src/) is refused at the trusted step" \
+  "$MF 13: a star import is not allowed" \
+  'printf "down_revision = \"0002\"\n" > $M/src/chronos_fork.py; printf "down_revision = (\"0003\", \"0004\")\n" > $M/src/chronos_merge.py; fork v8a v8b'
+case_ "d47b:module V2 a module __class__ swap (class body + attribute store) is refused at the trusted step" \
+  "$MF 14: a module-level ClassDef statement is not allowed" 'fork v2a v2b'
+
+M3='\[module\] versions/0003_step.py'
+FUT="$M3: \`from __future__ import annotations\` must open the module \\(after the docstring\\)"
+case_ "d47b:module a revision without \`from __future__ import annotations\` is refused (def annotations would run at def time)" "$FUT" \
+  "mig 0003 '\"0002\"'; sed -i '/^from __future__/d' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module \`from __future__ import annotations\` after another import is refused" "$FUT" \
+  "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/import os\\nfrom __future__ import annotations/' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module a first __future__ import naming more than annotations is refused" "$FUT" \
+  "mig 0003 '\"0002\"'; sed -i 's/^from __future__ import annotations\$/from __future__ import annotations, generator_stop/' $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module a second __future__ import is refused" "$M3 line 13: a second \`from __future__\` import is not allowed" \
+  "mig 0003 '\"0002\"'; printf 'from __future__ import annotations\n' >> $M/$V/0003_step.py; lit 0003"
+case_ "d47b:module a revision without a docstring (the future import first) passes" PASS:0003 \
+  "mig 0003 '\"0002\"'; sed -i '1d' $M/$V/0003_step.py; lit 0003"
+
+mw() {  # mw <label> <line: reason regex, or PASS> <payload text on stdin> : one payload appended to 0003_step.py
+  local name="mw$((pass + fail))"; pl "$name"
+  case "$2" in
+    PASS) case_ "d47b:module $1" PASS:0003 "mig 0003 '\"0002\"'; app $name; lit 0003" ;;
+    *) case_ "d47b:module $1" "$M3 line $2" "mig 0003 '\"0002\"'; app $name; lit 0003" ;;
+  esac
+}
+ASG='an assignment binds one plain name to a literal value'
+mw "a bare string after the docstring is refused (only the first statement may be a docstring)" "13: a module-level Expr statement is not allowed" <<'EOF'
+"""not a docstring"""
+EOF
+mw "an attribute store (sys.modules[__name__].down_revision = ...) is refused" "14: $ASG" <<'EOF'
+import sys
+sys.modules[__name__].down_revision = "0002"
+EOF
+mw "a chained assignment (_a = _b = 1) is refused" "13: $ASG" <<'EOF'
+_a = _b = 1
+EOF
+mw "an annotation without a value (_x: int) is refused" "13: $ASG" <<'EOF'
+_x: int
+EOF
+mw "a lambda value is refused" "13: $ASG" <<'EOF'
+_l = lambda: exec('down_revision = "0002"')
+EOF
+mw "a bare-name call value (_g = globals()) is refused" "13: $ASG" <<'EOF'
+_g = globals()
+EOF
+mw "a call rooted outside sqlalchemy (types.SimpleNamespace()) is refused" "14: $ASG" <<'EOF'
+import types
+_ns = types.SimpleNamespace()
+EOF
+mw "a sqlalchemy alias rebound by a second import (sa = types) is not sqlalchemy" "15: $ASG" <<'EOF'
+import sqlalchemy as sa
+import types as sa
+_ns = sa.SimpleNamespace()
+EOF
+mw "a lowercase sqlalchemy function (sa.text) is refused; only CamelCase constructors" "14: $ASG" <<'EOF'
+import sqlalchemy as sa
+_t = sa.text("select 1")
+EOF
+mw "a dotted sqlalchemy path (sa.types.Integer) is refused; only sa.<Name>" "14: $ASG" <<'EOF'
+import sqlalchemy as sa
+_i = sa.types.Integer()
+EOF
+mw "a non-literal constructor argument is refused" "14: $ASG" <<'EOF'
+import sqlalchemy as sa
+_c = sa.Column(exec('down_revision = "0002"'))
+EOF
+mw "a non-literal constructor keyword is refused" "14: $ASG" <<'EOF'
+import sqlalchemy as sa
+_c = sa.Column("x", default=exec('down_revision = "0002"'))
+EOF
+mw "a ** argument (even of a literal) is refused" "14: $ASG" <<'EOF'
+import sqlalchemy as sa
+_c = sa.Column("x", **())
+EOF
+mw "a non-literal tuple element is refused" "13: $ASG" <<'EOF'
+_t = ("x", exec('down_revision = "0002"'))
+EOF
+mw "a decorated def is refused (the decorator runs at import; reported at the def line)" "14: a decorated def is not allowed" <<'EOF'
+@(lambda f: f)
+def _f() -> None:
+    pass
+EOF
+mw "a def with type parameters is refused" "13: a def with type parameters is not allowed" <<'EOF'
+def _f[T]() -> None:
+    pass
+EOF
+mw "a non-constant positional default is refused (defaults run at def time)" "13: a def default must be a constant" <<'EOF'
+def _f(_x=exec('down_revision = "0002"')) -> None:
+    pass
+EOF
+mw "a non-constant keyword-only default is refused" "13: a def default must be a constant" <<'EOF'
+def _f(*, _x=exec('down_revision = "0002"')) -> None:
+    pass
+EOF
+for kind in "ClassDef|class _C:\n    pass" "If|if True:\n    pass" "Try|try:\n    pass\nexcept Exception:\n    pass" \
+  "With|with open('/dev/null'):\n    pass" "For|for _i in ():\n    pass" "While|while False:\n    pass" \
+  "Assert|assert True" "Pass|pass" "TypeAlias|type _A = int" "Raise|raise SystemExit(0)"; do
+  mw "a module-level ${kind%%|*} is refused" "13: a module-level ${kind%%|*} statement is not allowed" < <(printf '%b\n' "${kind#*|}")
+done
+mw "an augmented assignment is refused" "14: a module-level AugAssign statement is not allowed" <<'EOF'
+_n = 1
+_n += 1
+EOF
+mw "a module-level del of a private name is refused" "14: a module-level Delete statement is not allowed" <<'EOF'
+_n = 1
+del _n
+EOF
+mw "main's constant shapes pass: sqlalchemy CamelCase constructors on literals inside tuples (0005/0013), strings, lists" PASS <<'EOF'
+import sqlalchemy as sa
+_NEW_COLUMNS = (
+    sa.Column("delivered_at", sa.DateTime(), nullable=True),
+    sa.Column("delivery_attempts", sa.Integer(), nullable=False, server_default="0"),
+)
+_COLUMNS = (("order_ref", sa.Column("order_ref", sa.String(length=120), nullable=True)),)
+_INDEX = "ix_fills_permanent_id"
+_NAMES = ["a", 1, None]
+EOF
+mw "an unaliased import sqlalchemy, other imports, constant defaults and async defs pass" PASS <<'EOF'
+import os.path
+import sqlalchemy
+from datetime import UTC, datetime
+from alembic import op
+_c = sqlalchemy.Integer()
+
+
+def _helper(_x=1, *, _y=None) -> None:
+    pass
+
+
+async def _later() -> None:
+    pass
+EOF
+pl badmain <<'EOF'
+exec('pass')
+EOF
+fresh; app badmain 0002_next.py; commit bad-module-main; BADMOD=$(git -C "$M" rev-parse HEAD); git -C "$M" show "$BADMOD:$S" > "$T/overlay.orig"
+fresh; mig 0003 '"0002"'; lit 0003; commit cand; run_chain "$BADMOD"
+check "d47b:module the whitelist reads main's files too: a trusted base failing it is a trusted-base defect" \
+  "refused '\\[module\\] versions/0002_next.py line 13: a module-level Expr statement is not allowed \\(trusted base: a trusted-base defect; fix main first\\)'"
+git -C "$M" show "$MAIN:$S" > "$T/overlay.orig"
+REAL=$(git -C "$ROOT" rev-parse HEAD); git -C "$ROOT" show "$REAL:$S" > "$T/real-overlay"; cp "$T/real-overlay" "$T/real-overlay.orig"
+REALHEAD=$(sed -n 's/^_MIGRATION_HEAD: Final\[str\] = "\([0-9]\{4\}\)"$/\1/p' "$T/real-overlay")
+(cd "$ROOT" && python3 -I -B "$G/lib/migration_chain.py" "$ROOT" "$REAL" "$ROOT" "$REAL" "$T/real-overlay" > "$T/out" 2> "$T/err"; echo $? > "$T/rc")
+check "d47b:module positive control: this repo's own revision files (at HEAD, $(git -C "$ROOT" ls-tree --name-only "$REAL:$V" | grep -c '\.py$') of them, head $REALHEAD) pass the whitelist unchanged" \
+  "[ -n '$REALHEAD' ] && passes $REALHEAD && cmp -s $T/real-overlay $T/real-overlay.orig"
+
 # --- parse bombs: size cap, encoding, null bytes, nesting, syntax -----------------------------------
 hdr "a revision file over 64 KiB is refused before it is parsed" '\[parse\] versions/0003_step.py is larger than 65536 bytes' \
   "python3 -c 'print(\"#\" * 70000)' >> $M/$V/0003_step.py"
@@ -165,6 +361,9 @@ hdr "a unary-operator stack bomb (60000 minus signs, under the cap) is refused" 
   "python3 -c 'print(\"x = \" + \"-\" * 60000 + \"1\")' >> $M/$V/0003_step.py"
 hdr "a syntax error is refused" '\[parse\] versions/0003_step.py cannot be parsed as data \(SyntaxError\)' \
   "printf 'def (\n' >> $M/$V/0003_step.py"
+case_ "d47b:module V4 a BOM-prefixed new revision is refused at parse (fails closed, as before the whitelist)" \
+  '\[parse\] versions/0003_step.py cannot be parsed as data \(SyntaxError\)' \
+  "mig 0003 '\"0002\"'; { printf '\\357\\273\\277'; cat $M/$V/0003_step.py; } > $T/bom.py; mv $T/bom.py $M/$V/0003_step.py; lit 0003"
 
 # --- I8: the candidate's own literal agrees with its chain (what CI checks) --------------------------
 case_ "d47b:I8 appending 0003 but leaving the candidate's literal at 0002 is refused" "\\[I8\\] the candidate.s _MIGRATION_HEAD is 0002, its chain.s head is 0003" \
