@@ -42,7 +42,7 @@ class _Key(str):
     """A synthetic key whose repr is redacted: pytest renders call arguments and frame arguments
     with repr(), so a failing assertion or traceback can name the key but never print it."""
 
-    __slots__ = ()
+    __slots__ = ()  # PersistenceKey.from_hex wants an exact str: pass str(key) there
 
     def __repr__(self) -> str:
         return "<synthetic key>"
@@ -398,7 +398,7 @@ def test_mandate_fingerprint_names_its_one_source_on_stderr_only(
     assert main(["mandate", "fingerprint", "--account-id", _ACCOUNT]) == 0
 
     captured = capsys.readouterr()
-    expected = account_fingerprint(_ACCOUNT, key=PersistenceKey.from_hex(key))
+    expected = account_fingerprint(_ACCOUNT, key=PersistenceKey.from_hex(str(key)))
     assert captured.out.splitlines()[0] == expected  # stdout is what it was: the fingerprint first
     assert "persistence key" not in captured.out
     assert captured.err.strip() == f"persistence key from: the dotenv file {path.absolute()}"
@@ -467,7 +467,7 @@ def test_the_bind_refusal_names_a_different_key_and_prescribes_no_new_database_u
         broker_mode="ibkr",
         environment="paper",
         account_id=_ACCOUNT,
-        key=PersistenceKey.from_hex(_key("bound")),
+        key=PersistenceKey.from_hex(str(_key("bound"))),
     )
     first.dispose()
     again = Database(f"sqlite:///{store}")
@@ -478,7 +478,7 @@ def test_the_bind_refusal_names_a_different_key_and_prescribes_no_new_database_u
                 broker_mode="ibkr",
                 environment="paper",
                 account_id=_ACCOUNT,
-                key=PersistenceKey.from_hex(_key("other")),
+                key=PersistenceKey.from_hex(str(_key("other"))),
             )
     finally:
         again.dispose()
@@ -500,14 +500,14 @@ def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_u
         broker_mode="ibkr",
         environment="paper",
         account_id=_ACCOUNT,
-        key=PersistenceKey.from_hex(_key("bound")),
+        key=PersistenceKey.from_hex(str(_key("bound"))),
     )
     bound.dispose()
     settings = b1_preflight._load_settings(
         {
             "IB_ACCOUNT_ID": _ACCOUNT,
             "DATABASE_URL": f"sqlite:///{store}",
-            "CHRONOS_PERSISTENCE_KEY": _key("other"),
+            "CHRONOS_PERSISTENCE_KEY": str(_key("other")),
         }
     )
     assert not isinstance(settings, str)
