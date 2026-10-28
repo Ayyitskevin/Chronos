@@ -210,7 +210,13 @@ _GATE: dict[str, tuple[str, ...]] = {
         "read the token file directly: that includes a hostile `LD_PRELOAD` or loader "
         "environment, writable system binaries or directories, `ptrace`, a function named "
         "`/usr/bin/env` and a DEBUG trap under `extdebug`.",
-        "The preflight below stops the accidental versions of the first three.",
+        "The preflight below checks two things only: the loader variables in your own shell "
+        "(`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`), and the owner and mode of the system "
+        "paths it names.",
+        "That path check runs `stat` and `bash` from `/usr/bin` and `/bin`, so it catches a "
+        "writable or non-root-owned path only while those tools are intact: a compromised "
+        "`/usr/bin` can forge its answers, and no check run from it can prove otherwise.",
+        "It does not check `ptrace`, the `/usr/bin/env` function or the DEBUG trap.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
         "Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in "
         "`/usr/bin` or `/bin` (`-H @file`), each owned by root and writable by no one else, and "
@@ -461,7 +467,13 @@ def _preflight_problems(step7: str) -> list[str]:
         "read the token file directly",
         "a hostile `LD_PRELOAD` or loader environment, writable system binaries or directories, "
         "`ptrace`, a function named `/usr/bin/env` and a DEBUG trap under `extdebug`",
-        "The preflight below stops the accidental versions of the first three",
+        "The preflight below checks two things only: the loader variables in your own shell "
+        "(`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`), and the owner and mode of the system "
+        "paths it names",
+        "so it catches a writable or non-root-owned path only while those tools are intact: a "
+        "compromised `/usr/bin` can forge its answers, and no check run from it can prove "
+        "otherwise",
+        "It does not check `ptrace`, the `/usr/bin/env` function or the DEBUG trap",
         "add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either command",
         "no `HOME` (so no `~/.curlrc`)",
         "no function, alias, hash entry, xtrace, `BASH_ENV` or startup file",
@@ -485,6 +497,9 @@ def test_p5_the_preflight_precedes_each_token_command_and_carries_its_stop() -> 
     assert step7.count(_PREFLIGHT_LAUNCH) == 1 and step7.count(_PREFLIGHT_LD) == 1
     # the old per-name shell check is gone: nothing in the operator's shell is trusted any more
     assert "builtin type command curl" not in step7
+    # the claim is narrowed: no "stops the accidental versions" and no self-verifying wording
+    assert "stops the accidental versions" not in _flat(step7)
+    assert "self-verif" not in _flat(step7)
 
 
 def test_p5_negative_control_each_missing_piece_is_caught() -> None:
@@ -527,10 +542,24 @@ def test_p5_negative_control_each_missing_piece_is_caught() -> None:
             "directories,",
             "nothing,",
         ),
-        "accidental-versions sentence dropped": _reword(
+        "old accidental-versions wording back": _reword(
             step7,
-            "The preflight below stops the accidental versions of the first three",
-            "The preflight stops all",
+            "The preflight below checks two things only:",
+            "The preflight below stops the accidental versions of the first three. Once:",
+        ),
+        "two-classes sentence dropped": _reword(
+            step7, "The preflight below checks two things only:", "The preflight checks:"
+        ),
+        "intact-tools condition dropped": _reword(
+            step7, "only while those tools are intact", "always"
+        ),
+        "forgery admission dropped": _reword(
+            step7,
+            "a compromised `/usr/bin` can forge its answers",
+            "a compromised `/usr/bin` is caught",
+        ),
+        "ptrace-not-checked sentence dropped": _reword(
+            step7, "It does not check `ptrace`,", "It checks `ptrace`,"
         ),
         "needs-owner line dropped": _reword(
             step7,

@@ -460,8 +460,13 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    startup files, argv. They do not protect against anyone who can already act as your user or
    as root, who can read the token file directly: that includes a hostile `LD_PRELOAD` or
    loader environment, writable system binaries or directories, `ptrace`, a function named
-   `/usr/bin/env` and a DEBUG trap under `extdebug`. The preflight below stops the accidental
-   versions of the first three. The log is your `LOG_FILE` (`logs/chronos.log` by default).
+   `/usr/bin/env` and a DEBUG trap under `extdebug`. The preflight below checks two things only:
+   the loader variables in your own shell (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`), and the
+   owner and mode of the system paths it names. That path check runs `stat` and `bash` from
+   `/usr/bin` and `/bin`, so it catches a writable or non-root-owned path only while those tools
+   are intact: a compromised `/usr/bin` can forge its answers, and no check run from it can prove
+   otherwise. It does not check `ptrace`, the `/usr/bin/env` function or the DEBUG trap.
+   The log is your `LOG_FILE` (`logs/chronos.log` by default).
 
    Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in
    `/usr/bin` or `/bin` (`-H @file`), each owned by root and writable by no one else, and no
