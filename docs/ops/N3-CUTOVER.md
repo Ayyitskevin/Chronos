@@ -455,19 +455,20 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    it. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
    command and curl prints the token. So does anything that changes which `command` or which
    `curl` runs: a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`), a
-   hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another `curl` earlier in your `PATH`.
-   The check below shows those; it cannot see a shell that also redefines `builtin` or `type`.
+   hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another `curl` earlier in your `PATH`,
+   or a function or alias named `printf`, which receives the token inside the process
+   substitution. The check below shows those; it cannot see a shell that also redefines `builtin` or `type`.
    Do not. The log is your `LOG_FILE` (`logs/chronos.log` by default).
 
    Check the shell first. In the shell you will paste into, run:
    ```bash
-   builtin type command curl
+   builtin type command curl printf
    ```
-   It must print exactly two lines: `command is a shell builtin` and `curl is <path>`, where
-   `<path>` is your system's curl in a directory only root can write (`/usr/bin/curl`, say).
-   **STOP, and run nothing below, if** `command` is a function or an alias, `curl` is a function,
-   an alias or `hashed`, the path is under your home or in any directory you can write, or there
-   is any other line. Then:
+   It must print exactly three lines: `command is a shell builtin`, `curl is <path>` and
+   `printf is a shell builtin`, where `<path>` is your system's curl in a directory only root can
+   write (`/usr/bin/curl`, say). **STOP, and run nothing below, if** `command` or `printf` is a
+   function or an alias, `curl` is a function, an alias or `hashed`, the path is under your home
+   or in any directory you can write, or there is any other line. Then:
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys

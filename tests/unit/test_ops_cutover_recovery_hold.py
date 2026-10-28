@@ -77,7 +77,7 @@ _HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api
 #: The one line run in the operator's own shell before the first token-bearing command (P2-1,
 #: P2-2): `builtin` skips a function named `type`; `type` reports `command` and `curl` as the
 #: shell resolves them (a function, an alias, a hashed path or a PATH wrapper all show).
-_SHELL_CHECK = "builtin type command curl"
+_SHELL_CHECK = "builtin type command curl printf"
 
 #: The guard every token-bearing curl wears (P1-1): a subshell that turns xtrace off before curl is
 #: expanded, ``command`` so an alias or function named ``curl`` cannot interpose, and ``-q`` as
@@ -163,17 +163,18 @@ _GATE: dict[str, tuple[str, ...]] = {
         "command and curl prints the token. So does anything that changes which `command` or "
         "which `curl` runs: a function named `command` (also from `BASH_ENV`, or "
         "`ZDOTDIR/.zshenv`), a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another "
-        "`curl` earlier in your `PATH`.",
+        "`curl` earlier in your `PATH`, or a function or alias named `printf`, which receives "
+        "the token inside the process substitution.",
         "The check below shows those; it cannot see a shell that also redefines `builtin` or "
         "`type`. Do not.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
         "Check the shell first. In the shell you will paste into, run:",
-        "It must print exactly two lines: `command is a shell builtin` and `curl is <path>`, "
-        "where `<path>` is your system's curl in a directory only root can write "
-        "(`/usr/bin/curl`, say).",
-        "**STOP, and run nothing below, if** `command` is a function or an alias, `curl` is a "
-        "function, an alias or `hashed`, the path is under your home or in any directory you "
-        "can write, or there is any other line.",
+        "It must print exactly three lines: `command is a shell builtin`, `curl is <path>` and "
+        "`printf is a shell builtin`, where `<path>` is your system's curl in a directory only "
+        "root can write (`/usr/bin/curl`, say).",
+        "**STOP, and run nothing below, if** `command` or `printf` is a function or an alias, "
+        "`curl` is a function, an alias or `hashed`, the path is under your home or in any "
+        "directory you can write, or there is any other line.",
         "( set +x; command curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
         "http://127.0.0.1:<port>/autonomy/alerts )",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
@@ -396,7 +397,11 @@ def _check_problems(step7: str) -> list[str]:
         "a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`)",
         "a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh)",
         "another `curl` earlier in your `PATH`",
+        "or a function or alias named `printf`, which receives the token inside the process "
+        "substitution",
         "it cannot see a shell that also redefines `builtin` or `type`",
+        "`printf is a shell builtin`",
+        "`command` or `printf` is a function or an alias",
         "`curl` is a function, an alias or `hashed`",
         "the path is under your home or in any directory you can write",
     ):
@@ -427,13 +432,20 @@ def test_p2_negative_control_each_missing_piece_is_caught() -> None:
             "builtin type command curl", "true"
         ),
         "check moved after the read block": step7.replace(
-            "```bash\n   builtin type command curl\n   ```", "```bash\n   true\n   ```"
+            "```bash\n   " + _SHELL_CHECK + "\n   ```", "```bash\n   true\n   ```"
         ),
         "STOP dropped": _reword(step7, "**STOP, and run nothing below, if**", "Note:"),
         "no repeat before the acknowledgement": _reword(
             step7, "In a new shell, run the check above again first (same STOP).", ""
         ),
         "function command not named": _reword(step7, "a function named `command`", "a function"),
+        "printf residual not named": _reword(
+            step7, "or a function or alias named `printf`", "or a thing"
+        ),
+        "printf not in the check": step7.replace(_SHELL_CHECK, "builtin type command curl"),
+        "printf not in the STOP": _reword(
+            step7, "`command` or `printf` is a function", "`command` is a function"
+        ),
         "hashed curl not named": _reword(step7, "a hashed `curl`", "a thing"),
         "hash forms not named": _reword(
             step7, "(`hash -p` in bash, `hash curl=` in zsh)", "(hashing)"
