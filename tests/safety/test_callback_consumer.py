@@ -1156,9 +1156,13 @@ def test_4_5h_a_dead_consumer_thread_is_loud_and_every_later_event_demotes(
         file_rig.database.dispose()
 
 
-def test_5i_offer_never_blocks_the_reader_while_the_consumer_is_stuck_on_the_database(
+def test_5i_offer_never_waits_while_the_consumer_is_stuck_inside_a_journal_append(
     tmp_path: Path,
 ) -> None:
+    """CB1-FIX5 P3-6 (renamed): the stuck step is a stubbed ``append_pending`` that waits; it holds
+    no database lock. What this proves: ``offer`` never waits on a stuck consumer (1100 offers in
+    under 2 s of wall clock), and the overflow drops and demotes."""
+
     file_rig = _FileRig(tmp_path)
     release = threading.Event()
     real = file_rig.consumer.journal.append_pending
