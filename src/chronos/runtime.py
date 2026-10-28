@@ -17,7 +17,7 @@ from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
-from chronos.config.persistence_key import resolve_persistence_key
+from chronos.config.persistence_key import persistence_key_source, resolve_persistence_key
 from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import (
     BrokerAdapter,
@@ -288,9 +288,14 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
 
     settings = get_settings()
     # N3: first, before the log file, the database file or any sidecar exists. An absent or
-    # malformed key refuses here in every broker mode, demo included.
+    # malformed key refuses here in every broker mode, demo included. KEYSRC: so does a key named
+    # by more than one source (environment names + dotenv lines), whatever their values.
+    key_source = persistence_key_source()
     persistence_key = resolve_persistence_key(settings)
     configure_logging(settings.log_level, settings.log_file)
+    logging.getLogger("chronos.runtime").info(
+        "persistence key from: %s", key_source or "in-process settings"
+    )
     database = Database(settings.database_url)
     connection: BrokerConnectionManager | None = None
     try:

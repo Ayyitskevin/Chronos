@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -820,15 +821,31 @@ def _resolve_expected_fingerprint(
 
 
 def _resolve_persistence_key() -> PersistenceKey | None:
-    """This install's persistence key from its settings, or None (never a default key)."""
+    """This install's persistence key from its settings, or None (never a default key).
+
+    KEYSRC: a key named by more than one source is refused like an absent one, and the refusal,
+    or the one source used, goes to stderr (names, paths and counts only), so stdout stays what a
+    script captures.
+    """
 
     try:
-        from chronos.config.persistence_key import resolve_persistence_key
+        from chronos.config.persistence_key import (
+            PersistenceKeyError,
+            persistence_key_source,
+            resolve_persistence_key,
+        )
         from chronos.config.settings import get_settings
 
-        return resolve_persistence_key(get_settings())
+        try:
+            source = persistence_key_source()
+        except PersistenceKeyError as refusal:
+            print(f"persistence key refused: {refusal}", file=sys.stderr)
+            return None
+        key = resolve_persistence_key(get_settings())
     except Exception:  # absent, malformed, or settings that did not load: all "unavailable"
         return None
+    print(f"persistence key from: {source or 'in-process settings'}", file=sys.stderr)
+    return key
 
 
 def _mask(account_id: str) -> str:

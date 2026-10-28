@@ -265,8 +265,10 @@ class Database:
                 or current.account_fingerprint != fingerprint
             ):
                 raise RuntimeError(
-                    "This Chronos database is already bound to a different broker scope; "
-                    "configure a separate DATABASE_URL."
+                    "This Chronos database is already bound to a different broker scope or a "
+                    "different persistence key; find which before changing anything (a new "
+                    "DATABASE_URL starts a separate store, and if the key changed, one bound under "
+                    "a key that may not be escrowed)."
                 )
         self.sessions.configure(info={_PERSISTENCE_KEY_INFO: key})
 

@@ -7,17 +7,31 @@ host's 0600 ``.env``. It keys every persisted account fingerprint.
 There is no default and no fallback, in demo mode too: an absent or malformed key refuses here,
 before any database file, sidecar or log is created, and the value is never echoed. Call sites
 never read the environment; they receive the resolved :class:`PersistenceKey` as a parameter.
+
+KEYSRC: the key must have exactly one source. The loader reads it case-insensitively from the
+process environment, which outranks the dotenv file, and inside that file the last line wins, so
+a second copy decides silently which key binds the store. :func:`persistence_key_source` counts
+both before anything resolves and refuses more than one, naming each source and its count.
 """
 
 from __future__ import annotations
 
+import io
+import os
 import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+from dotenv.parser import parse_stream
 
 from chronos.config.settings import Settings
 from chronos.utils.identifiers import PersistenceKey
 
 PERSISTENCE_KEY_ENV = "CHRONOS_PERSISTENCE_KEY"
 _KEY_SHAPE = re.compile(r"[0-9a-f]{64}")
+#: casefold() folds every name the loader's str.lower() folds to the key (and U+017F and the st
+#: ligatures, which it does not): the count can over-count, refusing, but never under-count.
+_FOLDED_NAME = PERSISTENCE_KEY_ENV.casefold()
 
 
 class PersistenceKeyError(RuntimeError):
@@ -38,3 +52,82 @@ def resolve_persistence_key(settings: Settings) -> PersistenceKey:
             "(the value is not shown)"
         )
     return PersistenceKey.from_hex(value)
+
+
+def count_key_lines(text: str) -> int:
+    """How many bindings of dotenv ``text`` name the key, in any case the loader folds.
+
+    The bindings are python-dotenv's own parse (the parser ``dotenv_values`` runs for the loader),
+    so ``export`` forms, quoted and empty values and a bare name count, one per line, while a
+    comment, the name inside a value and an unparsable line do not. Values are never looked at.
+    """
+
+    return sum(
+        1
+        for binding in parse_stream(io.StringIO(text))
+        if binding.key is not None and binding.key.casefold() == _FOLDED_NAME
+    )
+
+
+def persistence_key_source(
+    environ: Mapping[str, str] | None = None, env_files: Sequence[Path] | None = None
+) -> str | None:
+    """The one source the key comes from, ``None`` for none; more than one refuses.
+
+    ``environ`` defaults to the process environment and ``env_files`` to the dotenv files the
+    loader reads (``Settings.model_config["env_file"]``, relative to the cwd, read at call time).
+    Every environment name and every file line naming the key counts, an empty value included: a
+    composition root calls this before it resolves the key or creates anything. Messages carry
+    names, absolute paths and counts, never a value or anything derived from one.
+    """
+
+    environment = os.environ if environ is None else environ
+    names = sum(1 for name in environment if name.casefold() == _FOLDED_NAME)
+    sources: list[tuple[str, int, str]] = []
+    if names:
+        sources.append(("the process environment", names, "name"))
+    for path in _loader_env_files() if env_files is None else env_files:
+        lines = _count_file_lines(path)
+        if lines:
+            sources.append((f"the dotenv file {path.absolute()}", lines, "line"))
+    total = sum(count for _, count, _ in sources)
+    if total > 1:
+        named = "; ".join(
+            f"{where} ({count} {unit}{'' if count == 1 else 's'})" for where, count, unit in sources
+        )
+        raise PersistenceKeyError(
+            f"{PERSISTENCE_KEY_ENV} is named {total} times: {named}. Chronos refuses to start "
+            "unless exactly one names it: remove the others (docs/ops/N3-CUTOVER.md step 5, one "
+            "home); the value is not shown"
+        )
+    return sources[0][0] if sources else None
+
+
+def _loader_env_files() -> list[Path]:
+    configured = Settings.model_config.get("env_file")
+    if configured is None:
+        return []
+    if isinstance(configured, (str, os.PathLike)):
+        configured = [configured]
+    return [Path(entry).expanduser() for entry in configured]
+
+
+def _count_file_lines(path: Path) -> int:
+    # the loader reads a regular file or a FIFO and skips anything else; a FIFO was consumed by
+    # that read and cannot be read again to count, so it refuses rather than counting nothing
+    if path.is_fifo():
+        raise PersistenceKeyError(
+            f"the dotenv file {path.absolute()} is a FIFO, so the lines naming "
+            f"{PERSISTENCE_KEY_ENV} cannot be counted; Chronos refuses to start"
+        )
+    if not path.is_file():
+        return 0
+    encoding = Settings.model_config.get("env_file_encoding") or "utf-8"
+    try:
+        text = path.read_text(encoding=encoding)
+    except (OSError, UnicodeError) as error:  # the class only: a decode error quotes bytes
+        raise PersistenceKeyError(
+            f"the dotenv file {path.absolute()} could not be read to count the lines naming "
+            f"{PERSISTENCE_KEY_ENV} ({type(error).__name__}); Chronos refuses to start"
+        ) from None
+    return count_key_lines(text)

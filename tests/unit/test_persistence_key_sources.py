@@ -1,11 +1,13 @@
-"""KEYSRC: the persistence key must come from exactly one source (assessment option (b), with (d)'s naming).
+"""KEYSRC: the persistence key must come from exactly one source (assessment (b) + (d) naming).
 
-The loader (pydantic-settings) reads ``CHRONOS_PERSISTENCE_KEY`` case-insensitively from the process environment, then
-from the dotenv file ``Settings.model_config["env_file"]`` names, the environment winning and, inside the file, the last
-line winning. A second source is how a store gets bound under a key nobody escrowed (out/KEYSRC-ASSESS.md §2), so the two
-composition roots (``build_runtime`` and the mandate CLI) count the names and lines first and refuse more than one, naming
-each source and its count, never the value, a digest, a length or a prefix. B1 stays file-only: it counts the file's
-lines and its P12 folds case. No file named ``.env`` is created here: every dotenv is ``dotenv.synthetic``.
+The loader (pydantic-settings) reads ``CHRONOS_PERSISTENCE_KEY`` case-insensitively from the
+process environment, then from the dotenv file ``Settings.model_config["env_file"]`` names: the
+environment wins and, inside the file, the last line wins. A second source is how a store gets
+bound under a key nobody escrowed (out/KEYSRC-ASSESS.md §2), so the two composition roots
+(``build_runtime`` and the mandate CLI) count the names and lines first and refuse more than one,
+naming each source and its count, never the value, a digest, a length or a prefix. B1 stays
+file-only: it counts the file's lines and its P12 folds case. No file named ``.env`` is created
+here: every dotenv is ``dotenv.synthetic``.
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ from chronos.persistence.database import Database
 from chronos.utils.identifiers import PersistenceKey
 
 _NAME = "CHRONOS_PERSISTENCE_KEY"
-_KELVIN = "CHRONOS_PERSISTENCE_KEY"  # KELVIN SIGN: the loader's str.lower() folds it to "k"
+_KELVIN = (
+    "CHRONOS_PERSISTENCE_\N{KELVIN SIGN}EY"  # KELVIN SIGN: the loader's str.lower() folds it to "k"
+)
 _ACCOUNT = "DU7654321"
 
 
@@ -94,7 +98,9 @@ def _refusal(environ: dict[str, str], files: list[Path]) -> str:
         ("another key", ["CHRONOS_CAPTURE_PEPPER=v"], 0),
     ],
 )
-def test_the_count_is_the_lines_the_loader_parses(label: str, lines: list[str], expected: int) -> None:
+def test_the_count_is_the_lines_the_loader_parses(
+    label: str, lines: list[str], expected: int
+) -> None:
     assert pk.count_key_lines("".join(f"{line}\n" for line in lines)) == expected, label
 
 
@@ -166,7 +172,7 @@ def test_two_lines_in_one_file_refuse(tmp_path: Path, lines: list[str]) -> None:
 
 @pytest.mark.parametrize("name", ["chronos_persistence_key", _KELVIN], ids=["lower", "kelvin"])
 def test_an_environment_name_in_any_case_the_loader_folds_counts(tmp_path: Path, name: str) -> None:
-    """Scenario (d): a lower-case export outranks the file, so it is a source like the exact name."""
+    """Scenario (d): a lower-case export outranks the file: a source like the exact name."""
 
     path = _dotenv(tmp_path, f"CHRONOS_PERSISTENCE_KEY={_key('file')}")
     message = _refusal({name: _key("env")}, [path])
@@ -193,7 +199,7 @@ def test_an_empty_environment_value_is_a_source(tmp_path: Path) -> None:
 
 
 def test_exactly_one_source_is_named_and_not_refused(tmp_path: Path) -> None:
-    """The controls: the conftest case (environment only, no dotenv) and the host's case (file only)."""
+    """The controls: the conftest case (environment only, no dotenv), the host's (file only)."""
 
     absent = tmp_path / "no-such-dotenv.synthetic"
     assert pk.persistence_key_source(environ={_NAME: _key("env")}, env_files=[absent]) == (
@@ -243,7 +249,7 @@ def test_an_unreadable_dotenv_refuses_naming_the_path_only(tmp_path: Path) -> No
 def test_the_default_files_are_the_loaders_at_call_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``env_files=None`` counts what ``Settings()`` reads: ``model_config["env_file"]`` against the cwd."""
+    """``env_files=None`` counts what ``Settings()`` reads: ``model_config["env_file"]``, cwd."""
 
     _dotenv(tmp_path, f"CHRONOS_PERSISTENCE_KEY={_key('file')}")
     monkeypatch.chdir(tmp_path)
@@ -277,9 +283,7 @@ def test_build_runtime_refuses_two_sources_before_anything_is_created(
     _point_settings_at(monkeypatch, path)
     monkeypatch.setenv(_NAME, _key("env"))
     created: list[str] = []
-    monkeypatch.setattr(
-        runtime_module, "configure_logging", lambda *a, **k: created.append("log")
-    )
+    monkeypatch.setattr(runtime_module, "configure_logging", lambda *a, **k: created.append("log"))
     monkeypatch.setattr(runtime_module, "Database", lambda *a, **k: created.append("database"))
 
     with pytest.raises(PersistenceKeyError, match="named 2 times") as caught:
@@ -402,7 +406,9 @@ def test_b1_one_line_naming_the_key_adds_no_key_source_line(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "name", ["chronos_persistence_key", "broker_mode", "BROKER_MODE"], ids=["key", "mode", "kelvin"]
+    "name",
+    ["chronos_persistence_key", "broker_mode", "BRO\N{KELVIN SIGN}ER_MODE"],
+    ids=["key", "mode", "kelvin"],
 )
 def test_b1_p12_flags_an_exported_name_in_any_case_the_loader_folds(name: str) -> None:
     """Scenario (d): ``case_sensitive=False``, so a lower-case export outranks the file too."""
@@ -423,16 +429,20 @@ def test_the_bind_refusal_names_a_different_key_and_prescribes_no_new_database_u
     first = Database(f"sqlite:///{store}")
     first.initialize()
     first.bind_scope(
-        broker_mode="ibkr", environment="paper", account_id=_ACCOUNT,
+        broker_mode="ibkr",
+        environment="paper",
+        account_id=_ACCOUNT,
         key=PersistenceKey.from_hex(_key("bound")),
     )
     first.dispose()
     again = Database(f"sqlite:///{store}")
     again.initialize()
     try:
-        with pytest.raises(RuntimeError, match="already bound to a different broker scope") as caught:
+        with pytest.raises(RuntimeError, match="bound to a different broker scope") as caught:
             again.bind_scope(
-                broker_mode="ibkr", environment="paper", account_id=_ACCOUNT,
+                broker_mode="ibkr",
+                environment="paper",
+                account_id=_ACCOUNT,
                 key=PersistenceKey.from_hex(_key("other")),
             )
     finally:
@@ -452,7 +462,9 @@ def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_u
     bound = Database(f"sqlite:///{store}")
     bound.initialize()
     bound.bind_scope(
-        broker_mode="ibkr", environment="paper", account_id=_ACCOUNT,
+        broker_mode="ibkr",
+        environment="paper",
+        account_id=_ACCOUNT,
         key=PersistenceKey.from_hex(_key("bound")),
     )
     bound.dispose()
@@ -469,7 +481,7 @@ def test_b1_scope_refusal_names_a_different_key_and_prescribes_no_new_database_u
     (finding,) = [f for f in report.findings if f.check == "scope"]
 
     assert finding.level == "REFUSE"
-    assert "already bound to a different broker scope or a different persistence key" in finding.text
+    assert "bound to a different broker scope or a different persistence key" in finding.text
     assert "DATABASE_URL" not in finding.text.split("(")[0]  # no remedy that starts a new store
     assert "choose a new absolute DATABASE_URL" not in finding.text
     assert "runbook step 6" not in finding.text
