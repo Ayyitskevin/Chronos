@@ -24,7 +24,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -2699,3 +2699,130 @@ def test_fix5_p2_2_a_raw_account_like_payload_is_refused_typed_and_demotes(rig: 
     assert raw.lower() not in json.dumps(journal, default=str).lower()
     assert rig.intent_status() is OrderLifecycle.SUBMITTED
     assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
+
+
+# P3-3: the reader's real survivors, pinned at public seams (R2, R3, R4, R11, R14, K01, K05)
+
+
+def test_fix5_p3_3_a_boolean_order_id_is_malformed_never_an_identifier(rig: _Rig) -> None:
+    rig.status(True, "Submitted", 0, 1, 0.0, _PERM, _CLIENT)  # bool is an int subclass
+    rig.consumer.drain()
+
+    assert _outcomes(rig.harness) == [CallbackOutcome.MALFORMED.value]
+    assert _rows(rig.harness, CALLBACK_OUTCOME)[0]["fields"] == ["order_id"]
+
+
+def test_fix5_p3_3_two_different_divergent_replays_of_one_key_are_two_conflict_rows(
+    rig: _Rig,
+) -> None:
+    rig.status(_ORDER, "Submitted", 0, 1, 0.0, _PERM, _CLIENT)
+    rig.status(_ORDER, "Submitted", 0, 5, 0.0, _PERM, _CLIENT)  # same key, other remaining
+    rig.status(_ORDER, "Submitted", 0, 7, 0.0, _PERM, _CLIENT)  # same key, a third remaining
+    rig.status(_ORDER, "Submitted", 0, 7, 0.0, _PERM, _CLIENT)  # that divergence again: one row
+    rig.consumer.drain()
+
+    conflicts = _rows(rig.harness, CALLBACK_CONFLICT)
+    assert len(conflicts) == 2
+    assert len({row["digest"] for row in conflicts}) == 2
+    assert {row["key"] for row in conflicts} == {_rows(rig.harness, CALLBACK_JOURNAL)[0]["key"]}
+
+
+def _closed_deferred_then_moved(rig: _Rig) -> None:
+    """A status closed `deferred_to_reconciler`, after which the reconciler moves the intent."""
+
+    assert rig.harness.tracker_repo.record_transition(
+        intent_id="intent-1",
+        event_key="intent-1:test:SUBMISSION_UNKNOWN",
+        source="TEST",
+        from_status=OrderLifecycle.SUBMITTED,
+        to_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+        current_account_id=PAPER_ACCOUNT,
+        occurred_at=FIXED_NOW,
+        enforce_from_status=True,
+    )
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+    rig.clock.advance(61)
+    rig.consumer.sweep()
+    assert _outcomes(rig.harness) == [CallbackOutcome.DEFERRED_TO_RECONCILER.value]
+    assert rig.harness.tracker_repo.record_transition(
+        intent_id="intent-1",
+        event_key="intent-1:test:SUBMITTED-again",
+        source="TEST",
+        from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+        to_status=OrderLifecycle.SUBMITTED,
+        current_account_id=PAPER_ACCOUNT,
+        occurred_at=FIXED_NOW,
+        enforce_from_status=True,
+    )
+
+
+def test_fix5_p3_3_a_replay_of_a_closed_event_never_re_evaluates_it(rig: _Rig) -> None:
+    _closed_deferred_then_moved(rig)
+
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)  # IBKR re-sends it
+    rig.consumer.drain()
+
+    # the closed row's answer stands: re-evaluating it now would advance the intent while its
+    # outcome row still says the reconciler owns it
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    assert [event for event in rig.events() if event.source == CALLBACK_SOURCE] == []
+    assert _outcomes(rig.harness) == [CallbackOutcome.DEFERRED_TO_RECONCILER.value]
+
+
+def test_fix5_p3_3_the_sweep_never_re_drives_a_closed_row(rig: _Rig) -> None:
+    _closed_deferred_then_moved(rig)
+
+    assert rig.consumer.sweep() == 0
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    assert [event for event in rig.events() if event.source == CALLBACK_SOURCE] == []
+
+
+def test_fix5_p3_3_a_recovered_status_keeps_its_capture_time_not_the_sweep_time(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crashing = _restart(rig, monkeypatch, tracker=_Tracker(rig.harness.tracker, crash="before"))
+    crashing.bridge.note_own_order(_ORDER)
+    crashing.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    with pytest.raises(_Crash):
+        crashing.consumer.drain()
+    received_at = datetime.fromisoformat(_rows(rig.harness, CALLBACK_JOURNAL)[0]["received_at"])
+
+    rig.clock.advance(120)  # the recovering process sweeps two minutes later
+    assert _restart(rig, monkeypatch).consumer.sweep() == 1
+    applied = [event for event in rig.events() if event.source == CALLBACK_SOURCE]
+    assert len(applied) == 1
+    # U-B's cancel-dwell floor measures from occurred_at: provenance is the capture time
+    assert applied[0].occurred_at.replace(tzinfo=None) == received_at.replace(tzinfo=None)
+
+
+def test_fix5_p3_3_the_persisted_client_id_is_checked_even_when_capture_says_own(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a process on another client id that marked 9001 own: capture cannot tell, the triple can
+    other = CallbackBridge(
+        RequestRegistry(),
+        on_connection_uncertain=lambda reason: rig.invalidations.append(reason),
+        client_id=_CLIENT + 1,
+    )
+    other.note_own_order(_ORDER)
+    other.set_stream_sink(rig.consumer.offer)
+    app = _official_app(other, monkeypatch)
+    app.orderStatus(_ORDER, "Filled", 1, 0, 1.25, _PERM, 0, 1.25, _CLIENT + 1, "", 0.0)
+    rig.consumer.drain()
+
+    outcome = _rows(rig.harness, CALLBACK_OUTCOME)
+    assert [row["outcome"] for row in outcome] == [CallbackOutcome.IDENTITY_MISMATCH.value]
+    assert outcome[0]["fields"] == ["client_id"]
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
+
+
+def test_fix5_p3_3_a_commission_pairs_only_with_the_exact_execution_id(rig: _Rig) -> None:
+    rig.app.commissionReport(FakeCommissionReport(_EXEC_ID.upper(), 1.05, "USD"))
+    rig.app.execDetails(-1, _option_contract(), _execution(rig.order_ref))
+    rig.consumer.drain()
+
+    assert _EXEC_ID.upper() != _EXEC_ID
+    assert _fills(rig.harness) == []  # the execution still waits for ITS commission
+    assert _outcomes(rig.harness) == []
