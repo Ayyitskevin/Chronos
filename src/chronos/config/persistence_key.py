@@ -16,7 +16,7 @@ both before anything resolves and refuses more than one, naming each source and 
 KEYSRC-FIX1 (Kimi HOLD P1 @ cf702bf): the count and the key must be ONE snapshot. A composition
 root calls :func:`take_persistence_key_snapshot` before the settings loader runs: it copies the
 process environment once and reads each dotenv file once, and both the count and the key come from
-those bytes, parsed with the loader's own ``dotenv_values``.
+those bytes, parsed by python-dotenv's own parser (FIX3: without interpolation).
 
 KEYSRC-FIX2 (Kimi HOLD P1 @ 3a040e8): comparing the loader's value with the snapshot's proved the
 values equal, not the sources: a same-value environment binding that appeared after the snapshot
@@ -24,6 +24,12 @@ was honoured by the loader but never counted. So the key a root USES is resolved
 snapshot itself (:meth:`PersistenceKeySnapshot.resolve`, no settings object), and the roots never
 read the settings' copy of the key field: no later read of the environment or the file can change
 the key in use. ``Settings`` still loads the field (untouched); nothing at a root consults it.
+
+KEYSRC-FIX3 (Kimi HOLD P1 @ 6ee990f; the census is in out/KEYSRC/DESIGN.md): python-dotenv
+interpolates every value from the LIVE process environment and the file's other bindings, so the
+key's value had a source outside the snapshot. The count and the value now come from ONE pass of
+the parser, which never interpolates (:func:`key_binding_values`), and a key binding whose raw value
+contains ``$`` is refused, naming the file: a key is 64 lowercase hex digits and never needs it.
 """
 
 from __future__ import annotations
@@ -35,7 +41,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
-from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 from pydantic import SecretStr
 
@@ -47,6 +52,8 @@ _KEY_SHAPE = re.compile(r"[0-9a-f]{64}")
 #: casefold() folds every name the loader's str.lower() folds to the key (and U+017F and the st
 #: ligatures, which it does not): the count can over-count, refusing, but never under-count.
 _FOLDED_NAME = PERSISTENCE_KEY_ENV.casefold()
+#: python-dotenv's interpolation syntax (``${VAR}``, ``${VAR:-default}``): never in a hex key
+INTERPOLATION_MARK = "$"
 
 
 class PersistenceKeyError(RuntimeError):
@@ -83,19 +90,33 @@ def _key_from(value: str | None) -> PersistenceKey:
     return PersistenceKey.from_hex(value)
 
 
-def count_key_lines(text: str) -> int:
-    """How many bindings of dotenv ``text`` name the key, in any case the loader folds.
+def key_binding_values(text: str) -> list[str | None]:
+    """The raw value of every binding of dotenv ``text`` that names the key, in file order.
 
-    The bindings are python-dotenv's own parse (the parser ``dotenv_values`` runs for the loader),
-    so ``export`` forms, quoted and empty values and a bare name count, one per line, while a
-    comment, the name inside a value and an unparsable line do not. Values are never looked at.
+    ONE pass of python-dotenv's own parser (``parse_stream``, the pass ``dotenv_values`` runs for
+    the loader), which never interpolates: a value is exactly what the bytes say after unquoting
+    (``None`` for a bare name), i.e. ``dotenv_values(..., interpolate=False)``. ``export`` forms,
+    quoted and empty values and a bare name are bindings, one per line; a comment, the name inside
+    a value and an unparsable line are not.
     """
 
-    return sum(
-        1
+    return [
+        binding.value
         for binding in parse_stream(io.StringIO(text))
         if binding.key is not None and binding.key.casefold() == _FOLDED_NAME
-    )
+    ]
+
+
+def count_key_lines(text: str) -> int:
+    """How many bindings of dotenv ``text`` name the key, in any case the loader folds."""
+
+    return len(key_binding_values(text))
+
+
+def has_interpolation(values: Sequence[str | None]) -> bool:
+    """Whether a raw key value carries interpolation syntax (a value from elsewhere)."""
+
+    return any(value is not None and INTERPOLATION_MARK in value for value in values)
 
 
 class PersistenceKeySnapshot:
@@ -150,15 +171,18 @@ def take_persistence_key_snapshot(
     sources: list[tuple[str, int, str]] = []
     if names:
         sources.append(("the process environment", len(names), "name"))
+    interpolated: list[Path] = []
     for path in _loader_env_files() if env_files is None else env_files:
         text = _read_dotenv(path)
         if text is None:
             continue
-        lines = count_key_lines(text)
-        if lines:
-            sources.append((f"the dotenv file {path.absolute()}", lines, "line"))
+        values = key_binding_values(text)  # ONE parse: the count and the value, never interpolated
+        if values:
+            sources.append((f"the dotenv file {path.absolute()}", len(values), "line"))
+            if has_interpolation(values):
+                interpolated.append(path)
             if not names:
-                value = _file_value(text)  # the same bytes the count read
+                value = values[-1]
     total = sum(count for _, count, _ in sources)
     if total > 1:
         named = "; ".join(
@@ -168,6 +192,13 @@ def take_persistence_key_snapshot(
             f"{PERSISTENCE_KEY_ENV} is named {total} times: {named}. Chronos refuses to start "
             "unless exactly one names it: remove the others (docs/ops/N3-CUTOVER.md step 5, one "
             "home); the value is not shown"
+        )
+    if interpolated:
+        raise PersistenceKeySourceError(
+            f"{PERSISTENCE_KEY_ENV} in the dotenv file {interpolated[0].absolute()} contains '$', "
+            "interpolation syntax: its value would come from another variable, outside the counted "
+            "sources. Chronos refuses to start; a key is 64 lowercase hex digits and never needs "
+            "'$' (the value is not shown)"
         )
     return PersistenceKeySnapshot(sources[0][0] if sources else None, value)
 
@@ -181,14 +212,6 @@ def persistence_key_source(
     """
 
     return take_persistence_key_snapshot(environ, env_files).source
-
-
-def _file_value(text: str) -> str | None:
-    """The key's value in dotenv ``text``, parsed by the loader's own ``dotenv_values``."""
-
-    values = dotenv_values(stream=io.StringIO(text))
-    found = [value for name, value in values.items() if name.casefold() == _FOLDED_NAME]
-    return found[-1] if found else None
 
 
 def _loader_env_files() -> list[Path]:

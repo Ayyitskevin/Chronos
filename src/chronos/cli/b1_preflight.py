@@ -52,6 +52,8 @@ from chronos.config.persistence_key import (
     PERSISTENCE_KEY_ENV,
     PersistenceKeyError,
     count_key_lines,
+    has_interpolation,
+    key_binding_values,
     resolve_persistence_key,
 )
 from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
@@ -124,7 +126,7 @@ def preflight_b1_env(
     """
 
     found: list[tuple[str, str]] = []
-    values = {k: v for k, v in dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    values = _file_values(text)
 
     ambient = sorted(k for k in (environ or {}) if k.casefold().startswith(_AMBIENT_FOLDED))
     if ambient:
@@ -304,6 +306,26 @@ class _FileOnlySettings(Settings):
         return (init_settings,)
 
 
+def _file_values(text: str) -> dict[str, str]:
+    """The file's values for B1's file-only settings: the loader's parse, except the key.
+
+    KEYSRC-FIX3: python-dotenv interpolates every value from the LIVE environment, so the key is
+    the file's RAW binding (the backend's own interpolation-free parse, last line, as the loader
+    would pick); every other value keeps the loader's semantics.
+    """
+
+    folded = PERSISTENCE_KEY_ENV.casefold()
+    values = {
+        k: v
+        for k, v in dotenv_values(stream=io.StringIO(text)).items()
+        if v is not None and k.casefold() != folded
+    }
+    key_values = key_binding_values(text)
+    if key_values and key_values[-1] is not None:
+        values[PERSISTENCE_KEY_ENV] = key_values[-1]
+    return values
+
+
 def _load_settings(values: Mapping[str, str]) -> Settings | str:
     """Build Settings from the file's own values only (never os.environ, never any .env)."""
 
@@ -432,7 +454,19 @@ def _env_lines(report: B1Report, text: str, environ: Mapping[str, str]) -> None:
             "and empty values included); the backend refuses to start unless exactly one names it: "
             "keep one (the value is not shown)",
         )
-    values = {k: v for k, v in dotenv_values(stream=io.StringIO(text)).items() if v is not None}
+    # KEYSRC-FIX3: python-dotenv interpolates every value from the LIVE environment, so the key
+    # B1 checks is the file's RAW binding (the backend's own parse), and a key binding with
+    # interpolation syntax is refused here as the backend refuses it
+    key_values = key_binding_values(text)
+    if has_interpolation(key_values):
+        report.add(
+            "REFUSE",
+            "key-source",
+            f"{PERSISTENCE_KEY_ENV} contains '$' (interpolation syntax) in the file: its value "
+            "would come from another variable, not from the file; the backend refuses to start: "
+            "write the key itself (the value is not shown)",
+        )
+    values = _file_values(text)
     settings = _load_settings(values)
     if isinstance(settings, str):
         report.add("INFO", "database", "not checked: the file's settings did not load (P1/P8)")
