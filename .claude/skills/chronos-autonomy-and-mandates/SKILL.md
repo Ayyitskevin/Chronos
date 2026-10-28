@@ -110,7 +110,10 @@ points): `references/contract-tables.md`. The essentials:
 **Four DEAD economic fields** — `exit_plan`, `protective_order_required`,
 `max_acceptable_loss_usd`, `requested_risk_budget_usd` — affect ONLY the dedup
 fingerprint; no supervisor or orders module reads them (grep-verified
-2026-08-02). AGENTS.md:29-30 and Phase-1 item 7
+2026-08-02). *Update 2026-10-28 (D-17 (iii), D-52): `exit_plan` and
+`protective_order_required` are now REFUSED. Admission refuses a set value with
+`PROTECTION_NOT_AVAILABLE`, building ADR-0021 Group B as "forbid". The two
+monetary caps are still dead.* AGENTS.md:29-30 and Phase-1 item 7
 (docs/VISION_COMPLETION_PLAN.md:160-162) require every economic-looking field to
 become enforced, explicitly advisory, or forbidden. **Status: OPEN.** Route any
 resolution through `chronos-change-control`; do not quietly wire or delete them.
@@ -520,7 +523,7 @@ root with the project venv per README Setup, `.venv/bin/python`):
 | ~~COMPLETE-on-refusal defect still open (item 5)~~ **fixed 2026-08-13 (A1/R-49)**; verify the fix is still in force | `grep -n "counts_activity_attempt\|_HANDOFF_STAGE" src/chronos/supervisor/loop.py` and `grep -n "_PROVABLY_NOT_SENT" src/chronos/api/autonomy_wiring.py` — the defect is back if a non-exception refused outcome records COMPLETE again (`.venv/bin/pytest tests/safety/test_typed_handoff_outcomes_exercised.py -q`) |
 | Arming still required on LIVE (item 4) | `grep -n "is_armed" src/chronos/orders/submission.py` and `grep -n "session_arming" src/chronos/orders/live_gate.py` |
 | writer_lease_held literal + auto-confirm still present | `sed -n '195,205p' src/chronos/api/autonomy_wiring.py` |
-| Four decision fields still dead (item 7) | `grep -rn "exit_plan\|protective_order_required\|max_acceptable_loss_usd\|requested_risk_budget_usd" src/chronos --include="*.py" \| grep -v "autonomy/decision.py" \| grep -v "supervisor/queue.py"` — empty output = still dead |
+| Two decision fields still dead (item 7; the protection pair is REFUSED since D-17 (iii)) | `grep -rn "max_acceptable_loss_usd\|requested_risk_budget_usd" src/chronos --include="*.py" \| grep -v "autonomy/decision.py" \| grep -v "supervisor/queue.py" \| grep -v "autonomy/decision_enforcement.py"` — empty output = still dead |
 | Promotion still self-declared (item 8) | `grep -rn "FamilyPromotion" src/chronos --include="*.py"` — only the definition + mandate field = still no grant/demote code |
 | Provenance still static (item 6) | `sed -n '84,94p' src/chronos/api/autonomy_wiring.py` |
 | No LLM SDK in-repo | `grep -n "anthropic\|openai\|litellm\|langchain" pyproject.toml requirements.txt` — no hits |

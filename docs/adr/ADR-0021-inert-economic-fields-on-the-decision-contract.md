@@ -1,6 +1,7 @@
 # ADR-0021 — The four inert economic fields on `ProposedDecision`
 
 Status: **proposed — owner decision required.** No `DECISIONS.md` row until accepted.
+Group B ruled **"forbid"** by the owner on 2026-10-28 (D-52, building D-17 (iii)): admission refuses `protective_order_required=True` and any `exit_plan` with `PROTECTION_NOT_AVAILABLE`; the fields stay on the contract, so the fingerprint shape does not move. Group A is still proposed.
 
 Date: 2026-08-02
 
