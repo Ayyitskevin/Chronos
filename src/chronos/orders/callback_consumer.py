@@ -12,10 +12,12 @@ asyncio, no conversion. One consumer thread then, per event, in three committed 
    for an execution, never both;
 3. journals the typed outcome (``callback_outcome``).
 
-A crash between the steps leaves the event PENDING (journaled, no outcome). Every start and every
-idle tick re-drives PENDING rows from their STORED facts; the effects are idempotent (the
-tracker's event key, the execution id), so a re-drive never applies twice and no lifecycle,
-fill or commission advance can exist without its journal row before it.
+A crash between the steps leaves the event PENDING (journaled, no outcome). A sweep re-drives
+PENDING rows from their STORED facts on every start, after a failure streak clears, and every
+``_SWEEP_SECONDS`` (never on an idle second: the sweep is a full anti-join over an append-only
+journal). The effects are idempotent (the tracker's event key, the execution id), so a re-drive
+never applies twice and no lifecycle, fill or commission advance can exist without its journal
+row before it.
 
 Correlation is exact or nothing: an execution must be own at capture (the RC-1 classifier), in
 the bound account and proven by the persisted ownership ledger; an orderStatus must be own at
