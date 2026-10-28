@@ -1702,6 +1702,13 @@ def test_fix2_p2_a_stop_without_the_lease_demotes_but_writes_no_health_row(rig: 
     assert _rows(rig.harness, CALLBACK_CONSUMER_HEALTH) == []
 
 
+def test_fix2_p3_the_module_docstring_names_the_sweeps_the_consumer_runs() -> None:
+    doc = consumer_module.__doc__ or ""
+    assert "idle tick" not in doc  # CB1-FIX1 F5 retired the idle-tick sweep
+    for trigger in ("every start", "failure streak", "``_SWEEP_SECONDS``"):
+        assert trigger in doc
+
+
 # --- 4 / 5(k) / 5: readiness is never published or inferred by the consumer ---------------------
 
 _LATCH_NAMES = frozenset(
