@@ -2826,3 +2826,43 @@ def test_fix5_p3_3_a_commission_pairs_only_with_the_exact_execution_id(rig: _Rig
     assert _EXEC_ID.upper() != _EXEC_ID
     assert _fills(rig.harness) == []  # the execution still waits for ITS commission
     assert _outcomes(rig.harness) == []
+
+
+# P3-1: one failing PENDING row never starves the rows behind it; its failure is counted and demotes
+
+
+def test_fix5_p3_1_a_poisoned_row_never_starves_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    failing = {"0001f4e8.poison.01", "0001f4e8.healthy.01"}
+    writer: dict[str, Any] = {}
+
+    def record(execution: BrokerExecution) -> Any:
+        if execution.execution_id in failing:
+            raise OperationalError("INSERT", {}, Exception("deterministic writer failure"))
+        return writer["real"](execution)
+
+    made = _make_rig(monkeypatch, record=record)
+    writer["real"] = runtime_module._callback_execution_writer(
+        ExecutionRepository(made.harness.db.sessions)
+    )
+    try:
+        made.clock.advance(31)  # past the commission grace: each row applies without one
+        for exec_id in ("0001f4e8.poison.01", "0001f4e8.healthy.01"):
+            execution = _execution(made.order_ref, exec_id=exec_id)
+            made.app.execDetails(-1, _option_contract(), execution)
+            with pytest.raises(OperationalError):
+                made.consumer.handle(made.consumer._queue.get_nowait())
+        assert len(_rows(made.harness, CALLBACK_JOURNAL)) == 2 and _outcomes(made.harness) == []
+
+        failing.discard("0001f4e8.healthy.01")  # its cause is gone; the older row stays poisoned
+        assert made.consumer.sweep() == 1
+        assert _outcomes(made.harness) == [CallbackOutcome.APPLIED.value]
+        assert [fill[0] for fill in _fills(made.harness)] == ["0001f4e8.healthy.01"]
+        health = made.consumer.health()
+        assert (health.state, health.failures) == ("degraded", 1)
+        assert made.invalidations == [CONSUMER_FAILED_REASON]
+
+        assert made.consumer.sweep() == 0  # still poisoned: counted again, demoted once per streak
+        assert made.consumer.health().failures == 2
+        assert made.invalidations == [CONSUMER_FAILED_REASON]
+    finally:
+        made.harness.close()
