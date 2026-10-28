@@ -158,8 +158,9 @@ check "d47b:header a function-local variable named revision is NOT a module-leve
 # --- [module]: module level is data and imports only (D47B-FIX1, review P1-1) ---------------------------
 # A literal header can be rebound when the module body runs (globals()[...] store, exec, star import); the
 # runtime graph then forks at main's head and merges back to the declared head. The trusted step refuses every
-# module-level statement outside a whitelist instead. mig() writes 12 lines, so an appended payload starts at
-# line 13. Payloads live in files so no shell quoting reaches the Python text.
+# module-level statement outside a whitelist instead, judged on the text the interpreter runs ([encoding] below);
+# a module the file imports can still rebind its header (owner residual, not caught here). mig() writes 12 lines,
+# so an appended payload starts at line 13. Payloads live in files so no shell quoting reaches the Python text.
 P=$T/payloads; mkdir "$P"
 pl() { cat > "$P/$1"; }  # pl <name> <<'EOF' ... EOF
 app() { cat "$P/$1" >> "$M/$V/${2:-0003_step.py}"; }

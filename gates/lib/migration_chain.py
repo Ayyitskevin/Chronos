@@ -8,8 +8,11 @@ Run by gate 40 from the trusted gate set, never from the candidate, and always i
 Both migration chains are read from git OBJECTS (main's at the trusted commit, the candidate's
 at PR_HEAD_SHA in the lane's object store): modes and bytes come from the trees, never from a work
 tree, and no migration is imported, compiled to code or executed. Each revision file's header is
-read with ``ast.parse`` on its text (size-capped; any parser failure is a named FAIL). Invariants,
-each a named FAIL ``[I1]``..``[I8]``:
+read with ``ast.parse`` on its text (size-capped; any parser failure is a named FAIL). That text is
+the text the interpreter runs: a revision file or release script with a BOM, a coding cookie, or
+any encoding the interpreter would not read as plain UTF-8 is a named FAIL ``[encoding]`` (under
+``# coding: utf-7`` a "comment" is code to the interpreter). Invariants, each a named FAIL
+``[I1]``..``[I8]``:
 
   I1 versions/ holds only regular ``NNNN_lowercase.py`` blobs (no link, gitlink, subtree, other)
   I2 every ``revision`` is 4 digits, equals its file name's prefix, and is unique
@@ -22,14 +25,17 @@ each a named FAIL ``[I1]``..``[I8]``:
   I8 the candidate's ``scripts/verify_release_artifact.py`` declares the same head (what CI checks)
 
 Every revision file's MODULE LEVEL must also be data and imports only (named FAIL ``[module]``),
-so the body that runs when Alembic imports the file cannot rebind a header (``globals()[...]``,
-``exec``, a star import): an optional docstring, then ``from __future__ import annotations``
+so a rebinding WRITTEN IN THE FILE (``globals()[...]``, ``exec``, a star import) is refused: an
+optional docstring, then ``from __future__ import annotations``
 (annotations never run), then only imports without ``*``, one-name assignments of literal values
 (constants, tuples/lists of them, and ``<sqlalchemy alias>.<CamelCase>(...)`` constructors on
 literals, as main's column tuples use), and undecorated defs without type parameters whose
-defaults are constants. Def bodies are NOT inspected (they run only in the sandbox), and an
-IMPORTED module is candidate code that runs at import: it can still rebind the importing file's
-globals, which this step cannot see (the README's trust model says so).
+defaults are constants. Anything else is refused, benign or not (a negative number, an attribute
+alias such as ``schema.TABLE``, a lowercase ``sa.text(...)`` call, a class, a decorator): a
+legitimate need is a gates/ change first. Def bodies are NOT inspected (they run only in the
+sandbox), and an IMPORTED module is candidate code that runs at import: it can still rebind the
+importing file's header, which this step cannot see (the README's trust model says so), so the
+body that runs at import is NOT proven unable to rebind a header.
 
 On success the trusted overlay's one ``_MIGRATION_HEAD`` line is set to the derived head (no write
 when it is already main's) and the head is printed. Every other byte of the overlay stays main's.
@@ -38,10 +44,12 @@ when it is already main's) and the head is printed. Every other byte of the over
 from __future__ import annotations
 
 import ast
+import io
 import os
 import re
 import subprocess
 import sys
+import tokenize
 import warnings
 from collections import Counter
 
@@ -56,6 +64,7 @@ MAX_FILES, MAX_BYTES, MAX_SCRIPT_BYTES = 256, 64 * 1024, 1024 * 1024
 REGULAR = ("100644", "100755")
 TRUSTED_DEFECT = "(trusted base: a trusted-base defect; fix main first)"
 CONSTRUCTOR = re.compile(r"[A-Z][A-Za-z0-9]*")
+COOKIE = re.compile(rb"#[^\n]*?coding[:=]")
 
 
 class ChainError(Exception):
@@ -78,6 +87,33 @@ def blob(repo: str, oid: str, cap: int, what: str) -> bytes:
     if int(git(repo, "cat-file", "-s", oid)) > cap:
         raise ChainError(f"[parse] {what} is larger than {cap} bytes")
     return git(repo, "cat-file", "blob", oid)
+
+
+def check_encoding(data: bytes, where: str) -> None:
+    """Refuse ``data`` unless the interpreter decodes it as plain UTF-8 (named FAIL ``[encoding]``).
+
+    CPython decodes a source file by its BOM or PEP 263 coding cookie; this step reads the bytes as
+    plain UTF-8, so under ``# coding: utf-7`` it would judge comment text that the interpreter runs
+    as code. Refused: an encoding other than ``utf-8`` (as ``tokenize.detect_encoding`` reports it,
+    BOM included), an undecidable one, and any coding cookie at all: with no BOM and no cookie in
+    the first two lines (a superset of every interpreter's cookie lines), every CPython reads UTF-8.
+    """
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError:
+        raise ChainError(
+            f"[encoding] {where}: the interpreter cannot determine its encoding (SyntaxError)"
+        ) from None
+    if encoding != "utf-8":
+        raise ChainError(
+            f"[encoding] {where}: the interpreter would decode it as {shown(encoding)}; "
+            "only plain UTF-8 is read"
+        )
+    if COOKIE.search(b"\n".join(data.split(b"\n", 2)[:2])):
+        raise ChainError(
+            f"[encoding] {where}: a coding cookie is not allowed "
+            "(plain UTF-8, the default, is what this step reads)"
+        )
 
 
 def versions(repo: str, commit: str) -> dict[str, tuple[str, bytes]]:
@@ -220,6 +256,7 @@ def module_shape(tree: ast.Module, where: str, stores: Counter[str]) -> None:
 def header(name: str, data: bytes) -> tuple[str, str | None]:
     """(revision, down_revision) from the file's literal module-level header; never executed."""
     where = f"versions/{shown(name)}"
+    check_encoding(data, where)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -321,7 +358,9 @@ def derive(trusted: str, base: str, lane: str, head_sha: str, overlay: str) -> s
         main = versions(trusted, base)
         main_head, main_root, _ = chain(main)
         with open(overlay, "rb") as fh:
-            main_script = fh.read().decode("utf-8")
+            main_raw = fh.read()
+        check_encoding(main_raw, SCRIPT)
+        main_script = main_raw.decode("utf-8")
         line, main_literal = literal(main_script, "I7")
     except ChainError as exc:
         raise ChainError(f"{exc} {TRUSTED_DEFECT}") from None
@@ -353,8 +392,13 @@ def derive(trusted: str, base: str, lane: str, head_sha: str, overlay: str) -> s
             f"[I5] main's head {main_head} is not an ancestor of the candidate head {head}"
         )
     try:
-        cand_script = blob(lane, f"{head_sha}:{SCRIPT}", MAX_SCRIPT_BYTES, SCRIPT).decode("utf-8")
-    except (ChainError, UnicodeDecodeError):
+        cand_raw = blob(lane, f"{head_sha}:{SCRIPT}", MAX_SCRIPT_BYTES, SCRIPT)
+    except ChainError:
+        raise ChainError(f"[I8] cannot read the candidate's {SCRIPT}") from None
+    check_encoding(cand_raw, SCRIPT)
+    try:
+        cand_script = cand_raw.decode("utf-8")
+    except UnicodeDecodeError:
         raise ChainError(f"[I8] cannot read the candidate's {SCRIPT}") from None
     _, cand_literal = literal(cand_script, "I8")
     if cand_literal != head:
