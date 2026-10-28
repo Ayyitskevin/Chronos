@@ -25,6 +25,8 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
+from types import SimpleNamespace
 from typing import Any
 
 from chronos.broker.base import BrokerDataError
@@ -201,6 +203,43 @@ class _MarketRuleFlight:
     truncated: bool = False
 
 
+class StreamKind(StrEnum):
+    """CB-1: the three unsolicited broker streams the callback consumer journals."""
+
+    EXECUTION = "execution"
+    ORDER_STATUS = "order_status"
+    COMMISSION = "commission"
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEvent:
+    """CB-1: one streamed callback exactly as it arrived, copied on the reader thread.
+
+    ``raw`` holds the callback's arguments unconverted (a hostile value stays hostile, so nothing
+    here can raise); ``contract`` / ``execution_fields`` are attribute snapshots of the ibapi
+    objects. ``own_at_capture`` is the RC-1 classifier's answer when the event arrived, kept so a
+    replay after a restart does not depend on this process's in-memory own-order set. The Demo
+    seam hands a normalized ``execution`` instead.
+    """
+
+    kind: StreamKind
+    received_at: datetime
+    own_at_capture: bool
+    raw: dict[str, Any] = field(default_factory=dict)
+    contract: SimpleNamespace | None = None
+    execution_fields: SimpleNamespace | None = None
+    execution: Any = None
+
+
+def _snapshot(value: Any) -> SimpleNamespace | None:
+    """The object's attributes as a detached namespace, or None when it has none to copy."""
+
+    try:
+        return SimpleNamespace(**dict(vars(value)))
+    except Exception:
+        return None
+
+
 #: RC-1 (owner answer K8 = (a), tightening only): the typed reasons a streamed observation
 #: gives readiness when it demotes it.
 UNSOLICITED_EXECUTION_REASON = "unsolicited broker execution observed; reconciliation required"
@@ -264,6 +303,14 @@ class UnsolicitedObservationClassifier:
         """Return True when the observation invalidated readiness."""
 
         return self._observe(client_id, order_id, UNSOLICITED_ORDER_STATUS_REASON, "order_status")
+
+    def is_own_order(self, client_id: object, order_id: object) -> bool:
+        """CB-1: the own-and-correlated answer for raw identifiers; never touches the latch."""
+
+        return self._is_own(
+            _broker_id(client_id, minimum=_MIN_CLIENT_ID),
+            _broker_id(order_id, minimum=_MIN_ORDER_ID),
+        )
 
     def _is_own(self, client_id: int | None, order_id: int | None) -> bool:
         if self._client_id is None or client_id is None or order_id is None:
@@ -338,6 +385,47 @@ class CallbackBridge:
         # observer is not wired. Advanced on every reconnect reset and every connection
         # uncertainty (connection closed included), BEFORE the no-observer early return.
         self._adapter_epoch = 0
+        # CB-1: the callback consumer's ``offer``, attached only while a writer's consumer runs.
+        self._stream_sink: Callable[[StreamEvent], object] | None = None
+
+    # ------------------------------------------------------------------ #
+    # CB-1: unsolicited streams to the callback consumer
+    # ------------------------------------------------------------------ #
+
+    def set_stream_sink(self, sink: Callable[[StreamEvent], object] | None) -> None:
+        with self._lock:
+            self._stream_sink = sink
+
+    def _emit_stream(
+        self,
+        kind: StreamKind,
+        *,
+        own: bool,
+        raw: dict[str, Any] | None = None,
+        contract: Any = None,
+        execution: Any = None,
+    ) -> None:
+        """Hand one streamed callback to the consumer; copies only, never converts or raises."""
+
+        with self._lock:
+            sink = self._stream_sink
+        if sink is None:
+            return
+        try:
+            event = StreamEvent(
+                kind=kind,
+                received_at=datetime.now(tz=UTC),
+                own_at_capture=own,
+                raw=dict(raw or {}),
+                contract=_snapshot(contract) if contract is not None else None,
+                execution_fields=_snapshot(execution) if execution is not None else None,
+            )
+            sink(event)
+        except Exception:
+            self._logger.exception(
+                "Callback stream sink failed",
+                extra={"event": "callback_stream_sink_failed", "stream": kind.value},
+            )
 
     # ------------------------------------------------------------------ #
     # Connection-level callbacks
@@ -612,6 +700,36 @@ class CallbackBridge:
             order_id=_broker_id(order_id, minimum=_MIN_ORDER_ID),
         )
 
+    def on_order_status_stream(
+        self,
+        order_id: object,
+        status: object,
+        filled: object,
+        remaining: object,
+        avg_fill_price: object,
+        perm_id: object,
+        client_id: object,
+    ) -> None:
+        """CB-1: the orderStatus callback's RAW arguments to the consumer (never raises)."""
+
+        try:
+            own = self.unsolicited.is_own_order(client_id, order_id)
+        except Exception:  # pragma: no cover - the validator itself never raises
+            own = False
+        self._emit_stream(
+            StreamKind.ORDER_STATUS,
+            own=own,
+            raw={
+                "order_id": order_id,
+                "status": status,
+                "filled": filled,
+                "remaining": remaining,
+                "avg_fill_price": avg_fill_price,
+                "perm_id": perm_id,
+                "client_id": client_id,
+            },
+        )
+
     def _fail_all_single_flights(self, reason: str) -> None:
         with self._lock:
             flights = [
@@ -678,6 +796,13 @@ class CallbackBridge:
             except Exception:  # an unreadable identifier is uncorrelated, and stays in here
                 client_id = order_id = None
             self.unsolicited.observe_execution(client_id=client_id, order_id=order_id)
+            # CB-1: retained for the consumer, never returned early after the invalidation
+            self._emit_stream(
+                StreamKind.EXECUTION,
+                own=self.unsolicited.is_own_order(client_id, order_id),
+                contract=contract,
+                execution=execution,
+            )
             return
         self.registry.add(req_id, (contract, execution))
 
@@ -685,6 +810,13 @@ class CallbackBridge:
         self.registry.finish(req_id)
 
     def on_commission_report(self, report: Any) -> None:
+        # CB-1: the raw report reaches the consumer before the conversion below can raise
+        snapshot = _snapshot(report)
+        self._emit_stream(
+            StreamKind.COMMISSION,
+            own=False,  # a commission report carries no order identity; its execution does
+            raw=dict(vars(snapshot)) if snapshot is not None else {},
+        )
         exec_id = str(getattr(report, "execId", "") or "")
         if not exec_id:
             return
