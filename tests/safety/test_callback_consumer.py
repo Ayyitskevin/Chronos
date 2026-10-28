@@ -59,6 +59,7 @@ from chronos.orders.callback_consumer import (
     CallbackConsumer,
     CallbackJournal,
     CallbackOutcome,
+    ExecutionWriteOutcome,
     JournalVerdict,
 )
 from chronos.orders.ownership import PersistedOrderOwnershipLedger
@@ -478,6 +479,8 @@ def test_2_5d_two_intents_carrying_one_order_id_are_ambiguous_not_first_match(ri
 
     assert _outcomes(rig.harness) == [CallbackOutcome.AMBIGUOUS_INTENT.value]
     assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    # CB1-FIX5 P2-2: own at capture, so RC-1 did not demote; the consumer's mapping is the only one
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
 
 
 def test_2_5d_an_order_id_reused_after_a_restart_is_not_own_and_mutates_nothing(
@@ -509,6 +512,8 @@ def test_2_an_execution_whose_order_ref_is_unknown_is_unproven_and_never_recorde
 
     assert _outcomes(rig.harness) == [CallbackOutcome.OWNERSHIP_UNPROVEN.value]
     assert _fills(rig.harness) == []
+    # CB1-FIX5 P2-2: own at capture, so RC-1 did not demote; the consumer's mapping is the only one
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
 
 
 def test_2_a_commission_for_an_unknown_execution_id_is_typed_after_its_grace(rig: _Rig) -> None:
@@ -2627,3 +2632,70 @@ def test_fix4_an_event_taken_after_the_stop_gave_up_is_never_handled(tmp_path: P
         release.set()
         consumer.stop(timeout=1)
         file_rig.database.dispose()
+
+
+# --- CB1-FIX5 (reader's independent read, HOLD P2=2 @ f6bd853) ------------------------------------
+# P2-2: every _INVALIDATING member and the unsafe-payload path demote. An OWN event is never
+# demoted by RC-1 at capture, so for each case below the consumer's mapping is the ONLY demotion:
+# the exact list is the pin (mutants I4, I6, I7, I10, I11, R8).
+
+
+def test_fix5_p2_2_an_identity_conflict_on_the_intent_is_typed_and_demotes(rig: _Rig) -> None:
+    # two DISTINCT permIds persisted for intent-1: the tracker fails closed, never latest or first
+    assert rig.harness.tracker_repo.record_transition(
+        intent_id="intent-1",
+        event_key="intent-1:test:CANCEL_PENDING",
+        source="TEST",
+        from_status=OrderLifecycle.SUBMITTED,
+        to_status=OrderLifecycle.CANCEL_PENDING,
+        current_account_id=PAPER_ACCOUNT,
+        broker_order_id=_ORDER,
+        permanent_id=_PERM + 7,
+        client_id=_CLIENT,
+        occurred_at=FIXED_NOW,
+        enforce_from_status=True,
+    )
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    outcome = _rows(rig.harness, CALLBACK_OUTCOME)
+    assert [row["outcome"] for row in outcome] == [CallbackOutcome.IDENTITY_CONFLICT.value]
+    assert outcome[0]["field"] == "permanent_id"
+    assert rig.intent_status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
+
+
+@pytest.mark.parametrize(
+    ("written", "outcome"),
+    [
+        (ExecutionWriteOutcome.CONFLICT, CallbackOutcome.EXECUTION_CONFLICT),
+        (ExecutionWriteOutcome.REFUSED, CallbackOutcome.EXECUTION_REFUSED),
+    ],
+)
+def test_fix5_p2_2_a_fills_writer_conflict_or_refusal_is_typed_and_demotes(
+    monkeypatch: pytest.MonkeyPatch, written: ExecutionWriteOutcome, outcome: CallbackOutcome
+) -> None:
+    made = _make_rig(monkeypatch, record=lambda execution: written)
+    try:
+        made.app.commissionReport(FakeCommissionReport(_EXEC_ID, 1.05, "USD"))
+        made.app.execDetails(-1, _option_contract(), _execution(made.order_ref))
+        made.consumer.drain()
+
+        assert _outcomes(made.harness) == [outcome.value]  # the commission stays PENDING
+        assert _fills(made.harness) == []
+        assert made.invalidations == [UNPROVEN_CALLBACK_REASON]
+    finally:
+        made.harness.close()
+
+
+def test_fix5_p2_2_a_raw_account_like_payload_is_refused_typed_and_demotes(rig: _Rig) -> None:
+    raw = "DU2468024"  # synthetic: an account-shaped status string trips the journal's guard
+    rig.status(_ORDER, raw, 1, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert _outcomes(rig.harness) == [CallbackOutcome.REFUSED_UNSAFE_PAYLOAD.value]
+    journal = _rows(rig.harness, CALLBACK_JOURNAL)
+    assert len(journal) == 1 and journal[0]["facts"]["refused"] == "raw-account-like value"
+    assert raw.lower() not in json.dumps(journal, default=str).lower()
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
