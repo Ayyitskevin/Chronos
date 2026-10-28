@@ -5,7 +5,7 @@
 # release security script) plus one read-only run each on this repo. Numbered by the GATES-2 contract
 # (1-4), GATES-1r1 (`r1:<item> <finding>`) and GATES-2r1 (`r2:<item> <finding>`).
 set -u
-ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=$ROOT/gates; pass=0; fail=0
+ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=${GATES_DIR_UNDER_TEST:-$ROOT/gates}; pass=0; fail=0
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 ok() { pass=$((pass+1)); echo "ok       $1"; }; bad() { fail=$((fail+1)); echo "FAIL     $1"; }
@@ -97,6 +97,10 @@ mkdir -p "$T/tools/bin" "$T/xdg"; cat > "$T/tools/bin/python" <<STUB
 import json, os, sys
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 a = sys.argv[1:]
+iso = a[:2] == ["-I", "-B"]                                                                    # GATESISO: the trusted tools python is only ever called isolated
+open("$T/pyiso.log", "a").write(("iso " if iso else "RAW ") + " ".join(a[2:4] if iso else a[:2]) + "\\n")
+if not iso: sys.exit(98)
+a = a[2:]
 if a[:3] == ["-m", "pip", "download"]:
     open("$T/dl.log", "a").write(a[a.index("-r") + 1] + "\\n")
     open(os.path.join(a[a.index("-d") + 1], "stub-1.0-py3-none-any.whl"), "w").write("x")
@@ -424,6 +428,81 @@ check "1 70 FAIL: the limitations contract glob matches nothing → FAIL" "faile
 check "1 70 the README lists the named set it runs" "grep -qF 'test_limitations_*_contract.py' $G/README.md && for f in $NAMED; do grep -qF \"\${f#tests/unit/}\" $G/README.md || exit 1; done"
 (cd "$ROOT" && run bash "$G70")
 check "1 70 PASS on this repo (the real doc-contract tests, real pytest)" "passed docs-claims-pinned"
+
+# --- GATESISO (D-51): the trusted gates run Python isolated (-I -B), so a candidate-tracked module cannot shadow an import ---
+# Each shadow writes a marker on the HOST (a sandboxed run cannot reach it), then transparently re-exports the real module, so a
+# gate that is NOT isolated still reports its normal verdict: only the marker proves the candidate's code ran in the trusted gate.
+MK=$T/mk
+shadow_src() {
+  cat <<PYS
+import os as _o, sys as _s
+try:
+    open("$MK/$1", "a").write("ran\n")
+except OSError:
+    pass
+_cwd = _o.getcwd()
+_drop = [p for p in _s.path if p in ("", ".", _cwd)]
+_s.modules.pop(__name__, None)
+_s.path[:] = [p for p in _s.path if p not in _drop]
+try:
+    import importlib as _i
+    _real = _i.import_module(__name__)
+finally:
+    _s.path[:0] = _drop
+_s.modules[__name__] = _real
+globals().update(vars(_real))
+PYS
+}
+SHADOWS="json hashlib re subprocess os stat ast pathlib"   # os and stat are loaded at startup: inert controls
+plant() { local m; for m in $SHADOWS; do shadow_src "$m" > "$1/$m.py"; git -C "$1" add -- "$m.py"; done; git -C "$1" -c user.email=t@t -c user.name=t commit -qm shadows; }
+markers() { ls "$MK" 2>/dev/null | sort | tr '\n' ' '; }
+fresh_markers() { rm -rf "$MK"; mkdir "$MK"; }
+norm() { sed -E 's/[0-9a-f]{40}/SHA/g; s/[0-9]+ tracked files/N tracked files/' "$1"; }
+same() { [ "$(norm "$T/out")" = "$(norm "$1")" ]; }   # the shadowed run's PASS line equals the clean run's, modulo shas and the tracked-file count
+fresh_markers; newrepo "$T/pc"; (cd "$T/pc" && plant . 2>/dev/null; touch x; cd "$T/pc" && python3 -c 'import subprocess, re, json, hashlib, ast, pathlib')
+check "iso:0 positive control: the planted shadows DO run under a plain python3 -c in the candidate tree (so every 'no marker' below can fail)" "[ \"\$(markers)\" = 'ast hashlib json pathlib re subprocess ' ]"
+
+# gate 40: the heredoc sites (lock validator, audit parser, receipt writer + read-back) and, via the spy stub, the two -m sites
+git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates; : > "$T/pyiso.log"; g40; cp "$T/out" "$T/iso40.clean"
+check "iso:0 40 the clean run passes (the reference line for the shadowed run)" "passed evidence-at-head"
+check "iso:2 40 the trusted pip download (one per lock) and pip_audit both ran isolated: every call of the tools python was -I -B (the stub refuses any other)" "! grep -q '^RAW' $T/pyiso.log && [ \"\$(grep -c '^iso -m pip\$' $T/pyiso.log)\" = 4 ] && [ \"\$(grep -c '^iso -m pip_audit\$' $T/pyiso.log)\" = 1 ]"
+plant "$R40"; H2=$(git -C "$R40" rev-parse HEAD); fresh_markers; g40 "$H2"
+check "iso:1 40 with the eight shadows tracked in the candidate, gate 40's verdict is unchanged" "passed evidence-at-head && same $T/iso40.clean"
+check "iso:1 40 ...and NONE of the candidate's modules ran in the trusted gate (lock validator, audit parser, receipt writer, read-back; no marker)" "[ -z \"\$(markers)\" ]"
+git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates
+
+# gate 50
+mk50; g50; cp "$T/out" "$T/iso50.clean"; plant "$B50"; fresh_markers; g50
+check "iso:1 50 with the shadows tracked in the candidate, gate 50's verdict is unchanged" "passed fixture-integrity && same $T/iso50.clean"
+check "iso:1 50 ...and NONE of the candidate's modules ran in the trusted gate (hashlib/json/re/subprocess/pathlib; no marker)" "[ -z \"\$(markers)\" ]"
+
+# gate 60: the host sites (inputs, baseline merge, judge) ...
+mk60; g60; cp "$T/out" "$T/iso60.clean"; plant "$R60"; fresh_markers; g60
+check "iso:1 60 with the shadows tracked in the candidate, gate 60's verdict is unchanged" "passed secrets-baseline && same $T/iso60.clean"
+check "iso:1 60 ...and NONE of the candidate's modules ran in the trusted gate (inputs, baseline merge, judge; no marker)" "[ -z \"\$(markers)\" ]"
+# ... and the SANDBOXED trusted scanner (python -m detect_secrets...): a tracked detect_secrets package whose hook prints nothing and
+# exits 0 must not stand in for the scanner and forge "no finding" over a tracked secret (a marker cannot leave the sandbox: the verdict is the evidence)
+for where in detect_secrets src/detect_secrets; do
+  mk60; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; mkdir -p "$R60/$where"; : > "$R60/$where/__init__.py"; printf 'raise SystemExit(0)\n' > "$R60/$where/pre_commit_hook.py"; commit "$R60"; g60
+  check "iso:1 60 a tracked $where/ forging a silent exit-0 scanner does NOT hide the tracked secret → the real scanner ran and FAILed" "failed secrets-baseline '1 new finding\\(s\\) vs .secrets.baseline: leak.py:2 AWS Access Key'"
+done
+
+# gate 70
+mk70; g70; cp "$T/out" "$T/iso70.clean"; plant "$R70"; fresh_markers; g70
+check "iso:1 70 with the shadows tracked in the candidate, gate 70's verdict is unchanged" "passed docs-claims-pinned && same $T/iso70.clean"
+check "iso:1 70 ...and NONE of the candidate's modules ran in the trusted gate (AST derivation, node-report verdict; no marker)" "[ -z \"\$(markers)\" ]"
+
+# gates/lib/tools-venv.sh: the venv build and the hash-pinned install run with the candidate tree as cwd
+newrepo "$T/tvtrusted"; printf '# comment-only lock: pip accepts it offline\n' > "$T/tvtrusted/requirements-dev.lock"; commit "$T/tvtrusted"
+tv() { (cd "$1" && XDG_CACHE_HOME="$T/tvxdg-$2" GATES_TRUSTED_REPO="$T/tvtrusted" GATES_TRUSTED_REF=HEAD GATES_TOOLS_VENV= bash -c '. "$1"; tools_venv' _ "$G/lib/tools-venv.sh" > "$T/out" 2> "$T/err"; echo $? > "$T/rc"); }
+for pkg in venv pip; do
+  newrepo "$T/tvc-$pkg"; mkdir "$T/tvc-$pkg/$pkg"; printf 'open("%s/%s", "a").write("ran\\n")\nraise SystemExit(0)\n' "$MK" "$pkg" > "$T/tvc-$pkg/$pkg/__main__.py"; : > "$T/tvc-$pkg/$pkg/__init__.py"; commit "$T/tvc-$pkg"
+  fresh_markers; (cd "$T/tvc-$pkg" && python3 -m "$pkg" > /dev/null 2>&1)
+  check "iso:0 tools-venv positive control: the planted $pkg/ package runs under a plain python3 -m $pkg in the candidate tree" "[ -e $MK/$pkg ]"
+  fresh_markers; rm -rf "$T/tvxdg-$pkg"; tv "$T/tvc-$pkg" "$pkg"
+  check "iso:1 tools-venv: with a tracked $pkg/ package in the candidate tree the trusted tools venv still builds (path printed, marker file written) ..." "rc 0 && [ -f \"\$(cat $T/out)/.gates-lock-sha256\" ] && [ ! -s $T/err ]"
+  check "iso:1 tools-venv: ...and the candidate's $pkg/ never ran (the venv build and the pip install are isolated; no marker)" "[ -z \"\$(markers)\" ]"
+done
 
 # --- contract 4: the harness never edits existing tests or source ------------------------------
 check "4 this repo's tracked tree is unchanged by the harness (git status empty)" "[ -z \"\$(git -C $ROOT status --porcelain --untracked-files=no)\" ]"
