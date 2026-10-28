@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 from tests.support import fake_ibapi
-from tests.support.order_fakes import option_contract
+from tests.support.order_fakes import FIXED_NOW, option_contract
 from tests.support.settle_rig import (
     EARLIER_TODAY,
     NOW,
@@ -50,6 +50,8 @@ from chronos.domain.enums import (
     ReconciliationStatus,
 )
 from chronos.domain.models import BrokerOrder, LocalReconciliationEvidence, OrderRequest
+from chronos.orders.evidence import BrokerRiskEvidenceProvider
+from chronos.orders.intent import build_option_intent
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.services.reconciliation import ReconciliationCoordinator
 
@@ -511,3 +513,152 @@ def test_control_operator_resolve_reads_absence_differently(rig: Rig) -> None:
         rig.reconciler.operator_resolve(
             "intent-1", operator_note="d43 pin", current_account_id=rig.account, now=NOW
         )
+
+
+# --- D43-FIX1: a quarantined row demotes readiness and the evidence path refuses it -----------
+# Kimi's HOLD (out/REVIEW-D43-SEC-xreview-kimi31.md): a malformed own-order figure arriving AFTER a
+# valid reconciliation was quarantined, but readiness stayed READY and the risk evidence said
+# RECONCILED, so the next opening submission could claim the stale proof.
+
+QUARANTINE_REASON = "broker open order fill figures quarantined; reconciliation required"
+
+
+def _drop_replayed_status(name: str, args: tuple[Any, ...]) -> list[tuple[str, tuple]]:
+    # the snapshot does not re-send statuses, so the cached (poisoned) figure is what it reads
+    return [] if name == "orderStatus" else [(name, args)]
+
+
+@contextmanager
+def _ready_window(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, *, hooked: bool = True
+) -> Iterator[tuple[OfficialIBKRBroker, BrokerConnectionManager, ReconciliationReadiness, Any]]:
+    """Kimi's probe fixture: an own order, a prior READY proof, then that order's filled figure
+    poisoned through the real EWrapper. ``hooked=False`` builds the adapter without the
+    readiness hook, so only the evidence path's own refusal can stand."""
+
+    _wrap(monkeypatch, gateway, "open_orders", _drop_replayed_status)
+    readiness = ReconciliationReadiness(session_id="d43-fix1-ready-window")
+    broker = OfficialIBKRBroker(
+        fake_ibapi.official_settings(),
+        on_connection_uncertain=readiness.invalidate if hooked else None,
+        on_managed_account_scope_change=readiness.invalidating_transition,
+        order_ownership=fake_ibapi.InstalledGatewayLedger(),
+    )
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+    manager.connect()
+    try:
+        broker.bridge.note_own_order(fake_ibapi.OWNED_ID)
+        client = gateway._clients[0]
+        client.emit(
+            "orderStatus", fake_ibapi.OWNED_ID, "Submitted", 5.0, 5.0, 0.0, 0, 0, 0.0,
+            fake_ibapi.CLIENT_ID, "", 0.0,
+        )  # fmt: skip
+        client.emit(
+            "orderStatus", fake_ibapi.FOREIGN_ID, "Submitted", 0.0, 1.0, 0.0, 0, 0, 0.0,
+            fake_ibapi.MANUAL_CLIENT_ID, "", 0.0,
+        )  # fmt: skip
+        client.wait_dispatched()
+        assert readiness.complete(
+            expected_generation=readiness.snapshot().generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason="synthetic prior parity proof",
+            reconciled_at=FIXED_NOW,
+        )
+        assert readiness.snapshot().ready  # the window opens on a valid READY proof
+        client.emit(
+            "orderStatus", fake_ibapi.OWNED_ID, "Submitted", float("nan"), 5.0, 0.0, 0, 0, 0.0,
+            fake_ibapi.CLIENT_ID, "", 0.0,
+        )  # fmt: skip
+        client.wait_dispatched()
+        yield broker, manager, readiness, client
+    finally:
+        manager.close()
+
+
+def _gather(manager: BrokerConnectionManager, readiness: ReconciliationReadiness) -> Any:
+    provider = BrokerRiskEvidenceProvider(
+        connection=manager,
+        settings=fake_ibapi.official_settings(),
+        reconciliation_readiness=readiness,
+    )
+    intent = build_option_intent(
+        account_id=fake_ibapi.ACCOUNT,
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        contract=option_contract(),
+        quantity=1,
+        limit_price=Decimal("1.20"),
+    )
+    return provider.gather(intent, now=FIXED_NOW)
+
+
+def test_fix1_kimi_probe_ready_then_poisoned_row_refuses_evidence_and_the_guard(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _ready_window(gateway, monkeypatch) as (broker, manager, readiness, _client):
+        generation = readiness.snapshot().generation
+        evidence = _gather(manager, readiness)
+        rows = {row.broker_order_id: row for row in manager.run(broker.open_orders())}
+        after = readiness.snapshot()
+        with readiness.submission_guard(expected_generation=generation) as acquired:
+            pass
+    assert rows[fake_ibapi.OWNED_ID].quantity_quarantine is not None
+    assert evidence.reconciliation_status is ReconciliationStatus.PENDING
+    assert evidence.reconciliation_generation is None
+    assert after.ready is False
+    assert after.reason == QUARANTINE_REASON
+    assert acquired is False
+
+
+def test_fix1_evidence_refuses_a_quarantined_row_even_without_the_readiness_hook(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _ready_window(gateway, monkeypatch, hooked=False) as (_broker, manager, readiness, _c):
+        evidence = _gather(manager, readiness)
+        still_ready = readiness.snapshot().ready
+    assert still_ready  # nothing demoted the latch: the evidence path must refuse on its own
+    assert evidence.reconciliation_status is ReconciliationStatus.PENDING
+
+
+def test_fix1_control_well_formed_figures_keep_the_ready_proof_usable(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _ready_window(gateway, monkeypatch) as (_broker, manager, readiness, client):
+        client.emit(
+            "orderStatus",
+            fake_ibapi.OWNED_ID,
+            "Submitted",
+            5.0,
+            5.0,
+            0.0,
+            0,
+            0,
+            0.0,
+            fake_ibapi.CLIENT_ID,
+            "",
+            0.0,
+        )  # fmt: skip  (the venue corrects the figure)
+        client.wait_dispatched()
+        evidence = _gather(manager, readiness)
+        after = readiness.snapshot()
+    assert evidence.reconciliation_status is ReconciliationStatus.RECONCILED
+    assert after.ready
+
+
+@pytest.mark.parametrize(("value", "cls"), WIRE, ids=WIRE_IDS)
+def test_fix1_every_quarantined_read_invalidates_readiness_with_its_cause(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, value: object, cls: str
+) -> None:
+    _wrap(monkeypatch, gateway, "open_orders", _poison_status(fake_ibapi.OWNED_ID, "filled", value))
+    with _session() as (broker, manager, readiness):
+        before = list(readiness.reasons)
+        manager.run(broker.open_orders())
+        manager.run(broker.open_orders())
+        added = readiness.reasons[len(before) :]
+    # one typed invalidation per quarantining read (the RC-1 classifier adds its own unsolicited
+    # reasons for the snapshot's statuses), never the connection-failure path
+    assert added.count(QUARANTINE_REASON) == 2
+    assert set(added) - {QUARANTINE_REASON} <= {
+        "unsolicited broker order status observed; reconciliation required"
+    }
+    assert MANAGER_FAILURE not in readiness.reasons
+    del cls

@@ -357,3 +357,44 @@ def test_the_three_residual_lines_are_recorded_and_match_the_source() -> None:
     assert Settings.model_fields["broker_adapter"].default is BrokerAdapter.OFFICIAL_IBKR
     ib_async = (_ROOT / "src" / "chronos" / "broker" / "ibkr.py").read_text(encoding="utf-8")
     assert 'raise BrokerDataError("IBKR open order has an unknown lifecycle status")' in ib_async
+
+
+# --- D43-FIX1: position admission refuses a quarantined row on its own ------------------------
+
+
+def _admission_with(open_orders: tuple[BrokerOrder, ...]) -> object:
+    from tests.safety import test_managed_position_admission as admission_suite
+
+    from chronos.persistence.database import Database
+    from chronos.supervisor.position_admission import ManagedPositionAdmission
+
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.initialize()
+    try:
+        admission_suite._seed_filled_opening(database)
+        admission = ManagedPositionAdmission(
+            connection=admission_suite._Runner(admission_suite._Broker(open_orders=open_orders)),
+            sessions=database.sessions,
+            readiness=admission_suite._readiness(),
+            account_id=admission_suite._ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
+        )
+        return admission.admit_opening(admission_suite._ORDER_REF, admission_suite._NOW)
+    finally:
+        database.dispose()
+
+
+def test_fix1_admission_refuses_a_quarantined_row() -> None:
+    from chronos.supervisor.position_admission import (
+        AdmittedManagedPosition,
+        OpeningAdmissionRefusalCode,
+        RefusedManagedPositionAdmission,
+    )
+
+    # another symbol's order, so only the quarantine itself can be the reason to refuse
+    working = _row(quantity_quarantine=None, lifecycle=OrderLifecycle.SUBMITTED)
+    assert isinstance(_admission_with((working,)), AdmittedManagedPosition)  # control
+    result = _admission_with((_row(),))
+    assert isinstance(result, RefusedManagedPositionAdmission)
+    assert result.code is OpeningAdmissionRefusalCode.BROKER_EVIDENCE_UNSTABLE
+    assert CAUSE in result.detail
