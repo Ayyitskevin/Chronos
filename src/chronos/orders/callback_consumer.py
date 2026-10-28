@@ -780,8 +780,7 @@ class CallbackConsumer:
                         # event; it is lost, and that stop already demoted readiness
                         self._dropped += 1
                         return
-                    self._inflight = item
-                    self._inflight_counted = False
+                    self._inflight = item  # _inflight_counted is False: reset in finally
                 try:
                     self._handle_with_retry(item)
                 except BaseException:
