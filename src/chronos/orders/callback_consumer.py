@@ -34,6 +34,15 @@ Ingress is at most once: IBKR offers no acknowledgement or cursor, so an event s
 memory when the process dies is lost; the startup reconciliation must pass before readiness is
 RECONCILED again. Exactly once is claimed for JOURNALING per identity only.
 
+Shutdown (CB1-FIX5 P3-2): the production lifespan (``api/main.py``) releases the writer lease
+BEFORE ``runtime.close()`` stops the consumer, so the stop's drain journals nothing. Every write
+fails its lease check; the worker halts (ERROR ``callback_consumer_halted``, even on a clean,
+idle shutdown); every queued or held event counts as lost and demotes readiness; and no
+``stopped`` health row is written. The startup reconciliation covers them, as after a crash.
+``stop()`` is synchronous and can block its caller for up to about 3 x ``timeout`` + 0.1 s (the
+stop marker's put on a full queue, the join, then the health row's lock wait): about 6 s at the
+default.
+
 What IBKR actually streams to which client id is UNVERIFIED on live (K4): demo/synthetic only.
 """
 
@@ -693,6 +702,10 @@ class CallbackConsumer:
         CB1-FIX2 P1-1: a worker still alive after the joins is abandoned. Its token is revoked, so
         it writes nothing further; the event it holds counts as lost; and readiness is demoted and
         the stop recorded exactly as for queued losses, before the caller disposes the database.
+
+        CB1-FIX5 P3-2: in the production lifespan the lease is already released when this runs,
+        so the drain journals nothing (module docstring, "Shutdown"). Worst case this blocks for
+        about 3 x ``timeout`` + 0.1 s.
         """
 
         with self._stop_lock:  # CB1-FIX4 P2-1: a concurrent second stop finds _thread None
