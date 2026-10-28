@@ -252,6 +252,10 @@ _DAILY_CLOSE_UTC = time(21, 0)
 
 _CONNECT_TIMEOUT_S = 15.0
 _REQUEST_TIMEOUT_S = 20.0
+#: D43-FIX1: the typed reason a quarantined open-orders row demotes readiness with.
+QUARANTINED_ORDER_FIGURES_REASON = (
+    "broker open order fill figures quarantined; reconciliation required"
+)
 _QUOTE_TIMEOUT_S = 15.0
 _OPTION_GENERIC_TICKS = "100,101"
 #: Historical requests are answered as a burst of callbacks terminated by
@@ -949,6 +953,8 @@ class OfficialIBKRBroker:
     ) -> None:
         self._live_kill_switch = live_kill_switch
         self._order_ownership = order_ownership
+        # D43-FIX1: the readiness invalidation the RC-1 classifier also receives (runtime.py)
+        self._on_connection_uncertain = on_connection_uncertain
         if settings.ib_client_id == 0:
             raise BrokerSafetyError(
                 "IB_CLIENT_ID=0 is IB's master client, which can cancel other clients' orders; "
@@ -1299,6 +1305,7 @@ class OfficialIBKRBroker:
                     f"{refusal}; its figures are not broker fact"
                 )
                 filled, remaining = Decimal("0"), quantity
+                self._invalidate_for_quarantine(order_id, refusal)
             orders.append(
                 BrokerOrder(
                     broker_order_id=int(order_id),
@@ -1319,6 +1326,27 @@ class OfficialIBKRBroker:
                 )
             )
         return tuple(orders)
+
+    def _invalidate_for_quarantine(self, order_id: int, refusal: str) -> None:
+        """D43-FIX1: a known-bad book demotes readiness at the read, so no reader of
+        ``open_orders()`` can lean on a READY proof taken before it (never a connection epoch bump).
+        """
+
+        _logger.warning(
+            "Open order %s carries malformed fill figures (%s); readiness is invalidated",
+            order_id,
+            refusal,
+            extra={"event": "open_order_quantity_quarantined"},
+        )
+        if self._on_connection_uncertain is None:
+            return
+        try:
+            self._on_connection_uncertain(QUARANTINED_ORDER_FIGURES_REASON)
+        except Exception:
+            _logger.exception(
+                "Quarantine readiness invalidation failed",
+                extra={"event": "open_order_quarantine_invalidation_failed"},
+            )
 
     async def completed_orders(self) -> tuple[BrokerOrder, ...]:
         """The venue's completed (terminal) orders, normalized as EVIDENCE only.
