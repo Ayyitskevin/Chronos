@@ -105,15 +105,20 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   `_MIGRATION_HEAD` line is the only byte that is not main's. Trusted code (`gates/lib/migration_chain.py`,
   run `python3 -I -B` from the trusted set) reads main's revision files at the trusted base and the
   candidate's at `PR_HEAD_SHA` as git objects, parses each header with `ast` on its text (size-capped,
-  never imported or executed), and requires: only regular `NNNN_lowercase.py` blobs in `versions/`; literal
-  headers whose `revision` equals the file prefix; main's files byte-identical (append-only); one root, no
+  never imported or executed; the text is what the interpreter runs: a BOM, any coding cookie or a
+  non-UTF-8 encoding is a named `[encoding]` FAIL, for the revision files and both release scripts,
+  since under `# coding: utf-7` a "comment" is code to the interpreter), and requires: only regular
+  `NNNN_lowercase.py` blobs in `versions/`; literal headers whose `revision` equals the file prefix; main's files byte-identical (append-only); one root, no
   cycle, no branch, one head; numbering by one; main's literal equal to main's head (else a trusted-base
   FAIL); the candidate's own literal equal to its head (what CI checks). It then writes the derived head
   into the trusted overlay copy (no write when it is main's head) and the receipt records it as
   `migration_head`. Each revision file's module level must also be data and imports only (`[module]`):
   docstring, `from __future__ import annotations`, imports without `*`, one-name literal assignments
   (`sa.<CamelCase>(…)` constructors on literals included), undecorated defs with constant defaults; so a
-  rebinding written in the file (`globals()[…]`, `exec`, a star import) is refused before the sandbox.
+  rebinding written in the file (`globals()[…]`, `exec`, a star import, or one hidden by a coding
+  cookie) is refused before the sandbox. Everything else is refused too, benign or not (a negative
+  number, an attribute alias such as `schema.TABLE`, `sa.text(…)`, a class, a decorator): a gates/
+  change first. An imported module still lets an in-process rebinding through (below).
   What this proves is the DECLARED chain. It does not read other modules: a module the file imports
   (any candidate module, `chronos.persistence` included) runs at import time and can still rebind the
   file's header, and `upgrade()`/`downgrade()` bodies run only in the sandbox. The
