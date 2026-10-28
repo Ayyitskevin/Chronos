@@ -74,6 +74,11 @@ def _step7(text: str | None = None) -> str:
 _HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api_token)\")"
 
 
+#: The one line run in the operator's own shell before the first token-bearing command (P2-1,
+#: P2-2): `builtin` skips a function named `type`; `type` reports `command` and `curl` as the
+#: shell resolves them (a function, an alias, a hashed path or a PATH wrapper all show).
+_SHELL_CHECK = "builtin type command curl"
+
 #: The guard every token-bearing curl wears (P1-1): a subshell that turns xtrace off before curl is
 #: expanded, ``command`` so an alias or function named ``curl`` cannot interpose, and ``-q`` as
 #: curl's FIRST argument (curl ignores it anywhere else), so no ambient ``.curlrc`` can switch on
@@ -155,9 +160,20 @@ _GATE: dict[str, tuple[str, ...]] = {
         "function named `curl` (one that adds `-v`, say) from running; and `-q`, as curl's FIRST "
         "argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing it.",
         "What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either "
-        "command and curl prints the token; so does another `curl` earlier in your `PATH` "
-        "(`command -v curl` names the one that runs). Do not.",
+        "command and curl prints the token. So does anything that changes which `command` or "
+        "which `curl` runs: a function named `command` (also from `BASH_ENV`, or "
+        "`ZDOTDIR/.zshenv`), a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another "
+        "`curl` earlier in your `PATH`.",
+        "The check below shows those; it cannot see a shell that also redefines `builtin` or "
+        "`type`. Do not.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
+        "Check the shell first. In the shell you will paste into, run:",
+        "It must print exactly two lines: `command is a shell builtin` and `curl is <path>`, "
+        "where `<path>` is your system's curl in a directory only root can write "
+        "(`/usr/bin/curl`, say).",
+        "**STOP, and run nothing below, if** `command` is a function or an alias, `curl` is a "
+        "function, an alias or `hashed`, the path is under your home or in any directory you "
+        "can write, or there is any other line.",
         "( set +x; command curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
         "http://127.0.0.1:<port>/autonomy/alerts )",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
@@ -182,6 +198,7 @@ _GATE: dict[str, tuple[str, ...]] = {
     "acknowledge": (
         "**Then you acknowledge it: your act, with a typed note** saying this is the expected N3 "
         "database replacement.",
+        "In a new shell, run the check above again first (same STOP).",
         "The same token file, in the same guarded form:",
         "( set +x; command curl -q -fsS -X POST "
         "http://127.0.0.1:<port>/live/recovery/acknowledge \\ " + _HEADER_FROM_FILE + " \\ "
@@ -283,8 +300,9 @@ def test_c1rf2_the_gate_commands_never_print_the_token() -> None:
 
     gate = _step7()[_step7().index("That 200 proves only") :]
     blocks = [body for info, body in _fences(gate) if info == "bash"]
-    assert len(blocks) == 2, "the read block and the acknowledgement block"
-    for block in blocks:
+    assert len(blocks) == 3, "the shell check, the read block and the acknowledgement block"
+    assert blocks[0] == _SHELL_CHECK + "\n"
+    for block in blocks[1:]:
         assert "backend_api_token" in block
         uses = block.count("backend_api_token")
         assert block.count(_HEADER_FROM_FILE) == uses
@@ -357,6 +375,76 @@ def test_p11_negative_control_each_unguarded_form_is_caught() -> None:
     for name, mutant in mutants.items():
         assert mutant != runbook, name
         assert _token_curl_guard_problems(mutant), name
+
+
+def _check_problems(step7: str) -> list[str]:
+    """The shell check must precede each token-bearing block and carry its STOP and residuals."""
+
+    flat = _flat(step7)
+    problems = []
+    check_at = step7.find("```bash\n   " + _SHELL_CHECK + "\n")
+    read_at = step7.find("curl -fsS http://127.0.0.1:<port>/health | python")
+    ack_at = step7.find("( set +x; command curl -q -fsS -X POST")
+    if not 0 <= check_at < read_at < ack_at:
+        problems.append("the shell check does not precede the read block")
+    stop_at = flat.find("**STOP, and run nothing below, if**")
+    if not 0 <= stop_at <= _flat(step7[:read_at]).__len__():
+        problems.append("the STOP does not sit before the read block")
+    if "In a new shell, run the check above again first (same STOP)." not in flat:
+        problems.append("the acknowledgement does not repeat the check")
+    for phrase in (
+        "a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`)",
+        "a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh)",
+        "another `curl` earlier in your `PATH`",
+        "it cannot see a shell that also redefines `builtin` or `type`",
+        "`curl` is a function, an alias or `hashed`",
+        "the path is under your home or in any directory you can write",
+    ):
+        if phrase not in flat:
+            problems.append(f"missing: {phrase[:60]}")
+    return problems
+
+
+def _reword(text: str, phrase: str, replacement: str) -> str:
+    """``text`` with ``phrase`` replaced wherever its words sit, whatever the line wrapping."""
+
+    pattern = r"\s+".join(re.escape(word) for word in phrase.split())
+    assert re.search(pattern, text), phrase
+    return re.sub(pattern, replacement, text, count=1)
+
+
+def test_p2_the_shell_check_precedes_each_token_command_and_carries_its_stop() -> None:
+    step7 = _step7()
+    assert _check_problems(step7) == []
+    assert step7.count("builtin type command curl") == 1
+
+
+def test_p2_negative_control_each_missing_piece_is_caught() -> None:
+    step7 = _step7()
+    assert _check_problems(step7) == []
+    mutants = {
+        "5f3cec2 text (no check, residuals unnamed)": step7.replace(
+            "builtin type command curl", "true"
+        ),
+        "check moved after the read block": step7.replace(
+            "```bash\n   builtin type command curl\n   ```", "```bash\n   true\n   ```"
+        ),
+        "STOP dropped": _reword(step7, "**STOP, and run nothing below, if**", "Note:"),
+        "no repeat before the acknowledgement": _reword(
+            step7, "In a new shell, run the check above again first (same STOP).", ""
+        ),
+        "function command not named": _reword(step7, "a function named `command`", "a function"),
+        "hashed curl not named": _reword(step7, "a hashed `curl`", "a thing"),
+        "hash forms not named": _reword(
+            step7, "(`hash -p` in bash, `hash curl=` in zsh)", "(hashing)"
+        ),
+        "builtin/type residual dropped": _reword(
+            step7, "it cannot see a shell that also redefines `builtin` or `type`", "it sees all"
+        ),
+    }
+    for name, mutant in mutants.items():
+        assert mutant != step7, name
+        assert _check_problems(mutant), name
 
 
 def test_p11_the_runbook_no_longer_claims_nothing_prints_the_token() -> None:
@@ -482,8 +570,9 @@ def _gate_blocks() -> tuple[str, str, str, str]:
 
     gate = _step7()[_step7().index("That 200 proves only") :]
     blocks = _fences(gate)
-    assert [info for info, _ in blocks] == ["bash", "", "bash", ""], blocks
-    return blocks[0][1], blocks[1][1], blocks[2][1], blocks[3][1]
+    assert [info for info, _ in blocks] == ["bash", "bash", "", "bash", ""], blocks
+    assert blocks[0][1] == _SHELL_CHECK + "\n", "the shell check block comes first"
+    return blocks[1][1], blocks[2][1], blocks[3][1], blocks[4][1]
 
 
 def _health_lines(health_body: str) -> list[str]:

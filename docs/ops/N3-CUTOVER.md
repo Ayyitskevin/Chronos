@@ -453,9 +453,21 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    alias or shell function named `curl` (one that adds `-v`, say) from running; and `-q`, as
    curl's FIRST argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing
    it. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
-   command and curl prints the token; so does another `curl` earlier in your `PATH`
-   (`command -v curl` names the one that runs). Do not. The log is your `LOG_FILE`
-   (`logs/chronos.log` by default).
+   command and curl prints the token. So does anything that changes which `command` or which
+   `curl` runs: a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`), a
+   hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another `curl` earlier in your `PATH`.
+   The check below shows those; it cannot see a shell that also redefines `builtin` or `type`.
+   Do not. The log is your `LOG_FILE` (`logs/chronos.log` by default).
+
+   Check the shell first. In the shell you will paste into, run:
+   ```bash
+   builtin type command curl
+   ```
+   It must print exactly two lines: `command is a shell builtin` and `curl is <path>`, where
+   `<path>` is your system's curl in a directory only root can write (`/usr/bin/curl`, say).
+   **STOP, and run nothing below, if** `command` is a function or an alias, `curl` is a function,
+   an alias or `hashed`, the path is under your home or in any directory you can write, or there
+   is any other line. Then:
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
@@ -489,7 +501,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    as consistent: `recovery hold: CLEAR` and `PASS [ADR-0054] state identity`.
 
    **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
-   database replacement. The same token file, in the same guarded form:
+   database replacement. In a new shell, run the check above again first (same STOP). The same
+   token file, in the same guarded form:
    ```bash
    ( set +x; command curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
      -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") \
