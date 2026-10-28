@@ -612,6 +612,16 @@ class CallbackConsumer:
         self._token: object | None = None
         self._worker = threading.local()
         self._inflight: StreamEvent | None = None  # the event the worker holds right now
+        # CB1-FIX4 P2-1: the held event has ONE accounting owner. Whoever counts it lost first (the
+        # worker's terminal drop or exceptional exit, or the stop that abandons the worker) sets
+        # this under _lock, and nobody counts it again (DESIGN §11, I16/I19).
+        self._inflight_counted = False
+        # CB1-FIX4 P2-2: every database write the consumer makes runs under this lock with its
+        # authority check (the worker's handle/sweep, and every health row, stop's included), so
+        # at most one checked write is ever in flight (DESIGN §4, R10). Never taken under _lock.
+        self._write_lock = threading.Lock()
+        # CB1-FIX4 P2-1: stop() runs one at a time; a second stop sees the first one's result
+        self._stop_lock = threading.Lock()
         # time.monotonic() of the last sweep; the cadence starts at construction, so the start
         # sweep in _run is the only immediate one
         self._last_sweep = time.monotonic()
@@ -640,6 +650,9 @@ class CallbackConsumer:
 
     def _drop(self, event: object, why: str) -> None:
         with self._lock:
+            held = getattr(self._worker, "token", None) is not None and event is self._inflight
+            if held and not self._claim_held():
+                return  # CB1-FIX4 P2-1: an abandoning stop already counted, logged and demoted it
             self._dropped += 1
         kind = getattr(getattr(event, "kind", None), "value", "unknown")
         _LOGGER.warning(
@@ -682,48 +695,55 @@ class CallbackConsumer:
         the stop recorded exactly as for queued losses, before the caller disposes the database.
         """
 
-        with self._lock:
-            self._accepting = False
-        thread = self._thread
-        lost = 0
-        abandoned = False
-        if thread is not None:
-            try:
-                self._queue.put(_STOP, timeout=timeout)
-            except queue.Full:
-                self._stopping.set()
-            thread.join(timeout)
-            self._stopping.set()
-            thread.join(0.1)
+        with self._stop_lock:  # CB1-FIX4 P2-1: a concurrent second stop finds _thread None
             with self._lock:
-                self._token = None
-                abandoned = thread.is_alive()
-                if abandoned and self._inflight is not None:
+                self._accepting = False
+            thread = self._thread
+            lost = 0
+            abandoned = False
+            if thread is not None:
+                try:
+                    self._queue.put(_STOP, timeout=timeout)
+                except queue.Full:
+                    self._stopping.set()
+                thread.join(timeout)
+                self._stopping.set()
+                thread.join(0.1)
+                with self._lock:
+                    self._token = None
+                    abandoned = thread.is_alive()
+                    if abandoned and self._claim_held():
+                        lost += 1
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not _STOP:
                     lost += 1
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is not _STOP:
-                lost += 1
-        with self._lock:
-            self._state = "stopped"
-            self._dropped += lost
-        self._thread = None
-        if lost or abandoned:
-            _LOGGER.warning(
-                "Callback consumer stopped with %d unjournaled events%s",
-                lost,
-                "; its worker did not exit and was abandoned" if abandoned else "",
-                extra={"event": "callback_consumer_stopped", "lost": lost, "abandoned": abandoned},
-            )
-            self._invalidate(DROPPED_EVENT_REASON if lost else CONSUMER_FAILED_REASON)
-            reason = "stopped with unjournaled events" if lost else "stopped"
-            if abandoned:
-                reason += "; worker abandoned"
-            self._record_health("stopped", reason=reason)
-        return lost
+            with self._lock:
+                self._state = "stopped"
+                self._dropped += lost
+            self._thread = None
+            if lost or abandoned:
+                _LOGGER.warning(
+                    "Callback consumer stopped with %d unjournaled events%s",
+                    lost,
+                    "; its worker did not exit and was abandoned" if abandoned else "",
+                    extra={
+                        "event": "callback_consumer_stopped",
+                        "lost": lost,
+                        "abandoned": abandoned,
+                    },
+                )
+                self._invalidate(DROPPED_EVENT_REASON if lost else CONSUMER_FAILED_REASON)
+                reason = "stopped with unjournaled events" if lost else "stopped"
+                if abandoned:
+                    reason += "; worker abandoned"
+                # CB1-FIX4 P2-2: waits (up to timeout) for a write the abandoned worker has in
+                # flight, then re-checks the lease, so it is never a second write after a loss
+                self._record_health("stopped", reason=reason, wait=timeout)
+            return lost
 
     def health(self) -> ConsumerHealth:
         with self._lock:
@@ -761,18 +781,18 @@ class CallbackConsumer:
                         self._dropped += 1
                         return
                     self._inflight = item
+                    self._inflight_counted = False
                 try:
                     self._handle_with_retry(item)
                 except BaseException:
                     # CB1-FIX3 P1-1b: a lost lease or a dying thread leaves the held event
                     # unfinished; count it (an abandoned worker's event was counted by its stop)
-                    with self._lock:
-                        if token is self._token:
-                            self._dropped += 1
+                    self._count_held_lost()
                     raise
                 finally:
                     with self._lock:
                         self._inflight = None
+                        self._inflight_counted = False
         except _WriteAuthorityLost as lost:
             if not lost.abandoned:
                 self._halt("writer lease lost")
@@ -782,6 +802,21 @@ class CallbackConsumer:
         finally:
             with self._lock:
                 self._accepting = False
+
+    def _claim_held(self) -> bool:
+        """Under ``_lock``: take the held event's accounting, once (CB1-FIX4 P2-1)."""
+
+        if self._inflight is None or self._inflight_counted:
+            return False
+        self._inflight_counted = True
+        return True
+
+    def _count_held_lost(self) -> None:
+        """The worker's exceptional exit counts its held event, unless a stop already did."""
+
+        with self._lock:
+            if self._claim_held():
+                self._dropped += 1
 
     def _require_write_authority(self) -> None:
         """CB1-FIX2: called immediately before every database write the consumer makes."""
@@ -819,23 +854,36 @@ class CallbackConsumer:
             with self._lock:
                 self._dropped_recorded = dropped
 
-    def _record_health(self, state: str, *, reason: str) -> None:
-        if not self._writer():
-            return  # CB1-FIX2 P2-1: a non-writer records nothing; its log line still fires
-        current = self.health()
-        try:
-            self.journal.append_health(
-                {
-                    "state": state,
-                    "reason": reason,
-                    "dropped": current.dropped,
-                    "failures": current.failures,
-                    "last_error_type": current.last_error_type,
-                },
-                message=f"callback consumer {state}: {reason}",
+    def _record_health(self, state: str, *, reason: str, wait: float = -1.0) -> None:
+        # CB1-FIX4 P2-2: the health row is a consumer write like any other: it takes the write
+        # lock (stop() bounds the wait) and checks its authority under it
+        if not self._write_lock.acquire(timeout=wait):
+            _LOGGER.warning(
+                "callback consumer health row was not persisted: a consumer write is in flight",
+                extra={"event": "callback_consumer_health_skipped"},
             )
-        except Exception:
-            _LOGGER.warning("callback consumer health row was not persisted")
+            return
+        try:
+            try:
+                self._require_write_authority()
+            except _WriteAuthorityLost:
+                return  # CB1-FIX2 P2-1: a non-writer records nothing; its log line still fires
+            current = self.health()
+            try:
+                self.journal.append_health(
+                    {
+                        "state": state,
+                        "reason": reason,
+                        "dropped": current.dropped,
+                        "failures": current.failures,
+                        "last_error_type": current.last_error_type,
+                    },
+                    message=f"callback consumer {state}: {reason}",
+                )
+            except Exception:
+                _LOGGER.warning("callback consumer health row was not persisted")
+        finally:
+            self._write_lock.release()
 
     def _invalidate(self, reason: str) -> None:
         try:
@@ -915,6 +963,10 @@ class CallbackConsumer:
     def sweep(self) -> int:
         """Re-drive PENDING journal rows (no outcome yet), oldest first, from stored facts."""
 
+        with self._write_lock:  # CB1-FIX4 P2-2: one write bound across the worker and stop
+            return self._sweep_locked()
+
+    def _sweep_locked(self) -> int:
         closed = 0
         for entry in self.journal.pending():
             if self._apply_and_close(entry, recovered=True):
@@ -924,6 +976,10 @@ class CallbackConsumer:
     def handle(self, event: StreamEvent) -> CallbackOutcome | None:
         """Journal one event, apply its one effect, journal its outcome (in that order)."""
 
+        with self._write_lock:  # CB1-FIX4 P2-2: one write bound across the worker and stop
+            return self._handle_locked(event)
+
+    def _handle_locked(self, event: StreamEvent) -> CallbackOutcome | None:
         normalized = self._normalize(event)
         key = event_key(normalized.identity)
         self._require_write_authority()
