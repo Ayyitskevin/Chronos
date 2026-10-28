@@ -833,9 +833,36 @@ def test_fix2_the_roots_take_the_key_from_the_counted_snapshot_only() -> None:
             assert names.index("take_persistence_key_snapshot") < names.index("get_settings"), name
             assert names.index("resolve") < names.index("get_settings"), name
         assert _names_used(inspect.getsource(function)) & _KEY_READERS == set(), name
-    resolver = inspect.getsource(pk.PersistenceKeySnapshot.resolve)
-    assert _names_used(resolver) & (_KEY_READERS | {"Settings", "settings"}) == set()
+    snapshot_class = inspect.getsource(pk.PersistenceKeySnapshot)  # resolve AND the key property
+    assert _names_used(snapshot_class) & (_KEY_READERS | {"Settings", "settings"}) == set()
     assert list(inspect.signature(pk.PersistenceKeySnapshot.resolve).parameters) == ["self"]
+
+
+def test_fix2_a_snapshot_resolves_its_counted_key_after_any_later_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between taking the snapshot and resolving it, the environment gains another value and the
+    file is rewritten to it: the snapshot still resolves the key it counted, and reports the one
+    source it counted (no later read of either)."""
+
+    from tests.integration.test_persistence_key_n3 import _keyed
+
+    from chronos.utils.identifiers import account_fingerprint
+
+    a, b = _key("swap-a"), _key("swap-b")
+    path = _dotenv(tmp_path, f"{_NAME}={a}")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(path))
+    monkeypatch.delenv(_NAME)
+
+    snapshot = pk.take_persistence_key_snapshot()
+    os.environ[_NAME] = b
+    path.write_text(f"{_NAME}={b}\n", encoding="utf-8")
+    key = snapshot.resolve()
+
+    assert snapshot.source == f"the dotenv file {path.absolute()}"
+    used = account_fingerprint(_ACCOUNT, key=key)
+    assert used == _keyed(str(a), _ACCOUNT)  # labels only on failure: no value is shown
+    assert used != _keyed(str(b), _ACCOUNT)
 
 
 @pytest.mark.parametrize("root", ["build_runtime", "mandate"])
