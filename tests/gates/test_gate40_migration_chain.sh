@@ -393,6 +393,8 @@ if kind == "utf7":       # cookie on line 1, `arg` hidden at the end
     data = b"# coding: utf-7\n" + data + hide(arg)
 elif kind == "cr-utf7":  # the cookie after a lone CR on line 1, `arg` hidden at the end
     data = b"# note\r# coding: utf-7\n" + data + hide(arg)
+elif kind == "cr0-utf7":  # a lone CR as byte 0, then the cookie: detect_encoding takes the CR as blank line 1 and
+    data = b"\r# coding: utf-7\n" + data + hide(arg)  # never reads the cookie; the interpreter honours it
 elif kind == "line1":    # `arg` as line 1
     data = arg.encode() + b"\n" + data
 elif kind == "line2":    # `arg` as line 2, after a comment line
@@ -404,8 +406,12 @@ elif kind == "utf16":    # the whole file re-encoded as UTF-16 (with its BOM), i
 open(path, "wb").write(data)
 EOF
 enc() { python3 -I "$T/enc.py" "$@"; }
+# The positive controls parse and run with the interpreter that imports the files in the sandbox (the lane venv's)
+# when it is present, else the host python3; the trusted step itself always runs under the host python3.
+PYI=python3; [ -x "$ROOT/.venv/bin/python" ] && PYI=$ROOT/.venv/bin/python
+echo "# positive controls use $PYI ($("$PYI" -V 2>&1)); the trusted step uses python3 ($(python3 -V 2>&1))"
 seen() {  # seen <file> <name>: how many module-level stores of <name> the INTERPRETER's own parse (of the bytes) sees
-  python3 -I -c 'import ast, sys; t = ast.parse(open(sys.argv[1], "rb").read()); print(sum(1 for n in t.body if isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n.targets[0] if isinstance(n, ast.Assign) else n.target, "id", None) == sys.argv[2]))' "$1" "$2"
+  "$PYI" -I -c 'import ast, sys; t = ast.parse(open(sys.argv[1], "rb").read()); print(sum(1 for n in t.body if isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n.targets[0] if isinstance(n, ast.Assign) else n.target, "id", None) == sys.argv[2]))' "$1" "$2"
 }
 E3='\[encoding\] versions/0003_step.py'
 DEC='the interpreter would decode it as'
@@ -420,10 +426,16 @@ mark7=$T/utf7-ran
 case_ "d47b:encoding F1 a utf-7 cookie hiding a module-level call is refused ..." "$E3: $DEC utf-7" \
   "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py utf7 'open(\"$mark7\", \"w\").write(\"ran\")'; lit 0003"
 check "d47b:encoding F1 ...and the trusted step never ran it (no marker)" "[ ! -e $mark7 ]"
-(cd "$T" && python3 -I -B "$M/$V/0003_step.py")
+(cd "$T" && "$PYI" -I -B "$M/$V/0003_step.py")
 check "d47b:encoding F1 ...positive control: the interpreter running that file executes the hidden call (marker written)" "[ -e $mark7 ]"
 case_ "d47b:encoding a utf-7 cookie after a lone CR on line 1 is refused" "$E3: $DEC utf-7" \
   "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py cr-utf7 'down_revision = \"0001\"'; lit 0003"
+case_ "d47b:encoding a lone CR as byte 0, then a utf-7 cookie hiding a down_revision rebinding, is refused by the cookie rule" "$E3: $COOK" \
+  "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py cr0-utf7 'down_revision = \"0001\"'; lit 0003"
+check "d47b:encoding ...positive control: detect_encoding reports utf-8 for those bytes (only the cookie rule refuses them)" \
+  "[ \"\$(python3 -I -c 'import io, sys, tokenize; print(tokenize.detect_encoding(io.BytesIO(open(sys.argv[1], \"rb\").read()).readline)[0])' $M/$V/0003_step.py)\" = utf-8 ]"
+check "d47b:encoding ...positive control: the interpreter's parse of those bytes sees TWO down_revision stores" \
+  "[ \"\$(seen $M/$V/0003_step.py down_revision)\" = 2 ]"
 case_ "d47b:encoding a latin-1 cookie on an otherwise honest ASCII revision is refused" "$E3: $DEC iso-8859-1" \
   "mig 0003 '\"0002\"'; enc $M/$V/0003_step.py line1 '# -*- coding: latin-1 -*-'; lit 0003"
 case_ "d47b:encoding a utf-16 cookie on ASCII text is refused" "$E3: $UND" \
@@ -465,6 +477,10 @@ case_ "d47b:I8 two _MIGRATION_HEAD assignments in the candidate's script are ref
   "mig 0003 '\"0002\"'; lit 0003; printf '_MIGRATION_HEAD = \"0002\"\n' >> $M/$S"
 case_ "d47b:I8 a non-canonical literal line (_MIGRATION_HEAD = \"0003\") is refused" '\[I8\] scripts/verify_release_artifact.py has 1 `_MIGRATION_HEAD` assignment\(s\)' \
   "mig 0003 '\"0002\"'; lit 0003; sed -i 's/^_MIGRATION_HEAD: Final\\[str\\] = /_MIGRATION_HEAD = /' $M/$S"
+case_ "d47b:I8 a candidate script with invalid UTF-8 past line 2 (outside check_encoding's two lines) is refused as unreadable" \
+  "\\[I8\\] cannot read the candidate.s scripts/verify_release_artifact.py" \
+  "mig 0003 '\"0002\"'; lit 0003; printf '# \\377\\n' >> $M/$S"
+check "d47b:I8 ...positive control: the script's bytes carry the invalid byte past line 2" "tail -c 3 $M/$S | od -An -tx1 | grep -q 'ff 0a'"
 case_ "d47b:I8 a candidate without scripts/verify_release_artifact.py is refused" "\\[I8\\] cannot read the candidate.s scripts/verify_release_artifact.py" \
   'mig 0003 "\"0002\""; git -C $M rm -q $S'
 
