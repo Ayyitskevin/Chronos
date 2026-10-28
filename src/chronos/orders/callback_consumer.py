@@ -777,6 +777,8 @@ class CallbackConsumer:
         token = getattr(self._worker, "token", None)  # None: synchronous mode (drain)
         if token is not None and token is not self._token:
             raise _WriteAuthorityLost(abandoned=True)
+        if not self._writer():  # P2-1: the lease bounds every write, not only the next loop
+            raise _WriteAuthorityLost(abandoned=False)
 
     def _writer(self) -> bool:
         try:
@@ -806,6 +808,8 @@ class CallbackConsumer:
                 self._dropped_recorded = dropped
 
     def _record_health(self, state: str, *, reason: str) -> None:
+        if not self._writer():
+            return  # CB1-FIX2 P2-1: a non-writer records nothing; its log line still fires
         current = self.health()
         try:
             self.journal.append_health(
@@ -923,6 +927,7 @@ class CallbackConsumer:
             # the raw-account guard refused the payload: journal a digest only, typed
             return self._refuse_unsafe(normalized, event)
         if appended.verdict is JournalVerdict.CONFLICT:
+            self._require_write_authority()
             self.journal.append_conflict(key, normalized.kind, appended.differing, normalized.facts)
             _LOGGER.warning(
                 "Divergent broker callback replay; the first journal row stands",
@@ -942,6 +947,7 @@ class CallbackConsumer:
         identity = {"kind": normalized.kind.value, "refused_digest": digest}
         key = event_key(identity)
         facts = {"refused": "raw-account-like value", "digest": digest}
+        self._require_write_authority()
         self.journal.append_pending(
             key,
             normalized.kind,
@@ -949,6 +955,7 @@ class CallbackConsumer:
             received_at=event.received_at,
             own_at_capture=event.own_at_capture,
         )
+        self._require_write_authority()
         self.journal.append_outcome(
             key, normalized.kind, CallbackOutcome.REFUSED_UNSAFE_PAYLOAD, {}
         )
@@ -960,6 +967,7 @@ class CallbackConsumer:
         if result is None:
             return None  # stays PENDING (deferred or awaiting its commission)
         outcome, detail = result
+        self._require_write_authority()
         if (
             self.journal.append_outcome(
                 entry.key, entry.kind, outcome, {**detail, "recovered": recovered}
@@ -1097,6 +1105,7 @@ class CallbackConsumer:
             source=CALLBACK_SOURCE,
             occurred_at=entry.received_at,
         )
+        self._require_write_authority()
         try:
             result = self._tracker.ingest(update, current_account_id=self._account_id)
         except OrderLifecycleError:
@@ -1165,6 +1174,7 @@ class CallbackConsumer:
                 }
             )
             execution = BrokerExecution.model_validate(execution.model_dump())
+        self._require_write_authority()
         written = self._record_execution(execution)
         detail = {"commission": commission is not None}
         if written is ExecutionWriteOutcome.CONFLICT:
@@ -1172,6 +1182,7 @@ class CallbackConsumer:
         if written is ExecutionWriteOutcome.REFUSED:
             return CallbackOutcome.EXECUTION_REFUSED, detail
         if commission is not None and self.journal.outcome(commission.key) is None:
+            self._require_write_authority()
             self.journal.append_outcome(
                 commission.key, StreamKind.COMMISSION, CallbackOutcome.PAIRED, {}
             )
@@ -1220,6 +1231,7 @@ class CallbackConsumer:
                 "commission_currency": str(entry.facts["currency"]),
             }
         )
+        self._require_write_authority()
         written = self._record_execution(BrokerExecution.model_validate(late.model_dump()))
         if written is ExecutionWriteOutcome.ALREADY_RECORDED:
             return CallbackOutcome.PAIRED, {}
