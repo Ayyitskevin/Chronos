@@ -294,9 +294,11 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    ```
    CHRONOS_PERSISTENCE_KEY=<the value you just printed>
    ```
-   on a line of its own: no quotes, no `export`, no spaces. If the file already has an empty
-   `CHRONOS_PERSISTENCE_KEY=` line (copied from `.env.example`), fill that one in; never add a
-   second. Then clear the terminal. Nobody and nothing else generates, sees, logs or handles this
+   on a line of its own: no quotes, no `export`, no spaces. `.env.example` carries the line
+   commented out (`#CHRONOS_PERSISTENCE_KEY=`): replace that comment with your line. A `.env`
+   copied from an older template has an uncommented empty `CHRONOS_PERSISTENCE_KEY=` line: fill
+   that one in. Never add a second: Chronos refuses a key named twice, an empty line included.
+   Then clear the terminal. Nobody and nothing else generates, sees, logs or handles this
    value; it is never typed into an agent, a handoff, a ticket or a chat. No example appears on
    this page on purpose.
 
@@ -549,7 +551,13 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    stop here.** A bare `/health` 200 is not this proof. Steps 8 and 9 start only after it passes.
 
 8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
-   `database_scope` row with the KEYED fingerprint. The proof is one comparison: the fingerprint
+   `database_scope` row with the KEYED fingerprint. Before it binds, the backend logs the one key
+   source it counted, at INFO from `chronos.runtime`: `persistence key from: the dotenv file
+   <checkout>/.env`. It must name `<checkout>/.env`; `the process environment` means the key
+   lives where step 5 forbids: stop. A refusal at start names every source and its count
+   (`CHRONOS_PERSISTENCE_KEY is named 2 times: …`), or a `$` in the key line, never the value:
+   remove the extra source or replace the malformed key line (step 5) and start again. The proof
+   is one comparison: the fingerprint
    computed from `<checkout>/.env`'s key ALONE — the key you escrowed in step 6; never the
    shell's, never the unit's — against the bound row. On an IBKR-paper host that is the scope
    line of `python -m chronos.cli b1-preflight`, which reads the file and nothing else:
@@ -607,14 +615,19 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    again, pass step 7's recovery-hold gate again (the new store holds no acknowledgement, so
    the hold comes back), and repeat this step.
    Never change `DATABASE_URL`: a new URL leaves a store bound under
-   a key nobody escrowed (that REFUSE text's "choose a new absolute DATABASE_URL" is wrong for
-   this case; a follow-up fixes the message). No row, a second row, or a different value:
+   a key nobody escrowed (the REFUSE text names both causes, a different broker scope or a
+   different persistence key, and no longer prescribes a new URL). No row, a second row, or a
+   different value:
    stop; the store is not bound to the scope you think.
 
 9. **Re-author the mandate BEFORE the first start of autonomy — dated window = 0.** The
    mandate's `account_fingerprint` must be the keyed value:
    `python -m chronos.cli mandate fingerprint --account-id DU1234567` prints it from the
-   configured key. The argument is required on a demo host: without it the command reads
+   configured key: the fingerprint is stdout's first line, and stderr carries one line naming the
+   key's source, `persistence key from: the dotenv file <checkout>/.env`. A refused key prints
+   `persistence key refused: …` (the sources and counts) on stderr and `no persistence key
+   available: …` on stdout: fix the source (step 5) and run it again. The argument is required
+   on a demo host: without it the command reads
    `IB_ACCOUNT_ID` from settings, which a demo host does not set, and stops with
    `no account id available; pass --account-id or set IB_ACCOUNT_ID` (C1 F7). Its value is the
    account the backend bound in step 8: `DEMO_ACCOUNT_ID` = `DU1234567` on the demo broker

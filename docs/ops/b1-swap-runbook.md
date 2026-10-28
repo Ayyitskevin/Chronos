@@ -117,11 +117,17 @@ CHRONOS_CAPTURE_PEPPER=<64 hex, generated below; never shown to anyone>
   binds the database file to `(broker mode, environment, account fingerprint)`
   (`src/chronos/runtime.py:342` → `src/chronos/ui/runtime_scope.py:161` →
   `src/chronos/persistence/database.py:218`). A file already bound to another scope refuses:
-  "This Chronos database is already bound to a different broker scope; configure a separate
-  DATABASE_URL." (`database.py:254-258`), and a file that holds account data but no scope refuses
-  to bind (`:236-240`). The default is the relative `sqlite:///data/chronos.db`
-  (`settings.py:320`; `.env.example:54`), which any earlier demo boot from the repo root has
-  already bound to DEMO. Use a **dedicated absolute path** (four slashes). Pinned by
+  "This Chronos database is already bound to a different broker scope or a different persistence
+  key; find which before changing anything (a new DATABASE_URL starts a separate store, and if the
+  key changed, one bound under a key that may not be escrowed)." (`database.py:267-272`), and a
+  file that holds account data but no scope refuses to bind (`:250-253`). The default is the
+  relative `sqlite:///data/chronos.db` (`settings.py:320`; `.env.example:54`), which any earlier
+  demo boot from the repo root has already bound to DEMO. So choose the **dedicated absolute path**
+  (four slashes) here, BEFORE the first B1 start; this is setup, not a remedy. If that refusal
+  appears for the B1 file after it was first bound, do not pick a new `DATABASE_URL` to get past
+  it: a second persistence-key source is the likely cause (`b1-preflight` reports a second line
+  in the file as `key-source`, and an exported variable as `P12`); remove the extra source
+  (docs/ops/N3-CUTOVER.md step 5, one home). Pinned by
   `test_a_database_bound_to_the_demo_scope_refuses_the_b1_shape_until_it_has_its_own_url`.
 - **`CHRONOS_CAPTURE_PEPPER`** is mandatory for any capture: the harness refuses without it,
   before anything is written and before any connection
@@ -284,7 +290,9 @@ paper transmission.
    lines at `false`) **and remove or comment out the `DATABASE_URL=…chronos-b1.db` line** (the
    B1 file itself stays untouched, step 3). With only the first edit, demo would boot against the
    B1-bound file and `Database.bind_scope` would refuse: "already bound to a different broker
-   scope; configure a separate DATABASE_URL" (`database.py:254-258`). Or move the whole file
+   scope or a different persistence key" (`database.py:267-272`; here the scope, demo against a
+   paper-bound file). Removing the line returns demo to its own default store; it is not a new
+   one. Or move the whole file
    aside, *not delete it*: `mv .env .env.b1-aside`. Verify the configuration:
    ```text
    # NOT RUN

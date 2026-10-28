@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -347,8 +348,9 @@ def _review_account(
                 Severity.NOTE,
                 "account-check-skipped",
                 "the account binding was NOT checked: no account id was available (pass "
-                "--account-id, or set IB_ACCOUNT_ID). A mandate scoped to a different "
-                "account boots inert with one ERROR line in the log",
+                "--account-id, or set IB_ACCOUNT_ID), or no persistence key was (absent, "
+                "malformed, or refused: a refusal is named on stderr). A mandate scoped to a "
+                "different account boots inert with one ERROR line in the log",
             )
         ]
     if mandate.account_fingerprint != expected:
@@ -820,15 +822,30 @@ def _resolve_expected_fingerprint(
 
 
 def _resolve_persistence_key() -> PersistenceKey | None:
-    """This install's persistence key from its settings, or None (never a default key)."""
+    """This install's persistence key from its settings, or None (never a default key).
+
+    KEYSRC: a key named by more than one source is refused like an absent one, and the refusal,
+    or the one source used, goes to stderr (names, paths and counts only), so stdout stays what a
+    script captures. KEYSRC-FIX1/FIX2: the key is resolved FROM one counted snapshot of its
+    sources; the settings' copy of the key field is never read (same as ``build_runtime``).
+    """
 
     try:
-        from chronos.config.persistence_key import resolve_persistence_key
-        from chronos.config.settings import get_settings
+        from chronos.config.persistence_key import (
+            PersistenceKeySourceError,
+            take_persistence_key_snapshot,
+        )
 
-        return resolve_persistence_key(get_settings())
-    except Exception:  # absent, malformed, or settings that did not load: all "unavailable"
+        try:
+            snapshot = take_persistence_key_snapshot()
+        except PersistenceKeySourceError as refusal:
+            print(f"persistence key refused: {refusal}", file=sys.stderr)
+            return None
+        key = snapshot.resolve()
+    except Exception:  # absent or malformed: "unavailable", as before
         return None
+    print(f"persistence key from: {snapshot.source}", file=sys.stderr)
+    return key
 
 
 def _mask(account_id: str) -> str:
@@ -1072,7 +1089,8 @@ def cmd_mandate_fingerprint(args: argparse.Namespace) -> int:
     if key is None:
         print(
             "no persistence key available: the fingerprint is keyed by CHRONOS_PERSISTENCE_KEY, "
-            "which is absent or malformed here (or settings did not load); nothing is printed"
+            "which is absent or malformed here, or was refused (named by more than one source, or "
+            "with '$' in its line: the reason is on stderr); nothing is printed"
         )
         return 1
     account_id: str | None = args.account_id

@@ -7,34 +7,239 @@ host's 0600 ``.env``. It keys every persisted account fingerprint.
 There is no default and no fallback, in demo mode too: an absent or malformed key refuses here,
 before any database file, sidecar or log is created, and the value is never echoed. Call sites
 never read the environment; they receive the resolved :class:`PersistenceKey` as a parameter.
+
+KEYSRC: the key must have exactly one source. The loader reads it case-insensitively from the
+process environment, which outranks the dotenv file, and inside that file the last line wins, so
+a second copy decides silently which key binds the store. :func:`persistence_key_source` counts
+both before anything resolves and refuses more than one, naming each source and its count.
+
+KEYSRC-FIX1 (Kimi HOLD P1 @ cf702bf): the count and the key must be ONE snapshot. A composition
+root calls :func:`take_persistence_key_snapshot` before the settings loader runs: it copies the
+process environment once and reads each dotenv file once, and both the count and the key come from
+those bytes, parsed by python-dotenv's own parser (FIX3: without interpolation).
+
+KEYSRC-FIX2 (Kimi HOLD P1 @ 3a040e8): comparing the loader's value with the snapshot's proved the
+values equal, not the sources: a same-value environment binding that appeared after the snapshot
+was honoured by the loader but never counted. So the key a root USES is resolved FROM the counted
+snapshot itself (:meth:`PersistenceKeySnapshot.resolve`, no settings object), and the roots never
+read the settings' copy of the key field: no later read of the environment or the file can change
+the key in use. ``Settings`` still loads the field (untouched); nothing at a root consults it.
+
+KEYSRC-FIX3 (Kimi HOLD P1 @ 6ee990f; the census is in out/KEYSRC/DESIGN.md): python-dotenv
+interpolates every value from the LIVE process environment and the file's other bindings, so the
+key's value had a source outside the snapshot. The count and the value now come from ONE pass of
+the parser, which never interpolates (:func:`key_binding_values`), and a key binding whose raw value
+contains ``$`` is refused, naming the file: a key is 64 lowercase hex digits and never needs it.
 """
 
 from __future__ import annotations
 
+import io
+import os
 import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Protocol
+
+from dotenv.parser import parse_stream
+from pydantic import SecretStr
 
 from chronos.config.settings import Settings
 from chronos.utils.identifiers import PersistenceKey
 
 PERSISTENCE_KEY_ENV = "CHRONOS_PERSISTENCE_KEY"
 _KEY_SHAPE = re.compile(r"[0-9a-f]{64}")
+#: casefold() folds every name the loader's str.lower() folds to the key (and U+017F and the st
+#: ligatures, which it does not): the count can over-count, refusing, but never under-count.
+_FOLDED_NAME = PERSISTENCE_KEY_ENV.casefold()
+#: python-dotenv's interpolation syntax (``${VAR}``, ``${VAR:-default}``): never in a hex key
+INTERPOLATION_MARK = "$"
 
 
 class PersistenceKeyError(RuntimeError):
     """The persistence key is absent or malformed; nothing that persists may start."""
 
 
-def resolve_persistence_key(settings: Settings) -> PersistenceKey:
-    secret = settings.chronos_persistence_key
-    if secret is None:
+class PersistenceKeySourceError(PersistenceKeyError):
+    """The key's sources are not exactly one: it is named more than once."""
+
+
+class _KeyHolder(Protocol):
+    """What holds the key as a masked secret: a counted snapshot, or (B1) its file's settings."""
+
+    @property
+    def chronos_persistence_key(self) -> SecretStr | None: ...
+
+
+def resolve_persistence_key(holder: _KeyHolder) -> PersistenceKey:
+    secret = holder.chronos_persistence_key
+    return _key_from(None if secret is None else secret.get_secret_value())
+
+
+def _key_from(value: str | None) -> PersistenceKey:
+    if value is None:
         raise PersistenceKeyError(
             f"{PERSISTENCE_KEY_ENV} is not set; Chronos refuses to start without the owner's "
             "persistence key (64 lowercase hex digits in the host's 0600 .env)"
         )
-    value = secret.get_secret_value()
     if not _KEY_SHAPE.fullmatch(value):
         raise PersistenceKeyError(
             f"{PERSISTENCE_KEY_ENV} is not 64 lowercase hex digits; Chronos refuses to start "
             "(the value is not shown)"
         )
     return PersistenceKey.from_hex(value)
+
+
+def key_binding_values(text: str) -> list[str | None]:
+    """The raw value of every binding of dotenv ``text`` that names the key, in file order.
+
+    ONE pass of python-dotenv's own parser (``parse_stream``, the pass ``dotenv_values`` runs for
+    the loader), which never interpolates: a value is exactly what the bytes say after unquoting
+    (``None`` for a bare name), i.e. ``dotenv_values(..., interpolate=False)``. ``export`` forms,
+    quoted and empty values and a bare name are bindings, one per line; a comment, the name inside
+    a value and an unparsable line are not.
+    """
+
+    return [
+        binding.value
+        for binding in parse_stream(io.StringIO(text))
+        if binding.key is not None and binding.key.casefold() == _FOLDED_NAME
+    ]
+
+
+def count_key_lines(text: str) -> int:
+    """How many bindings of dotenv ``text`` name the key, in any case the loader folds."""
+
+    return len(key_binding_values(text))
+
+
+def has_interpolation(values: Sequence[str | None]) -> bool:
+    """Whether a raw key value carries interpolation syntax (a value from elsewhere)."""
+
+    return any(value is not None and INTERPOLATION_MARK in value for value in values)
+
+
+class PersistenceKeySnapshot:
+    """ONE read of every source the loader reads the key from (KEYSRC-FIX1), and the ONLY place a
+    composition root takes the key from (KEYSRC-FIX2).
+
+    ``source`` names the one source (``None`` for none). The value is held privately and never
+    rendered: no ``repr``, message or log line carries it or anything derived from it.
+    """
+
+    __slots__ = ("_value", "source")
+
+    def __init__(self, source: str | None, value: str | None) -> None:
+        self.source = source
+        self._value = value
+
+    def __repr__(self) -> str:
+        return f"PersistenceKeySnapshot(source={self.source!r})"
+
+    @property
+    def chronos_persistence_key(self) -> SecretStr | None:
+        """The counted value, masked, in the shape :func:`resolve_persistence_key` reads."""
+
+        return None if self._value is None else SecretStr(self._value)
+
+    def resolve(self) -> PersistenceKey:
+        """The key the process uses: this snapshot's counted value, absent or malformed refused.
+
+        ONE resolution through the module's resolver (the N3 read-once pin counts it); nothing
+        here reads the environment, a file or a settings object.
+        """
+
+        return resolve_persistence_key(self)
+
+
+def take_persistence_key_snapshot(
+    environ: Mapping[str, str] | None = None, env_files: Sequence[Path] | None = None
+) -> PersistenceKeySnapshot:
+    """Count the key's sources and read its value from ONE snapshot; more than one refuses.
+
+    ``environ`` defaults to a copy of the process environment, taken once, and ``env_files`` to
+    the dotenv files the loader reads (``Settings.model_config["env_file"]``, relative to the cwd,
+    read at call time), each read once. Every environment name and every file line naming the key
+    counts, an empty value included. A composition root calls this BEFORE the settings loader and
+    then :meth:`PersistenceKeySnapshot.resolve`. Messages carry names, absolute paths and counts,
+    never a value or anything derived from one.
+    """
+
+    environment = dict(os.environ if environ is None else environ)
+    names = [name for name in environment if name.casefold() == _FOLDED_NAME]
+    value = environment[names[0]] if names else None
+    sources: list[tuple[str, int, str]] = []
+    if names:
+        sources.append(("the process environment", len(names), "name"))
+    interpolated: list[Path] = []
+    for path in _loader_env_files() if env_files is None else env_files:
+        text = _read_dotenv(path)
+        if text is None:
+            continue
+        values = key_binding_values(text)  # ONE parse: the count and the value, never interpolated
+        if values:
+            sources.append((f"the dotenv file {path.absolute()}", len(values), "line"))
+            if has_interpolation(values):
+                interpolated.append(path)
+            if not names:
+                value = values[-1]
+    total = sum(count for _, count, _ in sources)
+    if total > 1:
+        named = "; ".join(
+            f"{where} ({count} {unit}{'' if count == 1 else 's'})" for where, count, unit in sources
+        )
+        raise PersistenceKeySourceError(
+            f"{PERSISTENCE_KEY_ENV} is named {total} times: {named}. Chronos refuses to start "
+            "unless exactly one names it: remove the others (docs/ops/N3-CUTOVER.md step 5, one "
+            "home); the value is not shown"
+        )
+    if interpolated:
+        raise PersistenceKeySourceError(
+            f"{PERSISTENCE_KEY_ENV} in the dotenv file {interpolated[0].absolute()} contains '$', "
+            "interpolation syntax: its value would come from another variable, outside the counted "
+            "sources. Chronos refuses to start; a key is 64 lowercase hex digits and never needs "
+            "'$' (the value is not shown)"
+        )
+    return PersistenceKeySnapshot(sources[0][0] if sources else None, value)
+
+
+def persistence_key_source(
+    environ: Mapping[str, str] | None = None, env_files: Sequence[Path] | None = None
+) -> str | None:
+    """The one source the key comes from, ``None`` for none; more than one refuses.
+
+    The count of :func:`take_persistence_key_snapshot` (same arguments, same refusal).
+    """
+
+    return take_persistence_key_snapshot(environ, env_files).source
+
+
+def _loader_env_files() -> list[Path]:
+    configured = Settings.model_config.get("env_file")
+    if configured is None:
+        return []
+    if isinstance(configured, (str, os.PathLike)):
+        configured = [configured]
+    return [Path(entry).expanduser() for entry in configured]
+
+
+def _read_dotenv(path: Path) -> str | None:
+    """The file's text, read once; ``None`` when the loader would skip it (not a file)."""
+
+    # the loader reads a regular file or a FIFO and skips anything else; a FIFO was consumed by
+    # that read and cannot be read again to count, so it refuses rather than counting nothing
+    if path.is_fifo():
+        raise PersistenceKeySourceError(
+            f"the dotenv file {path.absolute()} is a FIFO, so the lines naming "
+            f"{PERSISTENCE_KEY_ENV} cannot be counted; Chronos refuses to start"
+        )
+    if not path.is_file():
+        return None
+    encoding = Settings.model_config.get("env_file_encoding") or "utf-8"
+    try:
+        return path.read_text(encoding=encoding)
+    except (OSError, UnicodeError) as error:  # the class only: a decode error quotes bytes
+        raise PersistenceKeySourceError(
+            f"the dotenv file {path.absolute()} could not be read to count the lines naming "
+            f"{PERSISTENCE_KEY_ENV} ({type(error).__name__}); Chronos refuses to start"
+        ) from None

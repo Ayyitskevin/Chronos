@@ -440,6 +440,51 @@ def test_a_mandate_for_another_account_boots_inert(database: Database, tmp_path:
     assert any(alert.kind == "autonomy.mandate_invalid" for alert in raised)
 
 
+def test_a_mandate_keyed_under_another_persistence_key_boots_inert_and_says_why(
+    database: Database, tmp_path: Path
+) -> None:
+    """KEYSRC-FIX4 (Kimi DELTA3 P3-2, residual R6): a mandate authored under a different
+    persistence key carries another fingerprint for THIS account. It still boots inert through the
+    same path, and the log names the key as a possible cause (it used to say only "a different
+    account"), never the key, a digest of it or its length."""
+
+    import logging
+
+    from chronos.utils.identifiers import PersistenceKey
+    from tests.support.persistence_keys import derived_key_hex
+
+    other_hex = derived_key_hex("keysrc-fix4:another-install")
+    other = account_fingerprint(_ACCOUNT_ID, key=PersistenceKey.from_hex(other_hex))
+    path = _write_mandate(tmp_path, _mandate(fingerprint=other))
+    runtime = _runtime(database, tmp_path, mandate_file=path)
+    records: list[logging.LogRecord] = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("chronos.api.autonomy")
+    handler = _Keep(level=logging.ERROR)
+    logger.addHandler(handler)
+    try:
+        assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True) is None
+    finally:
+        logger.removeHandler(handler)
+
+    lines = [record.getMessage() for record in records]
+    (line,) = [text for text in lines if text.startswith("Persistent mandate is scoped to")]
+    assert line.startswith(
+        "Persistent mandate is scoped to a different account; autonomy stays inert"
+    )  # the operator docs and the N3 runbook quote this prefix
+    assert "different persistence key" in line
+    for material in (other_hex, other_hex[:8], hashlib.sha256(other_hex.encode()).hexdigest()):
+        assert material not in line
+    assert "64" not in line
+    with database.sessions.begin() as session:
+        raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert any(alert.kind == "autonomy.mandate_invalid" for alert in raised)
+
+
 def test_a_mandate_carrying_the_unkeyed_fingerprint_boots_inert(
     database: Database, tmp_path: Path
 ) -> None:

@@ -21,7 +21,7 @@ from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
-from chronos.config.persistence_key import resolve_persistence_key
+from chronos.config.persistence_key import take_persistence_key_snapshot
 from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import (
     BrokerAdapter,
@@ -377,11 +377,17 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     migration window in which the UI still runs in-process demo mode).
     """
 
-    settings = get_settings()
     # N3: first, before the log file, the database file or any sidecar exists. An absent or
-    # malformed key refuses here in every broker mode, demo included.
-    persistence_key = resolve_persistence_key(settings)
+    # malformed key refuses here in every broker mode, demo included. KEYSRC: so does a key named
+    # by more than one source (environment names + dotenv lines), whatever their values.
+    # KEYSRC-FIX1/FIX2: ONE snapshot of those sources is taken before the loader runs, and the key
+    # this process uses is resolved FROM it; the settings' own copy of the key field is never read
+    # here, so no later read of the environment or the file can change it (same as the mandate CLI).
+    key_snapshot = take_persistence_key_snapshot()
+    persistence_key = key_snapshot.resolve()
+    settings = get_settings()
     configure_logging(settings.log_level, settings.log_file)
+    logging.getLogger("chronos.runtime").info("persistence key from: %s", key_snapshot.source)
     database = Database(settings.database_url)
     connection: BrokerConnectionManager | None = None
     try:
