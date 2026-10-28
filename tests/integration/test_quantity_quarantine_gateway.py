@@ -535,12 +535,17 @@ def _raising_hook(_reason: str) -> None:
 
 @contextmanager
 def _ready_window(
-    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, *, hook: str = "hooked"
+    gateway: fake_ibapi.FakeGateway,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hook: str = "hooked",
+    poisoned: int = fake_ibapi.OWNED_ID,
 ) -> Iterator[tuple[OfficialIBKRBroker, BrokerConnectionManager, ReconciliationReadiness, Any]]:
     """Kimi's probe fixture: an own order, a prior READY proof, then that order's filled figure
     poisoned through the real EWrapper. ``hook`` is how the adapter was built (D43-FIX2, Kimi's
     delta probe): ``hooked`` (the runtime's wiring), ``unhooked`` (no readiness hook) or
-    ``raising`` (a hook that raises)."""
+    ``raising`` (a hook that raises). ``poisoned`` picks the row whose figure goes bad (D43-FIX4:
+    the manual order, a later row of the book)."""
 
     _wrap(monkeypatch, gateway, "open_orders", _drop_replayed_status)
     readiness = ReconciliationReadiness(session_id="d43-fix1-ready-window")
@@ -576,9 +581,13 @@ def _ready_window(
             reconciled_at=FIXED_NOW,
         )
         assert readiness.snapshot().ready  # the window opens on a valid READY proof
+        remaining, client_id = {
+            fake_ibapi.OWNED_ID: (5.0, fake_ibapi.CLIENT_ID),
+            fake_ibapi.FOREIGN_ID: (1.0, fake_ibapi.MANUAL_CLIENT_ID),
+        }[poisoned]
         client.emit(
-            "orderStatus", fake_ibapi.OWNED_ID, "Submitted", float("nan"), 5.0, 0.0, 0, 0, 0.0,
-            fake_ibapi.CLIENT_ID, "", 0.0,
+            "orderStatus", poisoned, "Submitted", float("nan"), remaining, 0.0, 0, 0, 0.0,
+            client_id, "", 0.0,
         )  # fmt: skip
         client.wait_dispatched()
         yield broker, manager, readiness, client
@@ -731,3 +740,65 @@ def test_fix2_control_a_working_hook_still_returns_the_quarantined_row(
     assert rows[fake_ibapi.OWNED_ID].quantity_quarantine is not None
     assert rows[fake_ibapi.FOREIGN_ID].quantity_quarantine is None
     assert after.reason == QUARANTINE_REASON
+
+
+# --- D43-FIX4 (reader F1, R01/R03): the per-pass and per-row claims, pinned where they bite ------
+
+
+def test_fix4_a_row_quarantined_only_in_the_second_read_is_refused_by_name(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader R01: the reconciler reads the book twice. A figure that goes bad between the two
+    reads (first read clean, second quarantined) must be refused by name exactly like one that
+    was bad from the start; scanning only the first read would miss it."""
+
+    poison = _poison_status(fake_ibapi.OWNED_ID, "filled", float("nan"))
+    calls = {"n": 0, "poison_on": -1}
+
+    def rewrite(name: str, args: tuple[Any, ...]) -> list[tuple[str, tuple]]:
+        return poison(name, args) if calls["n"] == calls["poison_on"] else [(name, args)]
+
+    original = gateway.open_orders
+
+    def wrapped(client: Any, *args: Any) -> None:
+        calls["n"] += 1
+        original(_Rewriting(client, rewrite), *args)
+
+    monkeypatch.setattr(gateway, "open_orders", wrapped)
+    with _session() as (_broker, manager, readiness):
+        start = calls["n"]
+        calls["poison_on"] = start + 2  # the reconciler's second read, and only that one
+        result = _reconcile(manager)
+    assert calls["n"] == start + 2, "the reconciler did not read the book exactly twice"
+    assert result.status is ReconciliationStatus.PENDING
+    assert result.snapshot is None
+    named = [reason for reason in result.reasons if str(fake_ibapi.OWNED_ID) in reason]
+    assert named, result.reasons
+    assert "filled_quantity is not finite" in named[0]
+    assert not any("could not be captured" in reason for reason in result.reasons)
+    assert MANAGER_FAILURE not in readiness.reasons
+
+
+def test_fix4_the_evidence_refuses_when_only_a_later_row_of_the_book_is_quarantined(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader R03: every pin had the quarantined row first. Here the manual order, a later row of
+    a two-row book, goes bad, and the adapter has no readiness hook, so the evidence path's own
+    whole-book check is the only thing that can refuse."""
+
+    with _ready_window(gateway, monkeypatch, hook="unhooked", poisoned=fake_ibapi.FOREIGN_ID) as (
+        broker,
+        manager,
+        readiness,
+        _client,
+    ):
+        evidence = _gather(manager, readiness)
+        read = manager.run(broker.open_orders())
+        after = readiness.snapshot()
+    order = [row.broker_order_id for row in read]
+    quarantined = [row.broker_order_id for row in read if row.quantity_quarantine is not None]
+    assert quarantined == [fake_ibapi.FOREIGN_ID]
+    assert order.index(fake_ibapi.FOREIGN_ID) > 0, f"premise: not a later row in {order}"
+    assert evidence.reconciliation_status is ReconciliationStatus.PENDING
+    assert evidence.reconciliation_generation is None
+    assert (after.ready, after.reason) == (True, "synthetic prior parity proof")  # nothing demoted

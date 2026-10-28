@@ -415,3 +415,32 @@ def test_fix1_admission_refuses_once_a_quarantined_read_demotes_readiness() -> N
     result = _admission_with((_row(),))
     assert isinstance(result, RefusedManagedPositionAdmission)
     assert result.code is OpeningAdmissionRefusalCode.RECONCILIATION_NOT_READY
+
+
+# --- D43-FIX4 (reader F1, R04): the wire reader catches every float() failure ------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "type_name"),
+    [(None, "NoneType"), (10**400, "int")],
+    ids=["None (TypeError)", "int beyond float range (OverflowError)"],
+)
+def test_fix4_the_wire_reader_turns_a_none_or_an_overflowing_figure_into_nan(
+    raw: object, type_name: str
+) -> None:
+    """``float(None)`` raises TypeError and ``float(10**400)`` OverflowError; on the reader thread
+    either would kill the EReader. Both must become NaN (refused downstream) with a notice that
+    names the order and field and never the raw text."""
+
+    import math
+
+    from chronos.broker.callbacks import CallbackBridge
+    from chronos.broker.official_ibkr import _wire_quantity
+    from chronos.broker.request_registry import RequestRegistry
+
+    bridge = CallbackBridge(RequestRegistry())
+    assert math.isnan(_wire_quantity(bridge, 7, "filled", raw))
+    assert list(bridge.notices) == [
+        "[order-quantity] orderStatus for order 7 carried an unreadable filled figure "
+        f"({type_name})"
+    ]
