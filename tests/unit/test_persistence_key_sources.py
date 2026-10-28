@@ -1040,3 +1040,14 @@ def test_fix3_b1_refuses_a_key_binding_with_interpolation_syntax(
         named = [value for name, value in values.items() if name.casefold() == _NAME.casefold()]
         raw_kept = named == ["${CHRONOS_REFERENCED}"]  # a boolean: a failure never prints the key
         assert raw_kept, "a B1 settings load did not get the raw binding value"
+
+
+def test_fix3_the_key_module_never_uses_an_interpolating_parse() -> None:
+    """Static (census F5/F10): the key's module parses only with ``parse_stream``, which never
+    interpolates; ``dotenv_values``, ``resolve_variables`` and ``load_dotenv`` are not used."""
+
+    import inspect
+
+    used = _names_used(inspect.getsource(pk))
+    assert used & {"dotenv_values", "resolve_variables", "load_dotenv", "interpolate"} == set()
+    assert "parse_stream" in used
