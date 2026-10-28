@@ -463,7 +463,9 @@ def _account_summary_reads(source: str) -> list[str]:
     A read is a call to ``.account_summary()``. Per read: the qualified name of the function it
     sits in, the statement that makes the call, the ``except`` handlers of a ``try`` around it
     inside that function, and, for every use of a name the statement binds, the whole expression
-    that consumes it (``_consumer``). The rest of the module is free to change (D-53).
+    that consumes it (``_consumer``), and (D43-FIX4) its control path: the compound statements
+    around it and every exit before it in the same function (``_path``). The rest of the module,
+    including exits after the read, is free to change (D-53).
     """
 
     tree = ast.parse(source)
@@ -505,6 +507,35 @@ def _account_summary_reads(source: str) -> list[str]:
                 return [ast.dump(parent)]
             node = parent
 
+    def _scope(node: ast.AST) -> ast.AST:
+        return next(
+            n
+            for n in chain(node)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda)
+        )
+
+    _BRANCHES = ("body", "orelse", "finalbody", "handlers", "cases")
+
+    def _path(node: ast.AST, function: ast.AST) -> list[str]:
+        """Each enclosing compound statement up to ``function``: its type, the field that holds
+        ``node``'s line of descent, and its header (``if``/``while`` test, ``for`` target and
+        iterable, ``with`` items, ``except`` type, ``match`` subject, ``case`` pattern/guard)."""
+
+        path: list[str] = []
+        child = node
+        for parent in chain(node):
+            if parent is function:
+                break
+            for field, value in ast.iter_fields(parent):
+                if value is child or (isinstance(value, list) and any(v is child for v in value)):
+                    path.append(f"{type(parent).__name__}.{field}")
+                elif field not in _BRANCHES and isinstance(value, ast.AST):
+                    path.append(ast.dump(value))
+                elif field not in _BRANCHES and isinstance(value, list):
+                    path.extend(ast.dump(v) for v in value if isinstance(v, ast.AST))
+            child = parent
+        return path
+
     reads: list[str] = []
     for call in ast.walk(tree):
         if not (
@@ -527,6 +558,18 @@ def _account_summary_reads(source: str) -> list[str]:
                 break
             if isinstance(node, ast.Try):
                 reads.extend(ast.dump(handler) for handler in node.handlers)
+        # D43-FIX4 (reader F2, B1-B3): the read's control path is part of the read. The compound
+        # statements between it and its function (header and the branch that holds it), and every
+        # exit that can leave the function before the read is reached, with that exit's own path.
+        reads.extend(_path(statement, function))
+        start = (statement.lineno, statement.col_offset)
+        for exit_ in ast.walk(function):
+            if not isinstance(exit_, ast.Return | ast.Raise | ast.Break | ast.Continue):
+                continue
+            if (exit_.lineno, exit_.col_offset) >= start or _scope(exit_) is not function:
+                continue
+            reads.append(ast.dump(exit_))
+            reads.extend(_path(exit_, function))
         bound = {
             target.id
             for target in getattr(statement, "targets", [])
