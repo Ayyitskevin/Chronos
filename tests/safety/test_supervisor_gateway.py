@@ -1330,6 +1330,29 @@ def test_d17_a_hold_carrying_a_protection_request_stays_not_executable(request_:
     assert outcome.refusal is AdmissionRefusal.NOT_EXECUTABLE
 
 
+@pytest.mark.parametrize("request_", sorted(_PROTECTION_REQUESTS))
+def test_d17_a_set_limit_is_reported_before_a_protection_request(request_: str) -> None:
+    """Fable P3-2: (ii) runs before (iii), as implemented (check 10a, then 10b).
+
+    New exposure under a set limit that also asks for protection is journalled
+    ``MANDATE_INERT_LIMIT_SET``. An exit passes (ii)'s carve-out and meets (iii).
+    """
+
+    limit = _SET_LIMITS["sessions.allow_overnight_holding"]
+    request = _PROTECTION_REQUESTS[request_]
+    # Positive control: under the plain mandate the request alone is what refuses.
+    plain = admit(_decision(**request), _mandate(), _state())
+    assert plain.refusal == "PROTECTION_NOT_AVAILABLE"
+
+    opening = admit(_decision(**request), _mandate(**limit), _state())
+    assert opening.refusal == "MANDATE_INERT_LIMIT_SET"
+    assert opening.failed_checks[-1].name == "mandate_limits_enforceable"
+
+    exit_ = admit(_decision(**_REDUCING_DECISIONS["CLOSE"], **request), _mandate(**limit), _state())
+    assert exit_.refusal == "PROTECTION_NOT_AVAILABLE"
+    assert exit_.failed_checks[-1].name == "protection_available"
+
+
 def test_d17_the_protection_refusal_keeps_the_alerting_precedence() -> None:
     outcome = admit(
         _decision(protective_order_required=True),
