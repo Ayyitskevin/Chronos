@@ -17,7 +17,7 @@ from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
-from chronos.config.persistence_key import persistence_key_source, resolve_persistence_key
+from chronos.config.persistence_key import take_persistence_key_snapshot
 from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import (
     BrokerAdapter,
@@ -286,16 +286,16 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     migration window in which the UI still runs in-process demo mode).
     """
 
-    settings = get_settings()
     # N3: first, before the log file, the database file or any sidecar exists. An absent or
     # malformed key refuses here in every broker mode, demo included. KEYSRC: so does a key named
     # by more than one source (environment names + dotenv lines), whatever their values.
-    key_source = persistence_key_source()
-    persistence_key = resolve_persistence_key(settings)
+    # KEYSRC-FIX1: ONE snapshot of those sources is taken before the loader runs, and the loader
+    # must have honoured the value it holds (same order as the mandate CLI).
+    key_snapshot = take_persistence_key_snapshot()
+    settings = get_settings()
+    persistence_key = key_snapshot.resolve(settings)
     configure_logging(settings.log_level, settings.log_file)
-    logging.getLogger("chronos.runtime").info(
-        "persistence key from: %s", key_source or "in-process settings"
-    )
+    logging.getLogger("chronos.runtime").info("persistence key from: %s", key_snapshot.source)
     database = Database(settings.database_url)
     connection: BrokerConnectionManager | None = None
     try:

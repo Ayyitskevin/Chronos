@@ -825,26 +825,26 @@ def _resolve_persistence_key() -> PersistenceKey | None:
 
     KEYSRC: a key named by more than one source is refused like an absent one, and the refusal,
     or the one source used, goes to stderr (names, paths and counts only), so stdout stays what a
-    script captures.
+    script captures. KEYSRC-FIX1: ONE snapshot of the sources is taken before the loader runs,
+    and the loader must have honoured the value it holds (same order as ``build_runtime``).
     """
 
     try:
         from chronos.config.persistence_key import (
-            PersistenceKeyError,
-            persistence_key_source,
-            resolve_persistence_key,
+            PersistenceKeySourceError,
+            take_persistence_key_snapshot,
         )
         from chronos.config.settings import get_settings
 
         try:
-            source = persistence_key_source()
-        except PersistenceKeyError as refusal:
+            snapshot = take_persistence_key_snapshot()
+            key = snapshot.resolve(get_settings())
+        except PersistenceKeySourceError as refusal:
             print(f"persistence key refused: {refusal}", file=sys.stderr)
             return None
-        key = resolve_persistence_key(get_settings())
     except Exception:  # absent, malformed, or settings that did not load: all "unavailable"
         return None
-    print(f"persistence key from: {source or 'in-process settings'}", file=sys.stderr)
+    print(f"persistence key from: {snapshot.source}", file=sys.stderr)
     return key
 
 
