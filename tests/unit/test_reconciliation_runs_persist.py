@@ -462,8 +462,8 @@ def _account_summary_reads(source: str) -> list[str]:
 
     A read is a call to ``.account_summary()``. Per read: the qualified name of the function it
     sits in, the statement that makes the call, the ``except`` handlers of a ``try`` around it
-    inside that function, and every node that uses a name the statement binds (``account=account``,
-    ``account.net_liquidation``). The rest of the module is free to change (D-53).
+    inside that function, and, for every use of a name the statement binds, the whole expression
+    that consumes it (``_consumer``). The rest of the module is free to change (D-53).
     """
 
     tree = ast.parse(source)
@@ -476,6 +476,34 @@ def _account_summary_reads(source: str) -> list[str]:
         while node in parents:
             node = parents[node]
             yield node
+
+    def _consumer(use: ast.Name) -> list[str]:
+        """The complete expression a bound-name use flows through, up to where it lands.
+
+        D43-FIX3 (Kimi P2 @ ec32fc8): the direct parent alone (``account.net_liquidation``) did not
+        see ``* 0``, ``abs(...)`` or a wrapping call around it. Climb through every enclosing
+        expression to the first sink:
+        - a keyword argument: record it and the callee it binds into, not the sibling arguments,
+          which are not the read;
+        - a simple statement (``return``, an assignment): record it whole;
+        - a compound statement's header (``if``/``while``/``for``/``with``): record the header
+          expression and the statement type, not the body.
+        """
+
+        node: ast.AST = use
+        while True:
+            parent = parents[node]
+            if isinstance(parent, ast.keyword):
+                owner = parents[parent]
+                callee = (
+                    ast.dump(owner.func) if isinstance(owner, ast.Call) else type(owner).__name__
+                )
+                return [ast.dump(parent), callee]
+            if isinstance(parent, ast.stmt):
+                if any(isinstance(getattr(parent, f, None), list) for f in ("body", "orelse")):
+                    return [type(parent).__name__, ast.dump(node)]
+                return [ast.dump(parent)]
+            node = parent
 
     reads: list[str] = []
     for call in ast.walk(tree):
@@ -506,7 +534,7 @@ def _account_summary_reads(source: str) -> list[str]:
         }
         for use in ast.walk(function):
             if isinstance(use, ast.Name) and use.id in bound and isinstance(use.ctx, ast.Load):
-                reads.append(ast.dump(parents[use]))
+                reads.extend(_consumer(use))
     return reads
 
 
