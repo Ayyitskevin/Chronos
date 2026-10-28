@@ -101,6 +101,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from chronos.autonomy import AutonomyMandate
+from chronos.autonomy.enforcement import LIMIT_ENFORCEMENT, REFUSED
 from chronos.config.limits import (
     MAX_DURABLE_HASH_TEXT_CHARS,
     MAX_DURABLE_KIND_TEXT_CHARS,
@@ -175,7 +176,9 @@ class TickSchedule(Protocol):
 #: "unset", and every available value is a lie: zero reads as "nothing
 #: permitted" where ADR-0017 discretion means "no ceiling", and as "no loss
 #: tolerated" where ``durable.limit_breaches`` treats zero as unenforced.
-LimitEffect = Literal["BINDS", "NO_CEILING", "AUTHORIZES_NOTHING", "NOT_ENFORCED", "NO_FLOOR"]
+LimitEffect = Literal[
+    "BINDS", "NO_CEILING", "AUTHORIZES_NOTHING", "NOT_ENFORCED", "NO_FLOOR", "REFUSES_NEW_EXPOSURE"
+]
 
 
 class MandateLimitView(ChronosModel):
@@ -193,6 +196,10 @@ class MandateLimitView(ChronosModel):
     - ``NOT_ENFORCED`` — a loss or activity ceiling left at zero, which
       ``durable.limit_breaches`` reads as unset rather than as "zero tolerated",
       so nothing will ever breach it.
+
+    One SET reading is not ``BINDS`` either: ``REFUSES_NEW_EXPOSURE`` is a limit
+    nothing can enforce (D-17 (ii)), so admission refuses every decision that
+    opens or adds exposure while it is set; exits are not refused by it.
     """
 
     name: str
@@ -1586,8 +1593,28 @@ def _mandate_ceilings(mandate: AutonomyMandate) -> tuple[MandateLimitView, ...]:
         ("activity.max_turnover_usd_per_session", activity.max_turnover_usd_per_session),
     )
     return tuple(
-        _sizing_ceiling(name, value, model_discretion=discretion) for name, value in sizing
+        _refused_limit(name, value, model_discretion=discretion)
+        if name in _REFUSED_WHEN_SET
+        else _sizing_ceiling(name, value, model_discretion=discretion)
+        for name, value in sizing
     ) + tuple(_breach_ceiling(name, value) for name, value in breach)
+
+
+#: Panel limits nothing can enforce (D-17 (ii)), from the one classification
+#: admission and ``mandate check`` also read.
+_REFUSED_WHEN_SET = frozenset(
+    f"concentration.{field}"
+    for field, status in LIMIT_ENFORCEMENT["ConcentrationLimits"].items()
+    if status == REFUSED
+)
+
+
+def _refused_limit(name: str, value: Decimal | int, *, model_discretion: bool) -> MandateLimitView:
+    """A set value refuses new exposure (it is never enforced); unset reads as before."""
+
+    if value > 0:
+        return MandateLimitView(name=name, value=_limit_text(value), effect="REFUSES_NEW_EXPOSURE")
+    return _sizing_ceiling(name, value, model_discretion=model_discretion)
 
 
 def _limit_text(value: Decimal | int) -> str:

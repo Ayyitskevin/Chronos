@@ -549,6 +549,7 @@ const LIMIT_EFFECTS = {
   AUTHORIZES_NOTHING: ["muted", "unset without discretion: deny-by-default sizes every order to nothing"],
   NOT_ENFORCED: ["warn", "unset: nothing will ever breach this limit"],
   NO_FLOOR: ["warn", "unset: no reserve is protected"],
+  REFUSES_NEW_EXPOSURE: ["warn", "set, but nothing can enforce it: admission refuses every decision that opens or adds exposure (D-17); exits are not refused by it"],
 };
 
 const MANDATE_SCOPES = [
