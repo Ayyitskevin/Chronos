@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import heapq
 import logging
+import math
 import sys
 import threading
 from collections.abc import Callable, Sequence
@@ -95,7 +96,7 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
-from chronos.orders.tracker import broker_status_to_lifecycle
+from chronos.orders.tracker import broker_status_to_lifecycle, quantity_refusal
 from chronos.services.option_deliverable import assess_standard_deliverable
 
 _logger = logging.getLogger("chronos.broker.official_ibkr")
@@ -251,6 +252,10 @@ _DAILY_CLOSE_UTC = time(21, 0)
 
 _CONNECT_TIMEOUT_S = 15.0
 _REQUEST_TIMEOUT_S = 20.0
+#: D43-FIX1: the typed reason a quarantined open-orders row demotes readiness with.
+QUARANTINED_ORDER_FIGURES_REASON = (
+    "broker open order fill figures quarantined; reconciliation required"
+)
 _QUOTE_TIMEOUT_S = 15.0
 _OPTION_GENERIC_TICKS = "100,101"
 #: Historical requests are answered as a burst of callbacks terminated by
@@ -483,6 +488,24 @@ def _load_order_class() -> Any:
     return Order
 
 
+def _wire_quantity(bridge: CallbackBridge, order_id: int, field: str, raw: Any) -> float:
+    """D-43: an orderStatus figure as the bridge's float; never a raise on the reader thread.
+
+    A value ``float()`` cannot read (a non-numeric field, an sNaN, an int beyond float range)
+    becomes NaN, which the quantity check refuses downstream; the notice names the order and the
+    field, never the raw text.
+    """
+
+    try:
+        return float(raw)
+    except (TypeError, ValueError, OverflowError):
+        bridge.notices.append(
+            f"[order-quantity] orderStatus for order {order_id} carried an unreadable {field} "
+            f"figure ({type(raw).__name__})"
+        )
+        return math.nan
+
+
 def _make_app(bridge: CallbackBridge) -> Any:
     """Build the EWrapper/EClient subclass that forwards into the bridge.
 
@@ -621,8 +644,8 @@ def _make_app(bridge: CallbackBridge) -> Any:
             bridge.on_order_status(
                 int(orderId),
                 str(status),
-                float(filled),
-                float(remaining),
+                _wire_quantity(bridge, orderId, "filled", filled),
+                _wire_quantity(bridge, orderId, "remaining", remaining),
                 float(avgFillPrice),
                 int(permId),
             )
@@ -930,6 +953,8 @@ class OfficialIBKRBroker:
     ) -> None:
         self._live_kill_switch = live_kill_switch
         self._order_ownership = order_ownership
+        # D43-FIX1: the readiness invalidation the RC-1 classifier also receives (runtime.py)
+        self._on_connection_uncertain = on_connection_uncertain
         if settings.ib_client_id == 0:
             raise BrokerSafetyError(
                 "IB_CLIENT_ID=0 is IB's master client, which can cancel other clients' orders; "
@@ -1267,6 +1292,20 @@ class OfficialIBKRBroker:
                 if status_entry
                 else max(quantity - filled, Decimal("0"))
             )
+            lifecycle = broker_status_to_lifecycle(
+                raw_status, filled_quantity=filled, remaining_quantity=remaining
+            )
+            refusal = quantity_refusal(filled, remaining)
+            if refusal is not None:
+                # D-43 (Q2): a typed quarantine, never a raise that locks the whole snapshot and
+                # never a dropped row (absence could resolve a live order REJECTED). The row keeps
+                # its identity and the mapper's SUBMISSION_UNKNOWN; its figures are placeholders.
+                self.bridge.notices.append(
+                    f"[order-quantity] quarantined open order {order_id} (ref={order_ref!r}): "
+                    f"{refusal}; its figures are not broker fact"
+                )
+                filled, remaining = Decimal("0"), quantity
+                self._invalidate_for_quarantine(order_id, refusal)
             orders.append(
                 BrokerOrder(
                     broker_order_id=int(order_id),
@@ -1280,14 +1319,44 @@ class OfficialIBKRBroker:
                     filled_quantity=filled,
                     remaining_quantity=remaining,
                     limit_price=limit_price,
-                    lifecycle=broker_status_to_lifecycle(
-                        raw_status, filled_quantity=filled, remaining_quantity=remaining
-                    ),
+                    lifecycle=lifecycle,
                     transmit=bool(getattr(order, "transmit", False)),
                     outside_rth=bool(getattr(order, "outsideRth", False)),
+                    quantity_quarantine=refusal,
                 )
             )
         return tuple(orders)
+
+    def _invalidate_for_quarantine(self, order_id: int, refusal: str) -> None:
+        """D43-FIX1: a known-bad book demotes readiness at the read, so no reader of
+        ``open_orders()`` can lean on a READY proof taken before it (never a connection epoch bump).
+
+        D43-FIX2: a hook that raises fails the read CLOSED. The quarantined row cannot be returned
+        while the READY proof it should have demoted may still stand, so the read raises a typed
+        :class:`BrokerSafetyError` instead; the connection manager's own failure invalidation then
+        demotes readiness, and every reader treats the read as failed. Without a hook there is
+        nothing to fail: the evidence path refuses the row itself (``orders/evidence.py``).
+        """
+
+        _logger.warning(
+            "Open order %s carries malformed fill figures (%s); readiness is invalidated",
+            order_id,
+            refusal,
+            extra={"event": "open_order_quantity_quarantined"},
+        )
+        if self._on_connection_uncertain is None:
+            return
+        try:
+            self._on_connection_uncertain(QUARANTINED_ORDER_FIGURES_REASON)
+        except Exception as error:
+            _logger.exception(
+                "Quarantine readiness invalidation failed",
+                extra={"event": "open_order_quarantine_invalidation_failed"},
+            )
+            raise BrokerSafetyError(
+                f"open order {order_id} carries malformed fill figures ({refusal}) and the "
+                "readiness invalidation failed; the open-orders read is refused"
+            ) from error
 
     async def completed_orders(self) -> tuple[BrokerOrder, ...]:
         """The venue's completed (terminal) orders, normalized as EVIDENCE only.
@@ -2508,6 +2577,16 @@ class OfficialIBKRBroker:
             perm_id = int(payload[5]) or None
             filled = Decimal(str(payload[3]))
             remaining = Decimal(str(payload[4]))
+            refusal = quantity_refusal(filled, remaining)
+            if refusal is not None:
+                # D-43 (Q1): the mapper returns SUBMISSION_UNKNOWN; the message carries the cause
+                post_send_message = (
+                    f"malformed broker fill figures ({refusal}); state unknown: "
+                    "reconcile before resubmitting"
+                )
+                self.bridge.notices.append(
+                    f"[order-quantity] submit acknowledgement for order {order_id}: {refusal}"
+                )
         elif payload and payload[0] == "openOrder":
             raw_status = str(getattr(payload[4], "status", "") or "")
             perm_id = int(getattr(payload[3], "permId", 0) or 0) or None

@@ -12,6 +12,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -456,10 +457,138 @@ def _packet_base_ref() -> str:
     )
 
 
+def _account_summary_reads(source: str) -> list[str]:
+    """Every live AccountSummary read in one module, as AST dumps, and nothing else.
+
+    A read is a call to ``.account_summary()``. Per read: the qualified name of the function it
+    sits in, the statement that makes the call, the ``except`` handlers of a ``try`` around it
+    inside that function, and, for every use of a name the statement binds, the whole expression
+    that consumes it (``_consumer``), and (D43-FIX4) its control path: the compound statements
+    around it and every exit before it in the same function (``_path``). The rest of the module,
+    including exits after the read, is free to change (D-53).
+    """
+
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def chain(node: ast.AST) -> Iterator[ast.AST]:
+        while node in parents:
+            node = parents[node]
+            yield node
+
+    def _consumer(use: ast.Name) -> list[str]:
+        """The complete expression a bound-name use flows through, up to where it lands.
+
+        D43-FIX3 (Kimi P2 @ ec32fc8): the direct parent alone (``account.net_liquidation``) did not
+        see ``* 0``, ``abs(...)`` or a wrapping call around it. Climb through every enclosing
+        expression to the first sink:
+        - a keyword argument: record it and the callee it binds into, not the sibling arguments,
+          which are not the read;
+        - a simple statement (``return``, an assignment): record it whole;
+        - a compound statement's header (``if``/``while``/``for``/``with``): record the header
+          expression and the statement type, not the body.
+        """
+
+        node: ast.AST = use
+        while True:
+            parent = parents[node]
+            if isinstance(parent, ast.keyword):
+                owner = parents[parent]
+                callee = (
+                    ast.dump(owner.func) if isinstance(owner, ast.Call) else type(owner).__name__
+                )
+                return [ast.dump(parent), callee]
+            if isinstance(parent, ast.stmt):
+                if any(isinstance(getattr(parent, f, None), list) for f in ("body", "orelse")):
+                    return [type(parent).__name__, ast.dump(node)]
+                return [ast.dump(parent)]
+            node = parent
+
+    def _scope(node: ast.AST) -> ast.AST:
+        return next(
+            n
+            for n in chain(node)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda)
+        )
+
+    _BRANCHES = ("body", "orelse", "finalbody", "handlers", "cases")
+
+    def _path(node: ast.AST, function: ast.AST) -> list[str]:
+        """Each enclosing compound statement up to ``function``: its type, the field that holds
+        ``node``'s line of descent, and its header (``if``/``while`` test, ``for`` target and
+        iterable, ``with`` items, ``except`` type, ``match`` subject, ``case`` pattern/guard)."""
+
+        path: list[str] = []
+        child = node
+        for parent in chain(node):
+            if parent is function:
+                break
+            for field, value in ast.iter_fields(parent):
+                if value is child or (isinstance(value, list) and any(v is child for v in value)):
+                    path.append(f"{type(parent).__name__}.{field}")
+                elif field not in _BRANCHES and isinstance(value, ast.AST):
+                    path.append(ast.dump(value))
+                elif field not in _BRANCHES and isinstance(value, list):
+                    path.extend(ast.dump(v) for v in value if isinstance(v, ast.AST))
+            child = parent
+        return path
+
+    reads: list[str] = []
+    for call in ast.walk(tree):
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "account_summary"
+        ):
+            continue
+        statement = next(n for n in chain(call) if isinstance(n, ast.stmt))
+        scopes = [
+            n
+            for n in chain(call)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        ]
+        function = scopes[0]
+        reads.append(".".join(reversed([s.name for s in scopes])))
+        reads.append(ast.dump(statement))
+        for node in chain(statement):
+            if node is function:
+                break
+            if isinstance(node, ast.Try):
+                reads.extend(ast.dump(handler) for handler in node.handlers)
+        # D43-FIX4 (reader F2, B1-B3): the read's control path is part of the read. The compound
+        # statements between it and its function (header and the branch that holds it), and every
+        # exit that can leave the function before the read is reached, with that exit's own path.
+        reads.extend(_path(statement, function))
+        start = (statement.lineno, statement.col_offset)
+        for exit_ in ast.walk(function):
+            if not isinstance(exit_, ast.Return | ast.Raise | ast.Break | ast.Continue):
+                continue
+            if (exit_.lineno, exit_.col_offset) >= start or _scope(exit_) is not function:
+                continue
+            reads.append(ast.dump(exit_))
+            reads.extend(_path(exit_, function))
+        bound = {
+            target.id
+            for target in getattr(statement, "targets", [])
+            if isinstance(target, ast.Name)
+        }
+        for use in ast.walk(function):
+            if isinstance(use, ast.Name) and use.id in bound and isinstance(use.ctx, ast.Load):
+                reads.extend(_consumer(use))
+    return reads
+
+
 def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> None:
     """BP-3 touches neither live AccountSummary read — measured against the branch's merge-base
     with its base ref, so merges of main into the branch (other packets' edits to these files)
-    do not fail a pin about THIS branch's edits."""
+    do not fail a pin about THIS branch's edits.
+
+    D-53 (Kevin K-20261028-002): the pin compares the reads themselves (``_account_summary_reads``),
+    not the whole of ``orders/evidence.py`` and ``orders/submission.py``, so a later safety fix
+    elsewhere in those files is not frozen out by a pin about BP-3."""
 
     ref = _packet_base_ref()
     base = subprocess.run(
@@ -471,10 +600,164 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
             ["git", "show", f"{base}:{path}"], cwd=_ROOT, capture_output=True, text=True, check=True
         ).stdout
         after = (_ROOT / path).read_text(encoding="utf-8")
-        assert ast.dump(ast.parse(before)) == ast.dump(ast.parse(after)), (
+        assert _account_summary_reads(before), f"{path} at {base[:12]}: no AccountSummary read"
+        assert _account_summary_reads(before) == _account_summary_reads(after), (
             f"{path} differs from the merge-base {base[:12]} with {ref}: this branch edited a "
             "live AccountSummary read"
         )
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "new"),
+    [
+        (  # the read itself is rerouted
+            "src/chronos/orders/evidence.py",
+            "self._connection.broker.account_summary()",
+            "self._connection.broker.account_summary(cached=True)",
+        ),
+        (  # the read's result no longer reaches the evidence
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=None,",
+        ),
+        (  # the net liquidation comes from somewhere else
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.cash, ""',
+        ),
+        (  # a broader failure is swallowed around the read
+            "src/chronos/orders/submission.py",
+            "except BrokerError as error:\n"
+            '            return None, f"net liquidation unavailable: {error}"',
+            "except Exception as error:\n"
+            '            return None, f"net liquidation unavailable: {error}"',
+        ),
+        # D43-FIX3 (Kimi HOLD P2 @ ec32fc8): the whole consuming expression, not only the direct
+        # parent of the bound name, so arithmetic or a wrapper around the read is an edit of it
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.net_liquidation * 0, ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return account.net_liquidation + 1, ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return abs(account.net_liquidation), ""',
+        ),
+        (
+            "src/chronos/orders/submission.py",
+            'return account.net_liquidation, ""',
+            'return round(account.net_liquidation), ""',
+        ),
+        (
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=_redacted(account),",
+        ),
+        (
+            "src/chronos/orders/evidence.py",
+            "account=account,",
+            "account=account if evidence_provenance_is_current else None,",
+        ),
+        # D43-FIX4 (reader F2, B1-B3): control flow around the read, not only the read's bytes
+        (  # B1: an early return before the read
+            "src/chronos/orders/submission.py",
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n        try:",
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n"
+            "        if self is not None:\n"
+            "            return Decimal('1000000'), ''\n"
+            "        try:",
+        ),
+        (  # B2: the read made conditional
+            "src/chronos/orders/evidence.py",
+            "        account = self._connection.run(self._connection.broker.account_summary())\n",
+            "        if self._settings is None:\n"
+            "            account = None\n"
+            "        else:\n"
+            "            account = self._connection.run("
+            "self._connection.broker.account_summary())\n",
+        ),
+        (  # B3: a flag-guarded bypass inside the read's try
+            "src/chronos/orders/submission.py",
+            "        try:\n            account = self._connection.run(",
+            "        try:\n"
+            "            if getattr(self, '_stale_ok', False):\n"
+            "                return Decimal('1000000'), ''\n"
+            "            account = self._connection.run(",
+        ),
+    ],
+    ids=[
+        "evidence-call",
+        "evidence-use",
+        "submission-use",
+        "submission-handler",
+        "submission-times-zero",
+        "submission-plus-one",
+        "submission-abs",
+        "submission-wrapped-call",
+        "evidence-wrapped-call",
+        "evidence-conditional",
+        "submission-early-return",
+        "evidence-conditional-read",
+        "submission-flag-bypass-in-try",
+    ],
+)
+def test_3b3_the_read_scan_sees_an_edited_read(path: str, old: str, new: str) -> None:
+    """Positive control: each edit of an AccountSummary read is seen by the scan test_3b runs."""
+
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    assert source.count(old) == 1, old
+    assert _account_summary_reads(source) != _account_summary_reads(source.replace(old, new))
+
+
+def test_3b4_the_read_scan_ignores_the_rest_of_the_module() -> None:
+    """Negative control: an edit outside the reads leaves the scan unchanged (D-53)."""
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "readiness_after = self._reconciliation_readiness.snapshot()\n"
+    assert source.count(old) == 1
+    edited = source.replace(old, old + "        unrelated_safety_check = True\n")
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
+
+
+def test_3b5_a_sibling_argument_of_the_read_s_consumer_stays_free() -> None:
+    """Negative control for FIX3's wider slice: it stops at the keyword the read binds into.
+
+    Another argument of the same ``RiskEvidence(...)`` call is not the read; D-53 keeps it free.
+    """
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "opening_orders_today=opening_today,"
+    assert source.count(old) == 1
+    edited = source.replace(old, "opening_orders_today=opening_today + 0,")
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
+
+
+def test_3b6_an_exit_after_the_read_stays_free() -> None:
+    """Negative control for FIX4's control-path slice: only exits BEFORE the read are part of it.
+
+    A guard added after the read (here, after the readiness snapshot that follows it) is the rest
+    of the function, which D-53 keeps free.
+    """
+
+    path = "src/chronos/orders/evidence.py"
+    source = (_ROOT / path).read_text(encoding="utf-8")
+    old = "        readiness_after = self._reconciliation_readiness.snapshot()\n"
+    assert source.count(old) == 1
+    edited = source.replace(
+        old, old + "        if intent is None:\n            raise ValueError('no intent')\n"
+    )
+    assert ast.dump(ast.parse(source)) != ast.dump(ast.parse(edited))
+    assert _account_summary_reads(source) == _account_summary_reads(edited)
 
 
 def test_3c_the_base_comparison_uses_no_frozen_sha() -> None:

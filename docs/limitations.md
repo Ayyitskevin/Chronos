@@ -33,6 +33,32 @@ runbooks.
   skipped by default.
 - Modify-in-place is not implemented on the official live adapter: re-price by cancel +
   re-propose (the full gate walk re-applies).
+- **Venue fill figures are checked for finite and non-negative only, never for magnitude (D-43,
+  Q3).** The official adapter and `broker_status_to_lifecycle` refuse a NaN, sNaN, ±Infinity or
+  negative filled/remaining figure to `SUBMISSION_UNKNOWN` (an open-orders row becomes a typed
+  quarantine, `BrokerOrder.quantity_quarantine`), but a huge finite figure passes every boundary.
+  `order_events` figures are `Numeric(20, 8)`, which SQLite stores as REAL: above 2^53 precision
+  is lost and a figure beyond float range reads back as `Infinity`. The reachable path is the
+  executions leg (next bullet); open-orders figures are bounded by the order's own quantity.
+- **The positions and executions legs are outside D-43 (Q4).** A NaN position quantity, or an
+  execution whose `shares` is NaN, zero or negative, still fails `BrokerPosition` /
+  `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
+  reconciliation pass then stays `PENDING` ("Broker evidence could not be captured") for the
+  whole pass. That fails closed, but the offending row is not named.
+- **Two raise paths remain on the official adapter's order reads (D-43 R4, R5).** An open-orders
+  row whose figures are finite and non-negative but do not sum to its `totalQuantity`, or whose
+  `totalQuantity` is itself malformed, still fails `BrokerOrder` validation, so the whole
+  `open_orders()` read raises and reconciliation stays `PENDING` without naming the row. And the
+  `orderStatus` callback still passes `avgFillPrice` / `permId` through `float()` / `int()`, which
+  raise on a non-numeric value. Both fail closed; neither is a fill figure the D-43 quarantine types.
+- **The `ib_async` adapter keeps its own status mapper (D-43, Q4).** With
+  `BROKER_ADAPTER=IB_ASYNC` (not the default; `OFFICIAL_IBKR` is) the mapper is
+  `IBKRBroker._order_lifecycle` (`src/chronos/broker/ibkr.py`), and its `open_orders()` raises
+  `BrokerDataError` (the whole read fails, no row is typed) for an unrecognised status, for a NaN,
+  Infinity or unset figure, and for negative or inconsistent figures; it also treats
+  `ApiPending`, `ValidationError`, `ApiUpdate` and `PendingCancel` as working. The official
+  adapter types each of these per row instead (`SUBMISSION_UNKNOWN`, `CANCEL_PENDING` for
+  `PendingCancel`); D-43 changed only the official path.
 
 ## Operational health
 

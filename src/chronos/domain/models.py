@@ -531,6 +531,11 @@ class BrokerOrder(ChronosModel):
     lifecycle: OrderLifecycle
     transmit: bool = False
     outside_rth: bool = False
+    # D-43 (Q2): why the venue's filled/remaining figures for this row were refused. A quarantined
+    # row is SUBMISSION_UNKNOWN with placeholder figures (nothing filled, the whole order
+    # outstanding) that are NOT broker fact: no reader settles on or persists them. Left out of
+    # every dump while None, so an unquarantined row serialises exactly as before.
+    quantity_quarantine: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("account_id")
     @classmethod
@@ -552,6 +557,23 @@ class BrokerOrder(ChronosModel):
     def validate_quantities(self) -> BrokerOrder:
         if self.filled_quantity + self.remaining_quantity != self.quantity:
             raise ValueError("Filled and remaining quantities must equal order quantity")
+        return self
+
+    @model_validator(mode="after")
+    def validate_quantity_quarantine(self) -> BrokerOrder:
+        if self.quantity_quarantine is None:
+            return self
+        if not self.quantity_quarantine.strip():
+            raise ValueError("quantity_quarantine must name its cause")
+        if (
+            self.lifecycle is not OrderLifecycle.SUBMISSION_UNKNOWN
+            or self.filled_quantity != 0
+            or self.remaining_quantity != self.quantity
+        ):
+            raise ValueError(
+                "a quantity quarantine is SUBMISSION_UNKNOWN with nothing filled and the whole "
+                "order outstanding"
+            )
         return self
 
     @property

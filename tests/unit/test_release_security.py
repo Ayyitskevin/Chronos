@@ -166,7 +166,11 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 47 at the KEYSRC/CB-1 merge: the union of both branches' entries (the shared N3-1 runtime.py
     # entry once: 38 + 4 + 3), plus the two runtime.py fingerprints the merged file supersedes
     # (CB1-FIX1's and KEYSRC-FIX2's).
-    assert len(historical_candidates) == 47
+    # 43 at D-43 (rebased onto 0e624e5: official_ibkr.py's quantity quarantine supersedes
+    # CB-1's official_ibkr.py fingerprint).
+    # 48 at the D-43/#329 merge: main's 47 plus D-43's one (CB-1's official_ibkr.py fingerprint,
+    # superseded by the quantity quarantine); neither side changes the other's inventory files.
+    assert len(historical_candidates) == 48
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

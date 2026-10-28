@@ -76,11 +76,16 @@ class BrokerRiskEvidenceProvider:
         positions = self._connection.run(self._connection.broker.positions())
         open_orders = self._connection.run(self._connection.broker.open_orders())
         readiness_after = self._reconciliation_readiness.snapshot()
+        # D43-FIX2 (D-53): a quarantined row means the venue's book is known-bad right now; the
+        # READY proof was taken before it, so this evidence cannot claim it, whatever the adapter's
+        # readiness hook did (absent, raising or working)
+        book_is_readable = all(order.quantity_quarantine is None for order in open_orders)
         evidence_provenance_is_current = (
             readiness_before.ready
             and readiness_after.ready
             and readiness_before.session_id == readiness_after.session_id
             and readiness_before.generation == readiness_after.generation
+            and book_is_readable
         )
 
         opening_today = self._opening_today(intent, now=now)

@@ -642,6 +642,18 @@ def _observation_reasons(
         for item in items
     ):
         reasons.append("Broker evidence does not belong to one consistent account scope.")
+    # D-43 (Q2): a quarantined row's figures are placeholders; no snapshot view may carry them.
+    quarantined = {
+        item.broker_order_id: item.quantity_quarantine
+        for item in (*observation.orders_first, *observation.orders_second)
+        if item.quantity_quarantine is not None
+    }
+    reasons.extend(
+        f"Broker open order {order_id} reports malformed fill figures ({cause}); "
+        "reconciliation remains locked until the venue sends a corrected status for it or the "
+        "session reconnects: check the order in TWS."
+        for order_id, cause in sorted(quarantined.items())
+    )
 
     if not _is_aware(observation.server_time_start) or not _is_aware(observation.server_time_end):
         reasons.append("Broker server time was not timezone-aware.")
