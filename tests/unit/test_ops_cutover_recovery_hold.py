@@ -69,22 +69,42 @@ def _step7(text: str | None = None) -> str:
 
 
 #: The one header form the runbook may use: curl reads the header from a pipe the shell fills, so
-#: the token is in no process's argv (G1). ``$(<file)`` is a shell builtin read; ``printf`` is a
-#: builtin; the only argv curl carries is ``/dev/fd/N``.
-_HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api_token)\")"
+#: the token is in no process's argv (G1). ``$(<file)`` is a shell read, ``printf`` a builtin of the
+#: FRESH shell below; the only argv curl carries is ``/dev/fd/N``.
+_HEADER_FROM_FILE = '-H @<(printf "X-Chronos-Token: %s\\n" "$(<data/backend_api_token)")'
 
-
-#: The one line run in the operator's own shell before the first token-bearing command (P2-1,
-#: P2-2): `builtin` skips a function named `type`; `type` reports `command` and `curl` as the
-#: shell resolves them (a function, an alias, a hashed path or a PATH wrapper all show).
-_SHELL_CHECK = "builtin type command curl printf"
-
-#: The guard every token-bearing curl wears (P1-1): a subshell that turns xtrace off before curl is
-#: expanded, ``command`` so an alias or function named ``curl`` cannot interpose, and ``-q`` as
-#: curl's FIRST argument (curl ignores it anywhere else), so no ambient ``.curlrc`` can switch on
-#: ``verbose``/``trace``.
-_GUARD = "( set +x; command curl -q "
+#: How both token-bearing commands start (FIX5, the class "the operator's shell can redefine
+#: anything it resolves"): a fresh shell started by absolute path with an empty environment, so no
+#: function, alias, hash entry, xtrace, BASH_ENV, HOME (~/.curlrc) or startup file of the operator's
+#: shell reaches the command that reads the token. ``-q`` stays curl's FIRST argument.
+_LAUNCH = "/usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc"
+_LAUNCH_C = _LAUNCH + " -c '"
+#: The preflight run once, through the same launch: both absolute paths exist, curl is in a
+#: root-owned directory, and it is the version the token commands will use.
+_PREFLIGHT = _LAUNCH + " -c 'command -v curl; curl -q --version'"
 _TOKEN_CURL_FLAGS_NEVER = (" -v", "--verbose", "--trace", "--config", " -K", " -x ")
+
+
+def _launches(text: str) -> list[str]:
+    """Every ``/usr/bin/env ... -c '...'`` command in the bash fences, as written."""
+
+    found = []
+    for info, body in _fences(text):
+        if info != "bash":
+            continue
+        lines = body.splitlines()
+        i = 0
+        while i < len(lines):
+            if lines[i].startswith("/usr/bin/env"):
+                j = i
+                if not (lines[i].rstrip().endswith("'") and lines[i].count("'") >= 2):
+                    j = i + 1
+                    while j < len(lines) and lines[j].strip() != "'":
+                        j += 1
+                found.append("\n".join(lines[i : j + 1]))
+                i = j
+            i += 1
+    return found
 
 
 def _curl_commands(text: str) -> list[str]:
@@ -95,25 +115,36 @@ def _curl_commands(text: str) -> list[str]:
         if info != "bash":
             continue
         for logical in re.sub(r"\\\n\s*", " ", body).splitlines():
-            if re.match(r"\s*(\(\s*(set \+x;\s*)?)?(command\s+)?curl\b", logical):
+            if re.search(r"(^|-c ')\s*(\(\s*(set \+x;\s*)?)?(command\s+)?curl\b", logical):
                 commands.append(logical)
     return commands
 
 
 def _token_curl_guard_problems(text: str) -> list[str]:
-    """Token-bearing curl commands that lack the guard or carry an output-enabling flag."""
+    """Token-bearing commands that are not both inside the fresh shell with ``-q`` first."""
 
     problems = []
-    for command in _curl_commands(text):
-        if "backend_api_token" not in command:
+    token_launches = [launch for launch in _launches(text) if "backend_api_token" in launch]
+    if len(token_launches) != 2:
+        problems.append(f"expected two token-bearing launches, found {len(token_launches)}")
+    in_fences = sum(
+        body.count("backend_api_token") for info, body in _fences(text) if info == "bash"
+    )
+    inside = sum(launch.count("backend_api_token") for launch in token_launches)
+    if in_fences != inside:
+        problems.append("the token file is read outside the fresh shell")
+    for launch in token_launches:
+        if not launch.startswith(_LAUNCH_C):
+            problems.append(f"not started as `{_LAUNCH} -c '`: {launch[:90]}")
             continue
-        if not command.startswith(_GUARD):
-            problems.append(f"no `( set +x; command curl -q ` guard: {command[:70]}")
-        if not command.endswith(" )"):
-            problems.append(f"the guard subshell is not closed on this command: {command[-30:]}")
+        inner = re.sub(r"\\\n\s*", " ", launch[len(_LAUNCH_C) :]).strip()
+        if not inner.startswith("curl -q "):
+            problems.append(f"`curl -q` is not the first command: {inner[:70]}")
+        if inner.count(_HEADER_FROM_FILE) != 1:
+            problems.append(f"the fd-fed header form is missing: {inner[:70]}")
         for flag in _TOKEN_CURL_FLAGS_NEVER:
-            if flag in command:
-                problems.append(f"{flag.strip()} on a token-bearing curl: {command[:70]}")
+            if flag in inner:
+                problems.append(f"{flag.strip()} on a token-bearing curl: {inner[:70]}")
     return problems
 
 
@@ -150,33 +181,27 @@ _GATE: dict[str, tuple[str, ...]] = {
         "backend boots held: read-only, unreconciled, no autonomy runtime.",
         "Read the hold from `<checkout>`.",
         "The token comes from the backend's own token file (`BACKEND_TOKEN_FILE`, "
-        "`data/backend_api_token` by default; use your path if it differs): the shell reads the "
-        "file and hands curl a header file through process substitution.",
-        "That needs **bash or zsh** (dash and sh refuse it with a syntax error before curl runs) "
-        "and **curl 7.55 or newer** (`-H @file`).",
-        "What the two token-bearing commands neutralise: the token is never in any process's argv "
-        "(`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path); the subshell's `set +x` "
-        "keeps an xtrace you already have on from printing it; `command` keeps an alias or shell "
-        "function named `curl` (one that adds `-v`, say) from running; and `-q`, as curl's FIRST "
-        "argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing it.",
+        "`data/backend_api_token` by default; use your path if it differs).",
+        "The two commands that carry it run in a fresh shell, `" + _LAUNCH + "`, started by "
+        "absolute path with an empty environment and given the command as its `-c` argument.",
+        "That shell has none of yours: no function, alias, hash entry, xtrace, `BASH_ENV` or "
+        "startup file, no `HOME` (so no `~/.curlrc`), and a `PATH` of two root-owned directories.",
+        "The token is read there, handed to curl as a header file (`-H @<(printf ...)`, so it is "
+        "in no process's argv) and never exists in your shell; `-q`, as curl's FIRST argument, "
+        "also stops a curlrc found another way. Your shell may be bash, zsh or dash.",
         "What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either "
-        "command and curl prints the token. So does anything that changes which `command` or "
-        "which `curl` runs: a function named `command` (also from `BASH_ENV`, or "
-        "`ZDOTDIR/.zshenv`), a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another "
-        "`curl` earlier in your `PATH`, or a function or alias named `printf`, which receives "
-        "the token inside the process substitution.",
-        "The check below shows those; it cannot see a shell that also redefines `builtin` or "
-        "`type`. Do not.",
+        "command and curl prints the token. Do not.",
+        "A shell that deliberately intercepts the launch itself (a bash function named "
+        "`/usr/bin/env`, a DEBUG trap under `extdebug`) is outside this guarantee: it already "
+        "runs as you and can read the token file.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
-        "Check the shell first. In the shell you will paste into, run:",
-        "It must print exactly three lines: `command is a shell builtin`, `curl is <path>` and "
-        "`printf is a shell builtin`, where `<path>` is your system's curl in a directory only "
-        "root can write (`/usr/bin/curl`, say).",
-        "**STOP, and run nothing below, if** `command` or `printf` is a function or an alias, "
-        "`curl` is a function, an alias or `hashed`, the path is under your home or in any "
-        "directory you can write, or there is any other line.",
-        "( set +x; command curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
-        "http://127.0.0.1:<port>/autonomy/alerts )",
+        "Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in "
+        "`/usr/bin` or `/bin` (`-H @file`):",
+        "It must print `/usr/bin/curl` (or `/bin/curl`), then curl's version lines, the first "
+        "`curl 7.55` or later.",
+        "**STOP, and run nothing below, if** it prints an error, another path, or an older curl.",
+        _LAUNCH_C + 'curl -q -sS -w " HTTP %{http_code}\\n" ' + _HEADER_FROM_FILE + " "
+        "http://127.0.0.1:<port>/autonomy/alerts'",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
         "prove it does not follow a restore (database_replaced)`:",
         "`GET /autonomy/alerts` only reads, but it sits behind the same writer check as every "
@@ -199,11 +224,10 @@ _GATE: dict[str, tuple[str, ...]] = {
     "acknowledge": (
         "**Then you acknowledge it: your act, with a typed note** saying this is the expected N3 "
         "database replacement.",
-        "In a new shell, run the check above again first (same STOP).",
-        "The same token file, in the same guarded form:",
-        "( set +x; command curl -q -fsS -X POST "
+        "The same token file, in the same fresh shell:",
+        _LAUNCH_C + " curl -q -fsS -X POST "
         "http://127.0.0.1:<port>/live/recovery/acknowledge \\ " + _HEADER_FROM_FILE + " \\ "
-        "-H 'Content-Type: application/json' \\",
+        '-H "Content-Type: application/json" \\',
         'Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>",'
         '"effective":"next start"}`.',
         "A `reason` other than `database_replaced`: stop.",
@@ -301,13 +325,13 @@ def test_c1rf2_the_gate_commands_never_print_the_token() -> None:
 
     gate = _step7()[_step7().index("That 200 proves only") :]
     blocks = [body for info, body in _fences(gate) if info == "bash"]
-    assert len(blocks) == 3, "the shell check, the read block and the acknowledgement block"
-    assert blocks[0] == _SHELL_CHECK + "\n"
+    assert len(blocks) == 3, "the preflight, the read block and the acknowledgement block"
+    assert blocks[0] == _PREFLIGHT + "\n"
     for block in blocks[1:]:
         assert "backend_api_token" in block
         uses = block.count("backend_api_token")
         assert block.count(_HEADER_FROM_FILE) == uses
-        assert block.count("set +x") == uses
+        assert block.count(_LAUNCH) == uses, "every token-bearing command starts the fresh shell"
         for word in (" -v", "--verbose", "--trace", "set -x", "echo ", "tee "):
             assert word not in block, word
         # the only printf is the header line the fd-fed form carries
@@ -340,70 +364,80 @@ def test_g1_negative_control_the_old_argv_form_is_caught() -> None:
     )
 
 
-def test_p11_every_token_bearing_curl_is_guarded_against_xtrace_and_curlrc() -> None:
-    """P1-1: `-q` first and `set +x` in one subshell; no flag that makes curl print the request."""
+def test_p11_every_token_bearing_command_runs_in_the_fresh_shell_with_q_first() -> None:
+    """FIX5: both commands start `env -i ... /bin/bash --noprofile --norc -c '`, then `curl -q`."""
 
     runbook = RUNBOOK.read_text(encoding="utf-8")
-    token_curls = [c for c in _curl_commands(runbook) if "backend_api_token" in c]
-    assert len(token_curls) == 2, "the read and the acknowledgement"
+    token_launches = [c for c in _launches(runbook) if "backend_api_token" in c]
+    assert len(token_launches) == 2, "the read and the acknowledgement"
     assert _token_curl_guard_problems(runbook) == []
-    for command in token_curls:
-        assert command.startswith(_GUARD) and command.endswith(" )")
+    for launch in token_launches:
+        assert launch.startswith(_LAUNCH_C)
+    # the preflight uses the same launch, and no token-bearing line sits outside it
+    assert _PREFLIGHT in _launches(runbook)
 
 
 def test_p11_negative_control_each_unguarded_form_is_caught() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
     assert _token_curl_guard_problems(runbook) == []
+    old_alerts = (
+        "( set +x; command curl -q -sS -w ' HTTP %{http_code}\\n' -H @<(printf 'X-Chronos-Token: "
+        '%s\\n\' "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts )'
+    )
+    alerts_start = runbook.index(_LAUNCH_C + "curl -q -sS")
+    alerts_end = runbook.index("\n", alerts_start)
     mutants = {
-        "no -q": runbook.replace("command curl -q -sS", "command curl -sS"),
-        "-q not first": runbook.replace("command curl -q -sS", "command curl -sS -q"),
-        "no set +x": runbook.replace("( set +x; command curl -q -fsS", "( command curl -q -fsS"),
-        "no command (alias/function can interpose), alerts": runbook.replace(
-            "( set +x; command curl -q -sS", "( set +x; curl -q -sS"
+        "no env -i": runbook.replace(_LAUNCH, _LAUNCH.replace(" -i", "")),
+        "no --noprofile": runbook.replace(_LAUNCH, _LAUNCH.replace(" --noprofile", "")),
+        "no --norc": runbook.replace(_LAUNCH, _LAUNCH.replace(" --norc", "")),
+        "PATH widened": runbook.replace(
+            _LAUNCH, _LAUNCH.replace("/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin")
         ),
-        "no command (alias/function can interpose), ack": runbook.replace(
-            "( set +x; command curl -q -fsS", "( set +x; curl -q -fsS"
-        ),
-        "command after -q": runbook.replace("command curl -q -sS", "curl -q command -sS"),
-        "unclosed subshell": runbook.replace("/autonomy/alerts )", "/autonomy/alerts"),
+        "relative bash": runbook.replace(_LAUNCH, _LAUNCH.replace("/bin/bash", "bash")),
+        "relative env": runbook.replace(_LAUNCH, _LAUNCH.replace("/usr/bin/env", "env")),
+        "no -q": runbook.replace("curl -q -sS", "curl -sS").replace("curl -q -fsS", "curl -fsS"),
+        "-q not first": runbook.replace("curl -q -sS", "curl -sS -q"),
         "-v": runbook.replace("curl -q -sS", "curl -q -v -sS"),
         "--trace-ascii": runbook.replace("curl -q -fsS", "curl -q --trace-ascii - -fsS"),
         "--config": runbook.replace("curl -q -fsS", "curl -q --config x -fsS"),
         "-K": runbook.replace("curl -q -sS", "curl -q -K x -sS"),
-        "6b8c755 text": runbook.replace("command curl", "curl"),
-        "fed2d81 text": runbook.replace(_GUARD, "curl ").replace("alerts )", "alerts"),
+        "9a14889 read command (set +x subshell in the operator's shell)": (
+            runbook[:alerts_start].rsplit("\n", 1)[0] + "\n   " + old_alerts + runbook[alerts_end:]
+        ),
+        "read command with no fresh shell at all": (
+            runbook[:alerts_start].rsplit("\n", 1)[0]
+            + "\n   curl -q -sS "
+            + _HEADER_FROM_FILE
+            + " http://127.0.0.1:<port>/autonomy/alerts"
+            + runbook[alerts_end:]
+        ),
     }
     for name, mutant in mutants.items():
         assert mutant != runbook, name
         assert _token_curl_guard_problems(mutant), name
 
 
-def _check_problems(step7: str) -> list[str]:
-    """The shell check must precede each token-bearing block and carry its STOP and residuals."""
+def _preflight_problems(step7: str) -> list[str]:
+    """The preflight precedes both token commands with its STOP; the residuals stay named."""
 
     flat = _flat(step7)
     problems = []
-    check_at = step7.find("```bash\n   " + _SHELL_CHECK + "\n")
+    check_at = step7.find("```bash\n   " + _PREFLIGHT + "\n")
     read_at = step7.find("curl -fsS http://127.0.0.1:<port>/health | python")
-    ack_at = step7.find("( set +x; command curl -q -fsS -X POST")
+    ack_at = step7.find(_LAUNCH_C + "\n")
     if not 0 <= check_at < read_at < ack_at:
-        problems.append("the shell check does not precede the read block")
+        problems.append("the preflight does not precede the read block and the acknowledgement")
     stop_at = flat.find("**STOP, and run nothing below, if**")
-    if not 0 <= stop_at <= _flat(step7[:read_at]).__len__():
+    if not 0 <= stop_at <= len(_flat(step7[:read_at])):
         problems.append("the STOP does not sit before the read block")
-    if "In a new shell, run the check above again first (same STOP)." not in flat:
-        problems.append("the acknowledgement does not repeat the check")
     for phrase in (
-        "a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`)",
-        "a hashed `curl` (`hash -p` in bash, `hash curl=` in zsh)",
-        "another `curl` earlier in your `PATH`",
-        "or a function or alias named `printf`, which receives the token inside the process "
-        "substitution",
-        "it cannot see a shell that also redefines `builtin` or `type`",
-        "`printf is a shell builtin`",
-        "`command` or `printf` is a function or an alias",
-        "`curl` is a function, an alias or `hashed`",
-        "the path is under your home or in any directory you can write",
+        "It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in `/usr/bin` or `/bin`",
+        "it prints an error, another path, or an older curl",
+        "A shell that deliberately intercepts the launch itself",
+        "(a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`)",
+        "add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either command",
+        "no `HOME` (so no `~/.curlrc`)",
+        "no function, alias, hash entry, xtrace, `BASH_ENV` or startup file",
     ):
         if phrase not in flat:
             problems.append(f"missing: {phrase[:60]}")
@@ -418,45 +452,50 @@ def _reword(text: str, phrase: str, replacement: str) -> str:
     return re.sub(pattern, replacement, text, count=1)
 
 
-def test_p2_the_shell_check_precedes_each_token_command_and_carries_its_stop() -> None:
+def test_p5_the_preflight_precedes_each_token_command_and_carries_its_stop() -> None:
     step7 = _step7()
-    assert _check_problems(step7) == []
-    assert step7.count("builtin type command curl") == 1
+    assert _preflight_problems(step7) == []
+    assert step7.count(_PREFLIGHT) == 1
+    # the old per-name shell check is gone: nothing in the operator's shell is trusted any more
+    assert "builtin type command curl" not in step7
 
 
-def test_p2_negative_control_each_missing_piece_is_caught() -> None:
+def test_p5_negative_control_each_missing_piece_is_caught() -> None:
     step7 = _step7()
-    assert _check_problems(step7) == []
+    assert _preflight_problems(step7) == []
     mutants = {
-        "5f3cec2 text (no check, residuals unnamed)": step7.replace(
-            "builtin type command curl", "true"
+        "9a14889 text (shell check, no fresh shell)": step7.replace(
+            _PREFLIGHT, "builtin type command curl printf"
         ),
-        "check moved after the read block": step7.replace(
-            "```bash\n   " + _SHELL_CHECK + "\n   ```", "```bash\n   true\n   ```"
+        "preflight moved after the read block": step7.replace(
+            "```bash\n   " + _PREFLIGHT + "\n   ```", "```bash\n   true\n   ```"
         ),
         "STOP dropped": _reword(step7, "**STOP, and run nothing below, if**", "Note:"),
-        "no repeat before the acknowledgement": _reword(
-            step7, "In a new shell, run the check above again first (same STOP).", ""
+        "needs-line dropped": _reword(
+            step7, "It needs `/usr/bin/env`, `/bin/bash`", "It needs things"
         ),
-        "function command not named": _reword(step7, "a function named `command`", "a function"),
-        "printf residual not named": _reword(
-            step7, "or a function or alias named `printf`", "or a thing"
+        "error/path/older STOP dropped": _reword(
+            step7, "it prints an error, another path, or an older curl", "it fails"
         ),
-        "printf not in the check": step7.replace(_SHELL_CHECK, "builtin type command curl"),
-        "printf not in the STOP": _reword(
-            step7, "`command` or `printf` is a function", "`command` is a function"
+        "launch-intercept residual dropped": _reword(
+            step7, "A shell that deliberately intercepts the launch itself", "Nothing intercepts it"
         ),
-        "hashed curl not named": _reword(step7, "a hashed `curl`", "a thing"),
-        "hash forms not named": _reword(
-            step7, "(`hash -p` in bash, `hash curl=` in zsh)", "(hashing)"
+        "intercept examples dropped": _reword(
+            step7, "(a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`)", "(none)"
         ),
-        "builtin/type residual dropped": _reword(
-            step7, "it cannot see a shell that also redefines `builtin` or `type`", "it sees all"
+        "operator-added flags residual dropped": _reword(
+            step7,
+            "add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either command",
+            "add flags",
+        ),
+        "HOME guarantee dropped": _reword(step7, "no `HOME` (so no `~/.curlrc`)", "a HOME"),
+        "what-is-clean list dropped": _reword(
+            step7, "no function, alias, hash entry, xtrace, `BASH_ENV` or startup file", "nothing"
         ),
     }
     for name, mutant in mutants.items():
         assert mutant != step7, name
-        assert _check_problems(mutant), name
+        assert _preflight_problems(mutant), name
 
 
 def test_p11_the_runbook_no_longer_claims_nothing_prints_the_token() -> None:
@@ -466,7 +505,7 @@ def test_p11_the_runbook_no_longer_claims_nothing_prints_the_token() -> None:
     step7 = _flat(_step7(runbook))
     assert "nothing prints it" not in _flat(runbook)
     assert "never printed" not in step7
-    assert "bash or zsh" in step7 and "curl 7.55 or newer" in step7
+    assert "curl 7.55 or newer" in step7 and "/bin/bash --noprofile --norc" in step7
     # a runbook that goes back to the claim is caught by the gate text pin as well
     wrong = runbook.replace("What stays with you", "Nothing prints it")
     assert _gate_problems(_step7(wrong))
@@ -583,7 +622,7 @@ def _gate_blocks() -> tuple[str, str, str, str]:
     gate = _step7()[_step7().index("That 200 proves only") :]
     blocks = _fences(gate)
     assert [info for info, _ in blocks] == ["bash", "bash", "", "bash", ""], blocks
-    assert blocks[0][1] == _SHELL_CHECK + "\n", "the shell check block comes first"
+    assert blocks[0][1] == _PREFLIGHT + "\n", "the preflight block comes first"
     return blocks[1][1], blocks[2][1], blocks[3][1], blocks[4][1]
 
 
@@ -658,7 +697,8 @@ def test_c1rf2_a_synthetic_cutover_boots_held_then_clears_after_the_acknowledgem
         )
 
         # the acknowledgement, with the runbook's own body
-        (body,) = re.findall(r"-d '(\{.*\})'", ack_block)
+        (body,) = re.findall(r'-d "(\{.*\})"', ack_block)
+        body = body.replace('\\"', '"')
         response = client.post(
             "/live/recovery/acknowledge", json=json.loads(body), headers=_token(demo_env)
         )

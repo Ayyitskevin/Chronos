@@ -444,31 +444,28 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `installation_identity` row. A marker with no row reads as a database replaced beneath
    surviving state files, so the backend boots held: read-only, unreconciled, no autonomy
    runtime. Read the hold from `<checkout>`. The token comes from the backend's own token file
-   (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs): the
-   shell reads the file and hands curl a header file through process substitution. That needs
-   **bash or zsh** (dash and sh refuse it with a syntax error before curl runs) and **curl 7.55
-   or newer** (`-H @file`). What the two token-bearing commands neutralise: the token is never in
-   any process's argv (`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path); the
-   subshell's `set +x` keeps an xtrace you already have on from printing it; `command` keeps an
-   alias or shell function named `curl` (one that adds `-v`, say) from running; and `-q`, as
-   curl's FIRST argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing
-   it. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
-   command and curl prints the token. So does anything that changes which `command` or which
-   `curl` runs: a function named `command` (also from `BASH_ENV`, or `ZDOTDIR/.zshenv`), a
-   hashed `curl` (`hash -p` in bash, `hash curl=` in zsh), another `curl` earlier in your `PATH`,
-   or a function or alias named `printf`, which receives the token inside the process
-   substitution. The check below shows those; it cannot see a shell that also redefines `builtin` or `type`.
-   Do not. The log is your `LOG_FILE` (`logs/chronos.log` by default).
+   (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs).
+   The two commands that carry it run in a fresh shell, `/usr/bin/env -i PATH=/usr/bin:/bin
+   /bin/bash --noprofile --norc`, started by absolute path with an empty environment and given
+   the command as its `-c` argument. That shell has none of yours: no function, alias, hash
+   entry, xtrace, `BASH_ENV` or startup file, no `HOME` (so no `~/.curlrc`), and a `PATH` of two
+   root-owned directories. The token is read there, handed to curl as a header file
+   (`-H @<(printf ...)`, so it is in no process's argv) and never exists in your shell; `-q`, as
+   curl's FIRST argument, also stops a curlrc found another way. Your shell may be bash, zsh or
+   dash. What stays with you: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
+   command and curl prints the token. Do not. A shell that deliberately intercepts the launch
+   itself (a bash function named `/usr/bin/env`, a DEBUG trap under `extdebug`) is outside this
+   guarantee: it already runs as you and can read the token file. The log is your `LOG_FILE`
+   (`logs/chronos.log` by default).
 
-   Check the shell first. In the shell you will paste into, run:
+   Preflight first, once. It needs `/usr/bin/env`, `/bin/bash` and a curl 7.55 or newer in
+   `/usr/bin` or `/bin` (`-H @file`):
    ```bash
-   builtin type command curl printf
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'command -v curl; curl -q --version'
    ```
-   It must print exactly three lines: `command is a shell builtin`, `curl is <path>` and
-   `printf is a shell builtin`, where `<path>` is your system's curl in a directory only root can
-   write (`/usr/bin/curl`, say). **STOP, and run nothing below, if** `command` or `printf` is a
-   function or an alias, `curl` is a function, an alias or `hashed`, the path is under your home
-   or in any directory you can write, or there is any other line. Then:
+   It must print `/usr/bin/curl` (or `/bin/curl`), then curl's version lines, the first
+   `curl 7.55` or later. **STOP, and run nothing below, if** it prints an error, another path,
+   or an older curl. Then:
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
@@ -477,7 +474,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    print("reconciliation:", h["reconciliation_status"])
    print("tasks:", " ".join(t["name"] + "=" + t["state"] for t in o["tasks"]))
    '
-   ( set +x; command curl -q -sS -w ' HTTP %{http_code}\n' -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts )
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'curl -q -sS -w " HTTP %{http_code}\n" -H @<(printf "X-Chronos-Token: %s\n" "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts'
    grep -F '"event":"recovery_hold_engaged"' logs/chronos.log | tail -n 1
    ```
    It must print these four lines, then one log line whose message begins `This boot cannot
@@ -502,13 +499,14 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    as consistent: `recovery hold: CLEAR` and `PASS [ADR-0054] state identity`.
 
    **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
-   database replacement. In a new shell, run the check above again first (same STOP). The same
-   token file, in the same guarded form:
+   database replacement. The same token file, in the same fresh shell:
    ```bash
-   ( set +x; command curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
-     -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") \
-     -H 'Content-Type: application/json' \
-     -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}' )
+   /usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c '
+     curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
+       -H @<(printf "X-Chronos-Token: %s\n" "$(<data/backend_api_token)") \
+       -H "Content-Type: application/json" \
+       -d "{\"note\": \"N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)\"}"
+   '
    ```
    Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>","effective":"next start"}`.
    A `reason` other than `database_replaced`: stop. The acknowledgement binds this exact
