@@ -74,6 +74,13 @@ def _step7(text: str | None = None) -> str:
 _HEADER_FROM_FILE = "-H @<(printf 'X-Chronos-Token: %s\\n' \"$(<data/backend_api_token)\")"
 
 
+#: The guard every token-bearing curl wears (P1-1): a subshell that turns xtrace off before curl is
+#: expanded, and ``-q`` as curl's FIRST argument (curl ignores it anywhere else), so no ambient
+#: ``.curlrc`` can switch on ``verbose``/``trace``.
+_GUARD = "( set +x; curl -q "
+_TOKEN_CURL_FLAGS_NEVER = (" -v", "--verbose", "--trace", "--config", " -K", " -x ")
+
+
 def _curl_commands(text: str) -> list[str]:
     """Every logical ``curl`` command in the bash fences, backslash continuations joined."""
 
@@ -82,9 +89,26 @@ def _curl_commands(text: str) -> list[str]:
         if info != "bash":
             continue
         for logical in re.sub(r"\\\n\s*", " ", body).splitlines():
-            if re.match(r"\s*curl\b", logical):
+            if re.match(r"\s*(\(\s*(set \+x;\s*)?)?curl\b", logical):
                 commands.append(logical)
     return commands
+
+
+def _token_curl_guard_problems(text: str) -> list[str]:
+    """Token-bearing curl commands that lack the guard or carry an output-enabling flag."""
+
+    problems = []
+    for command in _curl_commands(text):
+        if "backend_api_token" not in command:
+            continue
+        if not command.startswith(_GUARD):
+            problems.append(f"no `( set +x; curl -q ` guard: {command[:70]}")
+        if not command.endswith(" )"):
+            problems.append(f"the guard subshell is not closed on this command: {command[-30:]}")
+        for flag in _TOKEN_CURL_FLAGS_NEVER:
+            if flag in command:
+                problems.append(f"{flag.strip()} on a token-bearing curl: {command[:70]}")
+    return problems
 
 
 def _token_in_curl_argv_problems(text: str) -> list[str]:
@@ -120,14 +144,19 @@ _GATE: dict[str, tuple[str, ...]] = {
         "backend boots held: read-only, unreconciled, no autonomy runtime.",
         "Read the hold from `<checkout>`.",
         "The token comes from the backend's own token file (`BACKEND_TOKEN_FILE`, "
-        "`data/backend_api_token` by default; use your path if it differs): the shell puts it in "
-        "the header, and nothing prints it.",
-        "The token never enters any process's argv either (`ps` and `/proc/<pid>/cmdline` show "
-        "only a `/dev/fd/N` path): the shell reads the file and hands curl a header file through "
-        "process substitution (bash and zsh).",
+        "`data/backend_api_token` by default; use your path if it differs): the shell reads the "
+        "file and hands curl a header file through process substitution.",
+        "That needs **bash or zsh** (dash and sh refuse it with a syntax error before curl runs) "
+        "and **curl 7.55 or newer** (`-H @file`).",
+        "What the two token-bearing commands guarantee: the token is never in any process's argv "
+        "(`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path); the subshell's `set +x` "
+        "keeps an xtrace you already have on from printing it; and `-q`, as curl's FIRST "
+        "argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing it.",
+        "What they cannot guarantee: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to "
+        "either command and curl prints the token. Do not.",
         "The log is your `LOG_FILE` (`logs/chronos.log` by default).",
-        "curl -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
-        "http://127.0.0.1:<port>/autonomy/alerts",
+        "( set +x; curl -q -sS -w ' HTTP %{http_code}\\n' " + _HEADER_FROM_FILE + " "
+        "http://127.0.0.1:<port>/autonomy/alerts )",
         "It must print these four lines, then one log line whose message begins `This boot cannot "
         "prove it does not follow a restore (database_replaced)`:",
         "`GET /autonomy/alerts` only reads, but it sits behind the same writer check as every "
@@ -150,8 +179,8 @@ _GATE: dict[str, tuple[str, ...]] = {
     "acknowledge": (
         "**Then you acknowledge it: your act, with a typed note** saying this is the expected N3 "
         "database replacement.",
-        "The same token file, never printed:",
-        "curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \\ "
+        "The same token file, in the same guarded form:",
+        "( set +x; curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \\ "
         + _HEADER_FROM_FILE
         + " \\ "
         "-H 'Content-Type: application/json' \\",
@@ -257,6 +286,7 @@ def test_c1rf2_the_gate_commands_never_print_the_token() -> None:
         assert "backend_api_token" in block
         uses = block.count("backend_api_token")
         assert block.count(_HEADER_FROM_FILE) == uses
+        assert block.count("set +x") == uses
         for word in (" -v", "--verbose", "--trace", "set -x", "echo ", "tee "):
             assert word not in block, word
         # the only printf is the header line the fd-fed form carries
@@ -287,6 +317,49 @@ def test_g1_negative_control_the_old_argv_form_is_caught() -> None:
     assert _token_in_curl_argv_problems(
         runbook.replace(_HEADER_FROM_FILE, '-H "X-Chronos-Token: $(cat  "$F"/token)"')
     )
+
+
+def test_p11_every_token_bearing_curl_is_guarded_against_xtrace_and_curlrc() -> None:
+    """P1-1: `-q` first and `set +x` in one subshell; no flag that makes curl print the request."""
+
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    token_curls = [c for c in _curl_commands(runbook) if "backend_api_token" in c]
+    assert len(token_curls) == 2, "the read and the acknowledgement"
+    assert _token_curl_guard_problems(runbook) == []
+    for command in token_curls:
+        assert command.startswith(_GUARD) and command.endswith(" )")
+
+
+def test_p11_negative_control_each_unguarded_form_is_caught() -> None:
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert _token_curl_guard_problems(runbook) == []
+    mutants = {
+        "no -q": runbook.replace("( set +x; curl -q -sS", "( set +x; curl -sS"),
+        "-q not first": runbook.replace("( set +x; curl -q -sS", "( set +x; curl -sS -q"),
+        "no set +x": runbook.replace("( set +x; curl -q -fsS", "( curl -q -fsS"),
+        "unclosed subshell": runbook.replace("/autonomy/alerts )", "/autonomy/alerts"),
+        "-v": runbook.replace("curl -q -sS", "curl -q -v -sS"),
+        "--trace-ascii": runbook.replace("curl -q -fsS", "curl -q --trace-ascii - -fsS"),
+        "--config": runbook.replace("curl -q -fsS", "curl -q --config x -fsS"),
+        "-K": runbook.replace("curl -q -sS", "curl -q -K x -sS"),
+        "fed2d81 text": runbook.replace(_GUARD, "curl ").replace("alerts )", "alerts"),
+    }
+    for name, mutant in mutants.items():
+        assert mutant != runbook, name
+        assert _token_curl_guard_problems(mutant), name
+
+
+def test_p11_the_runbook_no_longer_claims_nothing_prints_the_token() -> None:
+    """The claim was false under xtrace, curl -v/--trace and an ambient .curlrc."""
+
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    step7 = _flat(_step7(runbook))
+    assert "nothing prints it" not in _flat(runbook)
+    assert "never printed" not in step7
+    assert "bash or zsh" in step7 and "curl 7.55 or newer" in step7
+    # a runbook that goes back to the claim is caught by the gate text pin as well
+    wrong = runbook.replace("What they cannot guarantee", "Nothing prints it")
+    assert _gate_problems(_step7(wrong))
 
 
 def test_g2_the_restart_read_leaves_out_the_held_boots_log_line() -> None:

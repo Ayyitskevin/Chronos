@@ -445,10 +445,15 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    surviving state files, so the backend boots held: read-only, unreconciled, no autonomy
    runtime. Read the hold from `<checkout>`. The token comes from the backend's own token file
    (`BACKEND_TOKEN_FILE`, `data/backend_api_token` by default; use your path if it differs): the
-   shell puts it in the header, and nothing prints it. The token never enters any process's argv
-   either (`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path): the shell reads the file
-   and hands curl a header file through process substitution (bash and zsh). The log is your
-   `LOG_FILE` (`logs/chronos.log` by default).
+   shell reads the file and hands curl a header file through process substitution. That needs
+   **bash or zsh** (dash and sh refuse it with a syntax error before curl runs) and **curl 7.55
+   or newer** (`-H @file`). What the two token-bearing commands guarantee: the token is never in
+   any process's argv (`ps` and `/proc/<pid>/cmdline` show only a `/dev/fd/N` path); the
+   subshell's `set +x` keeps an xtrace you already have on from printing it; and `-q`, as curl's
+   FIRST argument, keeps an ambient `.curlrc` (one holding `verbose`, say) from printing it.
+   What they cannot guarantee: add `-v`, `--trace`, `--trace-ascii`, `--config` or `-K` to either
+   command and curl prints the token. Do not. The log is your `LOG_FILE` (`logs/chronos.log` by
+   default).
    ```bash
    curl -fsS http://127.0.0.1:<port>/health | python -I -c '
    import json, sys
@@ -457,7 +462,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    print("reconciliation:", h["reconciliation_status"])
    print("tasks:", " ".join(t["name"] + "=" + t["state"] for t in o["tasks"]))
    '
-   curl -sS -w ' HTTP %{http_code}\n' -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts
+   ( set +x; curl -q -sS -w ' HTTP %{http_code}\n' -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") http://127.0.0.1:<port>/autonomy/alerts )
    grep -F '"event":"recovery_hold_engaged"' logs/chronos.log | tail -n 1
    ```
    It must print these four lines, then one log line whose message begins `This boot cannot
@@ -482,12 +487,12 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    as consistent: `recovery hold: CLEAR` and `PASS [ADR-0054] state identity`.
 
    **Then you acknowledge it: your act, with a typed note** saying this is the expected N3
-   database replacement. The same token file, never printed:
+   database replacement. The same token file, in the same guarded form:
    ```bash
-   curl -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
+   ( set +x; curl -q -fsS -X POST http://127.0.0.1:<port>/live/recovery/acknowledge \
      -H @<(printf 'X-Chronos-Token: %s\n' "$(<data/backend_api_token)") \
      -H 'Content-Type: application/json' \
-     -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}'
+     -d '{"note": "N3 cutover <date>: expected database_replaced hold; the keyed store replaced the archived schema-17 store (envelope <envelope from step 3>)"}' )
    ```
    Expect `{"acknowledged":true,"reason":"database_replaced","binding":"<64 hex>","effective":"next start"}`.
    A `reason` other than `database_replaced`: stop. The acknowledgement binds this exact
