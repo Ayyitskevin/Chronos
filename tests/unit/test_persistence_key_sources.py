@@ -188,6 +188,29 @@ def test_two_environment_names_refuse_on_their_own() -> None:
     assert "the process environment (2 names)" in message
 
 
+def test_the_count_folds_with_casefold_so_it_can_only_over_count(tmp_path: Path) -> None:
+    """The brief's casefold, pinned: U+017F (long s) folds to "s" under casefold, not under the
+    loader's str.lower(). Such a name is refused, never missed (fail closed; DESIGN.md §2)."""
+
+    long_s = "CHRONO\N{LATIN SMALL LETTER LONG S}_PERSISTENCE_KEY"
+    path = _dotenv(tmp_path, f"{long_s}=v", f"CHRONOS_PERSISTENCE_KEY={_key('file')}")
+    no_key = tmp_path / "no-key"
+    no_key.mkdir()
+
+    assert "the process environment (2 names)" in _refusal(
+        {long_s: "v", _NAME: _key("env")}, [_dotenv(no_key, "OTHER=1")]
+    )
+    assert f"the dotenv file {path.absolute()} (2 lines)" in _refusal({}, [path])
+
+
+def test_no_configured_env_file_counts_the_environment_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+    assert pk.persistence_key_source(environ={_NAME: _key("env")}) == "the process environment"
+
+
 def test_an_empty_environment_value_is_a_source(tmp_path: Path) -> None:
     """Scenario (e): an empty environment value shadows the file (the resolver then refuses it)."""
 
