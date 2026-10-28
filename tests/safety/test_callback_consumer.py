@@ -1455,6 +1455,253 @@ def test_fix2_p1_runtime_close_never_disposes_under_a_live_worker_without_the_si
         file_rig.database.dispose()
 
 
+# --- CB1-FIX2 P2-1: the writer lease bounds every database write, not only the next loop -------
+
+
+def _lease(consumer: CallbackConsumer) -> list[bool]:
+    """The lease the consumer re-checks, as a switch a test flips mid-event (synchronous mode)."""
+
+    held = [True]
+    consumer._is_writer = lambda: held[0]
+    return held
+
+
+def _ended_with(call: Any) -> str:
+    """The type name of what ``call`` raised ('' when it returned)."""
+
+    try:
+        call()
+    except BaseException as error:
+        return type(error).__name__
+    return ""
+
+
+def _lose_after(held: list[bool], real: Any, *, when: Any = None) -> Any:
+    """Wrap a write so the lease is lost right after it commits (``when`` picks the call)."""
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = real(*args, **kwargs)
+        if when is None or when(*args):
+            held[0] = False
+        return result
+
+    return wrapped
+
+
+def test_fix2_p2_a_lease_lost_during_the_journal_append_writes_no_outcome_and_halts(
+    tmp_path: Path,
+) -> None:
+    """Kimi's ``test_lease_loss_during_an_event_does_not_prevent_its_journal_and_outcome``,
+    inverted. The append whose check passed before the loss still commits (residual R10)."""
+
+    file_rig = _FileRig(tmp_path)
+    writer = [True]
+    witnesses: list[bool] = []
+    journal = file_rig.consumer.journal
+    real_pending, real_outcome = journal.append_pending, journal.append_outcome
+
+    def lose_lease(*args: Any, **kwargs: Any) -> Any:
+        writer[0] = False
+        return real_pending(*args, **kwargs)
+
+    def witness(*args: Any, **kwargs: Any) -> Any:
+        witnesses.append(writer[0])
+        return real_outcome(*args, **kwargs)
+
+    journal.append_pending = lose_lease  # type: ignore[method-assign]
+    journal.append_outcome = witness  # type: ignore[method-assign]
+    try:
+        file_rig.consumer.start(is_writer=lambda: writer[0])
+        file_rig.consumer.offer(file_rig.foreign(1))
+        assert _wait_until(lambda: file_rig.consumer.health().state == "halted")
+        assert witnesses == []  # the outcome was never attempted without the lease
+        assert file_rig.outcomes() == []
+        assert file_rig.journaled() == 1  # PENDING, for the next writer's sweep
+        assert CONSUMER_FAILED_REASON in file_rig.invalidations
+    finally:
+        file_rig.consumer.stop(timeout=1)
+        file_rig.database.dispose()
+
+
+def test_fix2_p2_without_the_lease_an_event_is_never_journaled(rig: _Rig) -> None:
+    held = _lease(rig.consumer)
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    held[0] = False
+    assert _ended_with(rig.consumer.drain) == "_WriteAuthorityLost"
+    assert _rows(rig.harness, CALLBACK_JOURNAL) == []
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED
+
+
+def test_fix2_p2_a_lease_lost_after_the_journal_applies_no_lifecycle_and_stays_pending(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = _lease(rig.consumer)
+    journal = rig.consumer.journal
+    journal.append_pending = _lose_after(held, journal.append_pending)  # type: ignore[method-assign]
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    assert _ended_with(rig.consumer.drain) == "_WriteAuthorityLost"
+    assert rig.intent_status() is OrderLifecycle.SUBMITTED  # no ingest without the lease
+    assert len(_rows(rig.harness, CALLBACK_JOURNAL)) == 1 and _outcomes(rig.harness) == []
+
+    assert _restart(rig, monkeypatch).consumer.sweep() == 1  # the next writer re-drives it
+    assert rig.intent_status() is OrderLifecycle.FILLED
+
+
+def test_fix2_p2_a_lease_lost_inside_ingest_writes_no_outcome(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = _Tracker(rig.harness.tracker)
+    restarted = _restart(rig, monkeypatch, tracker=tracker)
+    held = _lease(restarted.consumer)
+    tracker.ingest = _lose_after(held, tracker.ingest)  # type: ignore[method-assign]
+    restarted.bridge.note_own_order(_ORDER)
+    restarted.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    assert _ended_with(restarted.consumer.drain) == "_WriteAuthorityLost"
+    assert rig.intent_status() is OrderLifecycle.FILLED  # the committed effect stands (R10) ...
+    assert _outcomes(rig.harness) == []  # ... and the event stays PENDING: no close
+
+
+def test_fix2_p2_a_lease_lost_after_the_journal_records_no_fill(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[BrokerExecution] = []
+    writer = runtime_module._callback_execution_writer(ExecutionRepository(rig.harness.db.sessions))
+
+    def record(execution: BrokerExecution) -> Any:
+        records.append(execution)
+        return writer(execution)
+
+    restarted = _restart(rig, monkeypatch, record=record)
+    held = _lease(restarted.consumer)
+    journal = restarted.consumer.journal
+    journal.append_pending = _lose_after(  # type: ignore[method-assign]
+        held, journal.append_pending, when=lambda *args: args[1] is StreamKind.EXECUTION
+    )
+    restarted.bridge.note_own_order(_ORDER)
+    restarted.app.commissionReport(FakeCommissionReport(_EXEC_ID, 1.05, "USD"))
+    restarted.app.execDetails(-1, _option_contract(), _execution(rig.order_ref))
+    assert _ended_with(restarted.consumer.drain) == "_WriteAuthorityLost"
+    assert records == [] and _fills(rig.harness) == []
+    assert _outcomes(rig.harness) == []
+
+
+def test_fix2_p2_a_lease_lost_inside_the_fills_write_never_pairs_the_commission(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held: list[bool] = [True]
+    writer = runtime_module._callback_execution_writer(ExecutionRepository(rig.harness.db.sessions))
+    restarted = _restart(rig, monkeypatch, record=_lose_after(held, writer))
+    restarted.consumer._is_writer = lambda: held[0]
+    restarted.bridge.note_own_order(_ORDER)
+    restarted.app.commissionReport(FakeCommissionReport(_EXEC_ID, 1.05, "USD"))
+    restarted.app.execDetails(-1, _option_contract(), _execution(rig.order_ref))
+    assert _ended_with(restarted.consumer.drain) == "_WriteAuthorityLost"
+    assert _fills(rig.harness) == [(_EXEC_ID, Decimal("1.25"), Decimal("1.05"))]  # R10
+    assert _outcomes(rig.harness) == []  # neither the PAIRED commission nor the execution closes
+
+
+def test_fix2_p2_a_lease_lost_before_a_late_commission_never_calls_the_fills_writer(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[BrokerExecution] = []
+    writer = runtime_module._callback_execution_writer(ExecutionRepository(rig.harness.db.sessions))
+
+    def record(execution: BrokerExecution) -> Any:
+        records.append(execution)
+        return writer(execution)
+
+    restarted = _restart(rig, monkeypatch, record=record)
+    restarted.bridge.note_own_order(_ORDER)
+    restarted.app.execDetails(-1, _option_contract(), _execution(rig.order_ref))
+    restarted.consumer.drain()
+    rig.clock.advance(31)  # past its commission grace: recorded commission-less
+    restarted.consumer.sweep()
+    assert len(records) == 1
+
+    held = _lease(restarted.consumer)
+    journal = restarted.consumer.journal
+    journal.append_pending = _lose_after(held, journal.append_pending)  # type: ignore[method-assign]
+    restarted.app.commissionReport(FakeCommissionReport(_EXEC_ID, 0.95, "USD"))
+    assert _ended_with(restarted.consumer.drain) == "_WriteAuthorityLost"
+    assert len(records) == 1  # the late commission never reached the writer
+    assert _outcomes(rig.harness) == [CallbackOutcome.APPLIED.value]
+
+
+def test_fix2_p2_a_lease_lost_on_a_divergent_replay_writes_no_conflict_row(rig: _Rig) -> None:
+    rig.status(_ORDER, "Submitted", 0, 1, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+    held = _lease(rig.consumer)
+    journal = rig.consumer.journal
+    journal.append_pending = _lose_after(held, journal.append_pending)  # type: ignore[method-assign]
+    rig.status(_ORDER, "Submitted", 0, 5, 0.0, _PERM, _CLIENT)  # same identity, other facts
+    assert _ended_with(rig.consumer.drain) == "_WriteAuthorityLost"
+    assert _rows(rig.harness, CALLBACK_CONFLICT) == []
+
+
+def test_fix2_p2_a_lease_lost_on_a_refused_payload_writes_no_digest_row(rig: _Rig) -> None:
+    held = _lease(rig.consumer)
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        held[0] = False
+        raise ValueError("raw account id")  # the raw-account guard's refusal
+
+    rig.consumer.journal.append_pending = refused  # type: ignore[method-assign]
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    assert _ended_with(rig.consumer.drain) == "_WriteAuthorityLost"
+    assert _rows(rig.harness, CALLBACK_JOURNAL) == []
+
+
+def test_fix2_p2_a_lease_lost_after_a_refused_digest_row_writes_no_outcome(rig: _Rig) -> None:
+    held = _lease(rig.consumer)
+    journal = rig.consumer.journal
+    real = journal.append_pending
+    calls: list[str] = []
+
+    def first_refused(*args: Any, **kwargs: Any) -> Any:
+        calls.append("pending")
+        if len(calls) == 1:
+            raise ValueError("raw account id")
+        result = real(*args, **kwargs)
+        held[0] = False
+        return result
+
+    journal.append_pending = first_refused  # type: ignore[method-assign]
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
+    assert _ended_with(rig.consumer.drain) == "_WriteAuthorityLost"
+    assert len(_rows(rig.harness, CALLBACK_JOURNAL)) == 1  # the digest row (R10) ...
+    assert _outcomes(rig.harness) == []  # ... and no refused outcome without the lease
+
+
+def test_fix2_p2_a_lease_lost_mid_sweep_closes_no_further_row(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(*args: Any, **kwargs: Any) -> Any:
+        raise _Crash
+
+    rig.consumer.journal.append_outcome = crash  # type: ignore[method-assign]
+    for order_id in (_ORDER + 1, _ORDER + 2):  # not own: no effect, an outcome row only
+        rig.status(order_id, "Submitted", 0, 1, 0.0, _PERM + order_id, _CLIENT)
+        with pytest.raises(_Crash):
+            rig.consumer.handle(rig.consumer._queue.get_nowait())
+    assert len(_rows(rig.harness, CALLBACK_JOURNAL)) == 2 and _outcomes(rig.harness) == []
+
+    restarted = _restart(rig, monkeypatch)
+    held = _lease(restarted.consumer)
+    journal = restarted.consumer.journal
+    journal.append_outcome = _lose_after(held, journal.append_outcome)  # type: ignore[method-assign]
+    assert _ended_with(restarted.consumer.sweep) == "_WriteAuthorityLost"
+    assert _outcomes(rig.harness) == [CallbackOutcome.NOT_OWN_AT_CAPTURE.value]  # one row, not two
+
+
+def test_fix2_p2_a_stop_without_the_lease_demotes_but_writes_no_health_row(rig: _Rig) -> None:
+    held = _lease(rig.consumer)
+    rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)  # queued, never drained
+    held[0] = False
+    assert rig.consumer.stop() == 1
+    assert rig.invalidations[-1] == DROPPED_EVENT_REASON
+    assert _rows(rig.harness, CALLBACK_CONSUMER_HEALTH) == []
+
+
 # --- 4 / 5(k) / 5: readiness is never published or inferred by the consumer ---------------------
 
 _LATCH_NAMES = frozenset(
