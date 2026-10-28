@@ -110,8 +110,16 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   cycle, no branch, one head; numbering by one; main's literal equal to main's head (else a trusted-base
   FAIL); the candidate's own literal equal to its head (what CI checks). It then writes the derived head
   into the trusted overlay copy (no write when it is main's head) and the receipt records it as
-  `migration_head`. The in-sandbox installed smoke still checks the RUNTIME chain against that head, so a
-  header that rebinds itself at import time fails there.
+  `migration_head`. Each revision file's module level must also be data and imports only (`[module]`):
+  docstring, `from __future__ import annotations`, imports without `*`, one-name literal assignments
+  (`sa.<CamelCase>(…)` constructors on literals included), undecorated defs with constant defaults; so a
+  rebinding written in the file (`globals()[…]`, `exec`, a star import) is refused before the sandbox.
+  What this proves is the DECLARED chain. It does not read other modules: a module the file imports
+  (any candidate module, `chronos.persistence` included) runs at import time and can still rebind the
+  file's header, and `upgrade()`/`downgrade()` bodies run only in the sandbox. The
+  in-sandbox installed smoke checks only `get_heads() == [head]` and the applied version, never the graph,
+  so a fork that merges back to the declared head passes it; nothing trusted re-verifies the RUNTIME graph
+  (owner residual). A PR that adds a migration needs human review of its imports.
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming
