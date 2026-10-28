@@ -2493,3 +2493,56 @@ def test_fix4_p2_2_a_stop_over_a_sweep_write_records_no_health_row_after_the_lea
             stopper.join(2)
         consumer.stop(timeout=1)
         file_rig.database.dispose()
+
+
+def test_fix4_p2_2_with_the_lease_kept_the_stop_records_its_row_after_the_in_flight_write(
+    tmp_path: Path,
+) -> None:
+    """I18's positive control: the stop's health write is serialized behind the worker's write, not
+    skipped. With the lease kept it lands once the in-flight write commits, so I18's "no health row
+    after a lost lease" comes from the lease re-check, not from a stop that never records."""
+
+    file_rig = _FileRig(tmp_path)
+    consumer = file_rig.consumer
+    worker_entered, release_worker = threading.Event(), threading.Event()
+    health_entered = threading.Event()
+    real_pending = consumer.journal.append_pending
+    real_health = consumer.journal.append_health
+
+    def held_pending(*args: Any, **kwargs: Any) -> Any:
+        worker_entered.set()
+        assert release_worker.wait(10)
+        return real_pending(*args, **kwargs)
+
+    def seen_health(*args: Any, **kwargs: Any) -> Any:
+        health_entered.set()
+        return real_health(*args, **kwargs)
+
+    consumer.journal.append_pending = held_pending  # type: ignore[method-assign]
+    consumer.journal.append_health = seen_health  # type: ignore[method-assign]
+    results: list[int] = []
+    stopper: threading.Thread | None = None
+    try:
+        consumer.start(is_writer=lambda: True)
+        consumer.offer(file_rig.foreign(1))
+        assert worker_entered.wait(2)
+        worker = consumer._thread
+        assert worker is not None
+        stopper = _stopping(consumer, results, timeout=1)
+        assert _wait_until(lambda: consumer._token is None)
+        assert not health_entered.wait(0.3)  # serialized behind the in-flight journal write
+        release_worker.set()
+        stopper.join(5)
+        assert not stopper.is_alive()
+        worker.join(5)
+        assert results == [1]
+        assert health_entered.is_set()
+        assert file_rig.journaled() == 1  # the in-flight write; the abandoned worker adds nothing
+        assert _row_count(file_rig, CALLBACK_OUTCOME) == 0
+        assert [row["state"] for row in file_rig.health_rows()] == ["stopped"]
+    finally:
+        release_worker.set()
+        if stopper is not None:
+            stopper.join(2)
+        consumer.stop(timeout=1)
+        file_rig.database.dispose()
