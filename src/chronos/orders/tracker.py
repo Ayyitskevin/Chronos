@@ -91,6 +91,24 @@ class OrderStatusUpdate(ChronosModel):
     occurred_at: datetime
 
 
+def quantity_refusal(filled_quantity: Decimal, remaining_quantity: Decimal) -> str | None:
+    """Why a venue's fill figures cannot be read, or None when both are finite and non-negative.
+
+    D-43: the cause a refusal carries (Q1). ``is_finite()`` is False for NaN, sNaN and
+    ±Infinity and never signals, so this check cannot raise. No magnitude bound (Q3).
+    """
+
+    for name, value in (
+        ("filled_quantity", filled_quantity),
+        ("remaining_quantity", remaining_quantity),
+    ):
+        if not value.is_finite():
+            return f"{name} is not finite ({value})"
+        if value < 0:
+            return f"{name} is negative ({value})"
+    return None
+
+
 def broker_status_to_lifecycle(
     status: str,
     *,
@@ -101,9 +119,13 @@ def broker_status_to_lifecycle(
 
     Unknown statuses fail closed to SUBMISSION_UNKNOWN — regardless of the
     fill quantities reported alongside — so an unrecognized broker state is
-    reconciled rather than assumed benign.
+    reconciled rather than assumed benign. So do malformed figures (D-43): a
+    non-finite or negative figure on either side is SUBMISSION_UNKNOWN whatever
+    the status says, decided before any status precedence or comparison.
     """
 
+    if quantity_refusal(filled_quantity, remaining_quantity) is not None:
+        return OrderLifecycle.SUBMISSION_UNKNOWN
     normalized = status.strip().lower()
     # Terminal/administrative statuses are decided FIRST: an order that partially
     # filled and was then cancelled/rejected reports filled>0 AND remaining>0, so

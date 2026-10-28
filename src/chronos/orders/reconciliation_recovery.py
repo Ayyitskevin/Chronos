@@ -339,6 +339,8 @@ def resolve_from_broker_evidence(
         return None
     if len(working) == 1:
         order = working[0]
+        if order.quantity_quarantine is not None:
+            return None  # D-43: placeholder figures settle nothing and are never persisted
         if _fills_without_a_working_lifecycle(order):
             return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
         if _terminal_below_recorded_fills(order, recorded_filled_quantity):
@@ -459,6 +461,15 @@ def _unresolved_evidence_reason(
         working_order=matching_orders[0] if matching_orders else None,
     ):
         return "owned order reference matched conflicting account or economic identity"
+    quarantined = next(
+        (order for order in matching_orders if order.quantity_quarantine is not None), None
+    )
+    if quarantined is not None:
+        return (
+            f"owned broker order {quarantined.broker_order_id} reports malformed fill figures "
+            f"({quarantined.quantity_quarantine}): nothing is settled from them, the intent stays "
+            "locked"
+        )
     unsettled = next(
         (order for order in matching_orders if _fills_without_a_working_lifecycle(order)), None
     )
@@ -1216,6 +1227,11 @@ class OrderRestartReconciler:
 
         if working:
             order = working[0]
+            if order.quantity_quarantine is not None:
+                return _SettlePlan(
+                    "refuse",
+                    f"the venue's fill figures are malformed ({order.quantity_quarantine})",
+                )
             if order.lifecycle not in _RECOGNISED_VENUE:
                 return _SettlePlan("refuse", f"{_UNRECOGNISED_STATUS} ({order.lifecycle.value})")
             # C3 is separate from the terminal table: only a recognised WORKING row whose venue
