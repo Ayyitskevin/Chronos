@@ -1330,6 +1330,12 @@ class OfficialIBKRBroker:
     def _invalidate_for_quarantine(self, order_id: int, refusal: str) -> None:
         """D43-FIX1: a known-bad book demotes readiness at the read, so no reader of
         ``open_orders()`` can lean on a READY proof taken before it (never a connection epoch bump).
+
+        D43-FIX2: a hook that raises fails the read CLOSED. The quarantined row cannot be returned
+        while the READY proof it should have demoted may still stand, so the read raises a typed
+        :class:`BrokerSafetyError` instead; the connection manager's own failure invalidation then
+        demotes readiness, and every reader treats the read as failed. Without a hook there is
+        nothing to fail: the evidence path refuses the row itself (``orders/evidence.py``).
         """
 
         _logger.warning(
@@ -1342,11 +1348,15 @@ class OfficialIBKRBroker:
             return
         try:
             self._on_connection_uncertain(QUARANTINED_ORDER_FIGURES_REASON)
-        except Exception:
+        except Exception as error:
             _logger.exception(
                 "Quarantine readiness invalidation failed",
                 extra={"event": "open_order_quarantine_invalidation_failed"},
             )
+            raise BrokerSafetyError(
+                f"open order {order_id} carries malformed fill figures ({refusal}) and the "
+                "readiness invalidation failed; the open-orders read is refused"
+            ) from error
 
     async def completed_orders(self) -> tuple[BrokerOrder, ...]:
         """The venue's completed (terminal) orders, normalized as EVIDENCE only.
