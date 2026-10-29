@@ -1003,6 +1003,14 @@ class BackendGatherers:
             rows = [
                 row for read in (first, second) for row in read if row.contract.con_id == con_id
             ]
+            if not self._tick_account_id:
+                # D54-FIX2 (delta review P3-2): a blank or unread tick account names no identity,
+                # so blank == blank must not pass the comparison below.
+                return refuse(
+                    PositionEvidenceRefusal.ACCOUNT_MISMATCH,
+                    "this tick's account summary named no account to compare position rows with",
+                    **bracket,
+                )
             if any(row.account_id != self._tick_account_id for row in rows):
                 # D54-FIX1 P2-1: the official adapter already filters to the configured account;
                 # the identity is (account, con_id, security type) here too, not one layer down.
