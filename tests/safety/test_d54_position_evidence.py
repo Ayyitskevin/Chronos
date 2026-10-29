@@ -1064,6 +1064,7 @@ def test_a_held_position_is_refused_by_the_real_reconciler_and_order_plane_joine
 
     settings = Settings.model_validate(
         {
+            "broker_mode": "demo",
             "database_url": f"sqlite:///{tmp_path / 'chronos.db'}",
             "log_file": tmp_path / "chronos.log",
         }
