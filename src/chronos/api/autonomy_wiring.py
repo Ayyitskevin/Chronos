@@ -1021,10 +1021,12 @@ class BackendGatherers:
                     "this tick's account summary named",
                     **bracket,
                 )
-            # Before the comparator: a NaN quantity compares unequal to every other NaN object,
-            # so two reads that each carry one would otherwise read as disagreeing, and one NaN
-            # object shared by both reads would read as agreeing. Either is fail-closed later,
-            # but neither would say why; this check names it.
+            # Before the comparator, and load-bearing (delta review P3-3, measured with the check
+            # removed): distinct NaN objects in the two reads compare unequal, so the decision
+            # would refuse POSITION_READS_DISAGREE without naming the cause; ONE NaN object shared
+            # by both reads compares equal, passes the comparator, and the loop's Q7 comparison
+            # raises InvalidOperation out of run_cycle, aborting the whole tick with no record for
+            # this decision. Refusing here keeps the tick alive and the record typed.
             if any(not row.quantity.is_finite() for row in rows):
                 return refuse(
                     PositionEvidenceRefusal.NOT_FINITE,
