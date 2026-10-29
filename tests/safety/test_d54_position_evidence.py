@@ -373,6 +373,34 @@ def test_a_position_matched_by_symbol_but_not_by_con_id_is_not_the_position(
     assert outcome.refusal == "POSITION_FLAT"
 
 
+def test_a_row_for_another_account_is_not_this_accounts_position(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX1 P2-1 (review probe X1): the identity is (account, con_id, security type).
+
+    The official adapter filters rows to the configured account, but the gatherer must not rely on
+    the layer below: a row for another account with the same con_id is refused, typed, and never
+    attributed to this install's fingerprint.
+    """
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    foreign = BrokerPosition(
+        account_id="DU9999999",
+        contract=pe.CONTRACTS["SPY"],
+        quantity=Decimal(10),
+        average_cost=Decimal(390),
+    )
+    outcome = _tick(session, database, pe.Broker(reads=[(foreign,), (foreign,)])).run(_exit())
+    assert outcome.stage is CycleStage.SIZING
+    assert outcome.refusal == "POSITION_ACCOUNT_MISMATCH"
+    assert outcome.intent is None
+    assert "DU9999999" not in outcome.detail and pe.ACCOUNT not in outcome.detail
+    (record,) = _cycle_records(session)
+    assert record["position_evidence"]["refusal"] == "POSITION_ACCOUNT_MISMATCH"
+    assert record["position_evidence"]["quantity"] is None
+    assert "DU9999999" not in json.dumps(record)
+
+
 # ---------------------------------------------------------------- Q3: managed only
 
 
