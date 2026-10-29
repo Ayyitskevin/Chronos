@@ -429,6 +429,32 @@ def test_a_row_for_another_account_is_not_this_accounts_position(
     assert "DU9999999" not in json.dumps(record)
 
 
+def test_a_blank_tick_account_is_no_account_even_against_a_blank_row(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX2 (delta review P3-2): the evidence layer never attributes a figure to a blank identity.
+
+    Unreachable through typed rows (``BrokerPosition`` rejects a blank account), so the row is built
+    with ``model_construct``. Without the check, blank == blank passed the account comparison and
+    the cycle was refused only later, at COMPILATION, by the intent model.
+    """
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    blank = BrokerPosition.model_construct(
+        account_id="",
+        contract=pe.CONTRACTS["SPY"],
+        quantity=Decimal(10),
+        average_cost=Decimal(390),
+        market_price=None,
+        unrealized_pnl=None,
+    )
+    broker = pe.Broker(reads=[(blank,), (blank,)], summary_account="")
+    outcome = _tick(session, database, broker).run(_exit())
+    assert outcome.stage is CycleStage.SIZING
+    assert outcome.refusal == "POSITION_ACCOUNT_MISMATCH"
+    assert outcome.intent is None
+
+
 # ---------------------------------------------------------------- Q3: managed only
 
 

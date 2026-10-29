@@ -57,10 +57,12 @@ class Broker:
     account_in_scope: bool = True
     on_read: Callable[[int], None] | None = None
     position_calls: int = 0
+    #: The account the summary (and, while in scope, the connection status) names.
+    summary_account: str = ACCOUNT
 
     async def account_summary(self) -> SimpleNamespace:
         return SimpleNamespace(
-            account_id=ACCOUNT,
+            account_id=self.summary_account,
             net_liquidation=Decimal(100_000),
             total_cash=Decimal(60_000),
             buying_power=Decimal(60_000),
@@ -69,7 +71,7 @@ class Broker:
     async def connection_status(self) -> SimpleNamespace:
         return SimpleNamespace(
             connected=self.connected,
-            account_id=ACCOUNT if self.connected and self.account_in_scope else None,
+            account_id=self.summary_account if self.connected and self.account_in_scope else None,
         )
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
