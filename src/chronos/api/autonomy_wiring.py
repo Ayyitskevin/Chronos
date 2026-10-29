@@ -704,9 +704,10 @@ class BackendGatherers:
     """Facts from the running backend, per tick and per decision.
 
     D-54 keeps per-tick state, reset when ``cycle_facts`` gathers a new tick: the contracts
-    this account's FILLED Chronos openings hold (read once, before the drain opens its
-    session), the contracts an exit has already taken a position read for this tick, and the
-    account the tick's summary named (an exit's rows must belong to it).
+    a managed binding ties to this account's FILLED Chronos openings (read once, before the
+    drain opens its session; production writes no binding, so the set is empty there), the
+    contracts an exit has already taken a position read for this tick, and the account the
+    tick's summary named (an exit's rows must belong to it).
     """
 
     def __init__(
@@ -782,7 +783,7 @@ class BackendGatherers:
         return _gather
 
     def _read_managed_contracts(self) -> frozenset[tuple[int, str]] | None:
-        """(con_id, product family) held by a FILLED Chronos opening of this account (D-54 Q3).
+        """(con_id, product family) a managed binding ties to a FILLED Chronos opening (D-54 Q3).
 
         Read-only, through the managed-position bindings to the opening intents' persisted
         ``con_id``. Read once per tick, in ``cycle_facts``, because that runs before the
@@ -972,7 +973,8 @@ class BackendGatherers:
             if managed is None or (con_id, _PRODUCT_FAMILY_OF[security_type]) not in managed:
                 return refuse(
                     PositionEvidenceRefusal.NOT_MANAGED,
-                    "no FILLED Chronos opening of this account holds this contract"
+                    "no managed binding ties this contract to a FILLED Chronos opening of "
+                    "this account"
                     if managed is not None
                     else "the managed-position bindings could not be read this tick",
                 )
