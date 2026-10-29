@@ -954,48 +954,21 @@ def test_d17_a_set_unenforceable_limit_is_refused_in_the_cycle_and_journalled(
     assert alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT) == ()
 
 
-def _production_facts(mandate: AutonomyMandate) -> CycleFacts:
-    """CycleFacts built by the backend's own gatherer over a synthetic broker.
+def _production_gatherers(mandate: AutonomyMandate, database: Database) -> tuple[CycleFacts, Any]:
+    """The backend's own gatherers over a synthetic broker that holds SPY 10, bound as MANAGED.
 
-    ``BackendGatherers.cycle_facts`` is what production calls each tick. Its
-    ``AccountEvidence`` carries net liquidation, cash and buying power only, so
-    ``position_quantity`` is ``None`` (pre-existing; wiring it is D-54).
+    ``BackendGatherers.cycle_facts`` is what production calls each tick and
+    ``instrument_facts`` what it calls per decision; since D-54 the latter reads the held
+    position (two broker reads under one readiness bracket) for a CLOSE or REDUCE.
     """
 
-    import asyncio
-    from types import SimpleNamespace
-
     from chronos.api.autonomy_wiring import BackendGatherers
-    from chronos.domain.models import MarketQuote
+    from tests.support import position_evidence
 
-    contract = UnderlyingContract(con_id=111, symbol="SPY")
-
-    class _Broker:
-        async def account_summary(self) -> SimpleNamespace:
-            return SimpleNamespace(
-                account_id=_ACCOUNT,
-                net_liquidation=Decimal(100_000),
-                total_cash=Decimal(60_000),
-                buying_power=Decimal(60_000),
-            )
-
-        async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
-            return contract
-
-        async def request_underlying_quote(self, instrument: UnderlyingContract) -> MarketQuote:
-            return MarketQuote(
-                contract=instrument,
-                timestamp=_NOW,
-                data_quality=DataQuality.LIVE,
-                bid=Decimal("399.98"),
-                ask=Decimal("400.02"),
-            )
-
-    runtime = SimpleNamespace(
-        broker=_Broker(),
-        connection=SimpleNamespace(run=asyncio.run),
-        settings=SimpleNamespace(autonomy_market_timezone="America/New_York"),
-    )
+    with database.sessions() as binding_session:
+        position_evidence.bind_managed(binding_session, con_id=111, symbol="SPY", tag="B")
+    row = (position_evidence.held("SPY", "10"),)
+    runtime = position_evidence.runtime(position_evidence.Broker(reads=[row, row]), database)
     gatherers = BackendGatherers(
         runtime,
         _FINGERPRINT,
@@ -1005,20 +978,21 @@ def _production_facts(mandate: AutonomyMandate) -> CycleFacts:
     )
     facts = gatherers.cycle_facts(mandate)(_NOW)
     assert facts is not None
-    return facts
+    return facts, gatherers
 
 
 @pytest.mark.parametrize("kind", [DecisionKind.CLOSE, DecisionKind.REDUCE])
-def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
+def test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence(
     kind: DecisionKind,
 ) -> None:
-    """D-17 (ii) never refuses an exit; it does not make one executable (Kimi P1-1, D-54).
+    """D-17 (ii) never refuses an exit; D-54 sizes it from broker evidence (Kimi P1-1).
 
-    Driven by the production fact shape: the exit under a set unenforceable limit
-    is ADMITTED, and what stops it is the pre-existing sizing refusal (no position
-    evidence is gathered in production), never ``MANDATE_INERT_LIMIT_SET``. The
-    same proposal under the plain mandate stops in exactly the same place, so
-    D-17 (ii) changes nothing about exits in production.
+    Driven by the production gatherers: the exit under a set unenforceable limit is ADMITTED and
+    ends exactly where the same proposal ends under the plain mandate. A CLOSE sizes to the
+    position held and reaches HANDOFF in shadow (nothing sent); a REDUCE that names no quantity is
+    refused ``REDUCE_QUANTITY_REQUIRED`` (D-54 Q5). Before D-54 both stopped at
+    ``NO_EXECUTABLE_SIZE``: production gathered no held quantity. So D-17 (ii) still changes
+    nothing about exits.
     """
 
     outcomes = {}
@@ -1038,12 +1012,14 @@ def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
         db_session = database.sessions()
         try:
             _activate(db_session, mandate)
-            facts = _production_facts(mandate)
-            assert facts.account.position_quantity is None
+            db_session.commit()
+            facts, gatherers = _production_gatherers(mandate, database)
+            assert facts.account.position_quantity is None  # never the tick-wide figure
             outcomes[label] = _run(
                 db_session,
                 mandate=mandate,
                 facts=facts,
+                gather_instrument=gatherers.instrument_facts,
                 identity=queue.HarnessIdentity(
                     provider="anthropic",
                     model_id="model-x",
@@ -1069,10 +1045,14 @@ def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
     limited = outcomes["limit set"]
     assert limited.admission is not None and limited.admission.admitted is True
     assert limited.refusal != "MANDATE_INERT_LIMIT_SET"
-    assert limited.stage is CycleStage.SIZING
-    assert limited.refusal == "NO_EXECUTABLE_SIZE"
-    assert "without the position actually held" in (limited.detail or "")
-    assert limited.intent is None
+    if kind is DecisionKind.CLOSE:
+        assert limited.stage is CycleStage.HANDOFF
+        assert limited.refusal == "NO_SUBMISSION_CONFIGURED"
+        assert limited.intent is not None and limited.intent.quantity == Decimal(10)
+    else:
+        assert limited.stage is CycleStage.SIZING
+        assert limited.refusal == "REDUCE_QUANTITY_REQUIRED"
+        assert limited.intent is None
     plain = outcomes["plain"]
     assert (plain.stage, plain.refusal, plain.detail) == (
         limited.stage,
@@ -1084,11 +1064,11 @@ def test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing(
 def test_d17_a_close_under_a_set_limit_compiles_when_position_evidence_is_supplied(
     session: Session,
 ) -> None:
-    """D-17 (ii) carve-out, ENRICHED evidence only: with a held quantity the CLOSE compiles.
+    """D-17 (ii) carve-out on the single-instrument path: with a held quantity the CLOSE compiles.
 
-    Production does not gather ``position_quantity`` today (D-54), so this proves
-    the carve-out on the enriched path only; the production-shaped pin is
-    ``test_d17_a_production_exit_is_admitted_then_stops_at_pre_existing_sizing``.
+    No instrument gatherer here, so the account-level ``position_quantity`` is the figure; the
+    production-shaped pin, where D-54 gathers it per decision, is
+    ``test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence``.
     """
 
     mandate = _mandate(
