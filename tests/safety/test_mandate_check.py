@@ -489,10 +489,12 @@ def test_d17_each_set_unenforceable_limit_is_blocking(
     assert refused[0].severity is Severity.BLOCKING
     # The message says what is still allowed, so the owner is not told exits are refused.
     assert "risk-reducing" in refused[0].message
-    # ...and does not promise more (Kimi P1-1): not refused is not executable. Production
-    # gathers no position quantity, so an autonomous CLOSE/REDUCE cannot be sized (D-54).
-    assert "cannot be sized" in refused[0].message
+    # ...and does not promise more (Kimi P1-1): not refused is not executable. Since D-54 an
+    # autonomous CLOSE/REDUCE sizes from broker position evidence, but in PAPER/LIVE the order
+    # plane still refuses it while the position is held, and the message must say so.
+    assert "cannot be sized" not in refused[0].message
     assert "D-54" in refused[0].message
+    assert "the order plane still refuses it while the position is held" in refused[0].message
 
 
 def test_d17_a_default_valued_mandate_has_no_refused_limit_finding() -> None:
