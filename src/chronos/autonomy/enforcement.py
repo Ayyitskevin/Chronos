@@ -31,9 +31,10 @@ sets it authorizes no new exposure (``MANDATE_INERT_LIMIT_SET``), while
 risk-reducing decisions are admitted exactly as before, so (ii) never refuses an
 exit; (iii) refuses one only when it asks for protection nothing can keep
 (``PROTECTION_NOT_AVAILABLE``), and the same decision without the request is
-admitted. Admitted is not executable: since D-54 an autonomous CLOSE or REDUCE sizes from
-the broker position a FILLED Chronos opening holds, and in PAPER/LIVE the order plane still
-refuses it while the position is held.
+admitted. Admitted is not executable: since D-54 an autonomous CLOSE or REDUCE sizes only from
+a broker position that a managed binding ties to a FILLED Chronos opening. Production writes no
+binding (ADR-0036 is not wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing; where a
+binding exists, the PAPER/LIVE order plane still refuses it while the position is held.
 
 Neither label is a safety claim. ENFORCED says the kernel consults the field,
 not that the resulting refusal has an exercised test behind it; that evidence is
