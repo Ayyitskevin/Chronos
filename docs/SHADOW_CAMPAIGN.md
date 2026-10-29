@@ -369,11 +369,16 @@ The last two sections changed with D-17 (ii) (2026-10-28, D-52). Those four limi
 inert-and-accepted. A mandate that sets one is BLOCKING (`MANDATE_INERT_LIMIT_SET`), and the line
 then ends `<- set in this mandate`.
 
-Exits in this campaign (D-54): an autonomous CLOSE or REDUCE of an equity or crypto contract a
-FILLED Chronos opening holds sizes from two broker position reads and reaches HANDOFF with nothing
-sent; anything else refuses with a typed `POSITION_*` code in the cycle record. Autonomous option
-exits are not priced and stay operator-managed. None of this makes an exit executable in PAPER or
-LIVE (`docs/limitations.md`, the risk-reducing sizing item).
+Exits in this campaign (D-54): a SHADOW-mode mandate refuses every decision at admission
+(`MODE_CANNOT_SUBMIT`), exits included, before any position is read, so in this campaign an
+autonomous exit never reaches sizing. Under a PAPER or LIVE mandate, a CLOSE or REDUCE of an equity
+or crypto contract a FILLED Chronos opening holds is sized from two broker position reads and
+journaled with that evidence, and the order plane then refuses it at `reconciled_proven_state`
+while the position is held. A refused exit records a typed code in the cycle record: a `POSITION_*`
+code for the position evidence or its sign, `REDUCE_QUANTITY_REQUIRED` for a REDUCE that names no
+quantity, and `INSTRUMENT_FACTS_UNAVAILABLE` for an autonomous option exit, which is not priced and
+stays operator-managed. None of this makes an exit executable in PAPER or LIVE
+(`docs/limitations.md`, the risk-reducing sizing item).
 
 This is the load-bearing check: a `BLOCKING` finding means the mandate and the posture have
 drifted apart, which is the failure this campaign is most likely to hit — see §1 on credential

@@ -14,7 +14,9 @@ decision) and ``run_cycle``:
 - Q7: a figure worth more than twice net liquidation is corrupt evidence, refused, not clamped.
 - Unknown is never zero.
 
-Nothing here has a submit path: every cycle runs in SHADOW and the broker double is read-only.
+Nothing here has a submit path. The mandate is PAPER_AUTONOMOUS and every cycle runs in the loop's
+headless shape (no submit callable), which production never runs: that is what lets an exit reach
+HANDOFF here. A SHADOW-mode mandate refuses at admission before any read (pinned below).
 """
 
 from __future__ import annotations
@@ -243,10 +245,15 @@ def _spy_held(session: Session, quantity: str = "10") -> pe.Broker:
 # ---------------------------------------------------------------- the positive control
 
 
-def test_a_held_managed_position_sizes_the_close_and_reaches_handoff_in_shadow(
+def test_a_held_managed_position_sizes_the_close_and_reaches_handoff_in_the_headless_loop_shape(
     session: Session, database: Database
 ) -> None:
-    """Kimi's D-17 probe shape, with a broker double that returns the row: HANDOFF, nothing sent."""
+    """Kimi's D-17 probe shape, with a broker double that returns the row: headless loop shape.
+
+    A submitting-mode mandate with no submit callable: the exit is sized, compiled and reaches
+    HANDOFF with nothing sent. Production always supplies the submit callable (the order plane then
+    refuses a held exit, see the submitting-mode pins below).
+    """
 
     broker = _spy_held(session)
     outcome = _tick(session, database, broker).run(_exit())
@@ -1003,8 +1010,8 @@ def test_a_submitting_mode_still_refuses_a_held_position_at_reconciled_proven_st
     A held position keeps the wheel reconciler at MANUAL_REVIEW (``services/reconciliation.py``:
     "A nonzero broker position lacks complete cycle and fill-allocation provenance."), and the order
     plane fails ``reconciled_proven_state`` on anything that is not RECONCILED. So in PAPER/LIVE the
-    exit D-54 sizes is refused by the order plane (``RiskRefusedByOrderPlane``); only SHADOW reaches
-    HANDOFF.
+    exit D-54 sizes is refused by the order plane (``RiskRefusedByOrderPlane``). The HANDOFF result
+    appears only in the loop's headless shape; a SHADOW-mode mandate never reaches sizing.
     """
 
     engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)

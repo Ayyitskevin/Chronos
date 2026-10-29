@@ -989,8 +989,9 @@ def test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence(
 
     Driven by the production gatherers: the exit under a set unenforceable limit is ADMITTED and
     ends exactly where the same proposal ends under the plain mandate. A CLOSE sizes to the
-    position held and reaches HANDOFF in shadow (nothing sent); a REDUCE that names no quantity is
-    refused ``REDUCE_QUANTITY_REQUIRED`` (D-54 Q5). Before D-54 both stopped at
+    position held and reaches HANDOFF in the loop's headless shape (no submit callable, nothing
+    sent; production supplies one and the order plane refuses a held exit); a REDUCE that names
+    no quantity is refused ``REDUCE_QUANTITY_REQUIRED`` (D-54 Q5). Before D-54 both stopped at
     ``NO_EXECUTABLE_SIZE``: production gathered no held quantity. So D-17 (ii) still changes
     nothing about exits.
     """

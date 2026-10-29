@@ -646,11 +646,15 @@ found the code contradicting its own published claims on both:
   liquidation (corrupt evidence, not a sizing ceiling), or a second exit on the same contract in
   one tick (no netting). A tick that starts disconnected or with the account outside the managed
   scope is degraded and blocks even a close. The read is journaled in the chained
-  `autonomy.cycles` record (account fingerprint only).* **What it does not deliver:** in SHADOW the
-  exit reaches HANDOFF; in PAPER or LIVE the order plane's `reconciled_proven_state` check still
-  refuses it while the position is held (the wheel reconciler's MANUAL_REVIEW rule, unchanged), so
-  autonomous exits are sizable, not executable. Autonomous option exits are not priced;
-  operator-managed (`instrument_facts` has no option exit gather).
+  `autonomy.cycles` record (account fingerprint only).* **What it does not deliver:** under a
+  SHADOW-mode mandate an exit never reaches sizing: admission refuses `MODE_CANNOT_SUBMIT` before
+  any position is read. Under a PAPER or LIVE mandate the exit is sized and journaled with its
+  position evidence, then the order plane's `reconciled_proven_state` check refuses it while the
+  position is held (the wheel reconciler's MANUAL_REVIEW rule, unchanged), so autonomous exits are
+  sizable, not executable. The sized-then-HANDOFF result ("nothing sent") exists only in the loop's
+  headless shape, a submitting-mode mandate run with no submit callable, which production never
+  runs. Autonomous option exits are not priced; operator-managed (`instrument_facts` has no
+  option exit gather).
 
 Degraded state follows ADR-0016 §8 in both halves: no new exposure, but risk-reducing
 decisions may still proceed — unless the degradation is one that leaves position truth
