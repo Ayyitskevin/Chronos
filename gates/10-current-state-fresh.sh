@@ -11,7 +11,7 @@ fail() { echo "FAIL: $g — $1" >&2; exit 1; }
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a git work tree; run the gate from the repo root"
 cd "$top" || fail "could not enter $top"
 . "$(dirname "$0")/lib/sandbox.sh" || fail "could not load the trusted sandbox launcher"
-contained() { python3 - <<'PY'
+contained() { python3 -I -B - <<'PY'
 import os, stat, subprocess
 top = os.path.realpath(".")
 out = subprocess.run(["git", "ls-files", "-s", "-z"], capture_output=True, check=True).stdout

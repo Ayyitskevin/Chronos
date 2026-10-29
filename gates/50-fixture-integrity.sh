@@ -9,7 +9,7 @@
 set -uo pipefail
 g=fixture-integrity
 top="$(git rev-parse --show-toplevel 2>/dev/null)" && cd "$top" || { echo "FAIL: $g — not inside a git work tree; run the gate from the repo root" >&2; exit 1; }
-verify() { python3 - <<'PY'
+verify() { python3 -I -B - <<'PY'
 import hashlib, json, os, re, stat, subprocess, sys
 from pathlib import PurePosixPath as P
 def die(msg, hint="fix the manifest, then re-run"):
