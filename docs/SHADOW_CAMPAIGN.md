@@ -369,6 +369,12 @@ The last two sections changed with D-17 (ii) (2026-10-28, D-52). Those four limi
 inert-and-accepted. A mandate that sets one is BLOCKING (`MANDATE_INERT_LIMIT_SET`), and the line
 then ends `<- set in this mandate`.
 
+Exits in this campaign (D-54): an autonomous CLOSE or REDUCE of an equity or crypto contract a
+FILLED Chronos opening holds sizes from two broker position reads and reaches HANDOFF with nothing
+sent; anything else refuses with a typed `POSITION_*` code in the cycle record. Autonomous option
+exits are not priced and stay operator-managed. None of this makes an exit executable in PAPER or
+LIVE (`docs/limitations.md`, the risk-reducing sizing item).
+
 This is the load-bearing check: a `BLOCKING` finding means the mandate and the posture have
 drifted apart, which is the failure this campaign is most likely to hit — see §1 on credential
 expiry.

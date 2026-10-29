@@ -44,7 +44,11 @@ runbooks.
   execution whose `shares` is NaN, zero or negative, still fails `BrokerPosition` /
   `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
   reconciliation pass then stays `PENDING` ("Broker evidence could not be captured") for the
-  whole pass. That fails closed, but the offending row is not named.
+  whole pass. That fails closed, but the offending row is not named. D-54's exit gather reads the
+  same positions leg: there a raising read refuses only that exit (`POSITION_READ_FAILED`, the
+  error's type only), and a non-finite figure that reaches the gather is refused
+  `POSITION_NOT_FINITE`; the reconciliation pass is unchanged. Since D-54 the official adapter's
+  `positions()` also refuses a read a connection close cut short, as `open_orders()` already did.
 - **Two raise paths remain on the official adapter's order reads (D-43 R4, R5).** An open-orders
   row whose figures are finite and non-negative but do not sum to its `totalQuantity`, or whose
   `totalQuantity` is itself malformed, still fails `BrokerOrder` validation, so the whole
@@ -628,11 +632,25 @@ found the code contradicting its own published claims on both:
   headroom ceilings do not apply, because an account already over a ceiling has negative
   headroom and would be refused the very order that brings it back under. Such an order is
   bounded by the position actually held, and refused outright when that position is unknown.
-  *Measured 2026-10-28 (Kimi, D-17 review): production never knows it. `BackendGatherers.cycle_facts`
-  (`api/autonomy_wiring.py`) builds `AccountEvidence` from net liquidation, cash and buying power
-  only, so `position_quantity` is unset and every autonomous CLOSE or REDUCE is refused
-  `NO_EXECUTABLE_SIZE`. Pre-existing, not caused by D-17; exits are operator-managed until position
-  evidence is wired (D-54, not admitted).*
+  *Measured 2026-10-28 (Kimi, D-17 review): production never knew it, so every autonomous CLOSE or
+  REDUCE was refused `NO_EXECUTABLE_SIZE`. Since D-54 (option (a), rulings D-55 (a)):
+  `BackendGatherers.instrument_facts` (`api/autonomy_wiring.py`) reads the broker's `positions()`
+  twice per CLOSE/REDUCE under one readiness bracket (same session and generation, the two reads
+  agree; READY is not required, because a held position keeps reconciliation at MANUAL_REVIEW) and
+  takes the decision's own contract by `con_id` and security type. Only a contract a FILLED Chronos
+  opening of this account holds may be exited; hand-bought or foreign lots are refused
+  (`POSITION_NOT_MANAGED`). A held sign the closing side cannot reduce is refused
+  (`POSITION_SIGN_MISMATCH`), a REDUCE must name a quantity (`REDUCE_QUANTITY_REQUIRED`), and an
+  unusable read refuses that decision with a typed `POSITION_*` code: failed, readiness moved,
+  reads disagree, cached adapter (ib_async), ambiguous, non-finite, flat, worth more than twice net
+  liquidation (corrupt evidence, not a sizing ceiling), or a second exit on the same contract in
+  one tick (no netting). A tick that starts disconnected or with the account outside the managed
+  scope is degraded and blocks even a close. The read is journaled in the chained
+  `autonomy.cycles` record (account fingerprint only).* **What it does not deliver:** in SHADOW the
+  exit reaches HANDOFF; in PAPER or LIVE the order plane's `reconciled_proven_state` check still
+  refuses it while the position is held (the wheel reconciler's MANUAL_REVIEW rule, unchanged), so
+  autonomous exits are sizable, not executable. Autonomous option exits are not priced;
+  operator-managed (`instrument_facts` has no option exit gather).
 
 Degraded state follows ADR-0016 §8 in both halves: no new exposure, but risk-reducing
 decisions may still proceed — unless the degradation is one that leaves position truth
@@ -652,8 +670,9 @@ It does **not** enforce, and these are open gaps rather than decisions:
   CLOSE, CANCEL and REDUCE are admitted exactly as before: D-17 (ii) never refuses an exit, and
   D-17 (iii) refuses one only when it asks for protection nothing can keep
   (`PROTECTION_NOT_AVAILABLE`; the same decision without the request is admitted). Neither makes
-  an exit executable (see the risk-reducing sizing item above: today an autonomous CLOSE or
-  REDUCE stops at sizing, D-54). Still never enforced.* ~~And the option-liquidity floors
+  an exit executable (see the risk-reducing sizing item above: since D-54 an autonomous CLOSE or
+  REDUCE sizes from broker position evidence, and PAPER/LIVE still refuse it while held). Still
+  never enforced.* ~~And the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
   does not gather.~~ *(Corrected by F7-A, 2026-09-27: both floors bind on the option-selection
   path. `supervisor/option_selection.py` filters on them, and `supervisor/loop.py` refuses a
