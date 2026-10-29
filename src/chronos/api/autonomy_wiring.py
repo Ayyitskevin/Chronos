@@ -703,10 +703,10 @@ _PRODUCT_FAMILY_OF = {
 class BackendGatherers:
     """Facts from the running backend, per tick and per decision.
 
-    D-54 keeps two pieces of per-tick state, both reset when ``cycle_facts`` gathers a new
-    tick: the contracts this account's FILLED Chronos openings hold (read once, before the
-    drain opens its session), and the contracts an exit has already taken a position read
-    for this tick.
+    D-54 keeps per-tick state, reset when ``cycle_facts`` gathers a new tick: the contracts
+    this account's FILLED Chronos openings hold (read once, before the drain opens its
+    session), the contracts an exit has already taken a position read for this tick, and the
+    account the tick's summary named (an exit's rows must belong to it).
     """
 
     def __init__(
@@ -724,6 +724,7 @@ class BackendGatherers:
         self._mandate = mandate
         self._managed_contracts: frozenset[tuple[int, str]] | None = None
         self._exits_this_tick: set[tuple[int, str]] = set()
+        self._tick_account_id: str | None = None
         self._option_selection = AutonomousOptionSelectionService(
             runtime,
             autonomy_mode=mandate.mode.value,
@@ -739,9 +740,11 @@ class BackendGatherers:
         def _gather(now: datetime) -> CycleFacts | None:
             runtime = self._runtime
             self._exits_this_tick = set()
+            self._tick_account_id = None
             self._managed_contracts = self._read_managed_contracts()
             try:
                 summary = runtime.connection.run(runtime.broker.account_summary())
+                self._tick_account_id = summary.account_id
                 status = runtime.connection.run(runtime.broker.connection_status())
                 probe = self._probe_symbol(mandate)
                 if not probe:
@@ -1000,6 +1003,20 @@ class BackendGatherers:
             rows = [
                 row for read in (first, second) for row in read if row.contract.con_id == con_id
             ]
+            if any(row.account_id != self._tick_account_id for row in rows):
+                # D54-FIX1 P2-1: the official adapter already filters to the configured account;
+                # the identity is (account, con_id, security type) here too, not one layer down.
+                # The detail names neither account: the record carries the fingerprint only.
+                return refuse(
+                    PositionEvidenceRefusal.ACCOUNT_MISMATCH,
+                    f"a position row for con_id {con_id} belongs to another account than the one "
+                    "this tick's account summary named",
+                    **bracket,
+                )
+            # Before the comparator: a NaN quantity compares unequal to every other NaN object,
+            # so two reads that each carry one would otherwise read as disagreeing, and one NaN
+            # object shared by both reads would read as agreeing. Either is fail-closed later,
+            # but neither would say why; this check names it.
             if any(not row.quantity.is_finite() for row in rows):
                 return refuse(
                     PositionEvidenceRefusal.NOT_FINITE,
