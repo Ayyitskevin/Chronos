@@ -31,7 +31,7 @@
     },
     {
       "path": "src/chronos/api/autonomy_wiring.py",
-      "sha256": "ebce6aa7d9010791a309ab774e9b9f3d165ca70b2bc7308ca50da46fa1d4c0f1"
+      "sha256": "6d4bb89900ab9bee4a01f97751025aa39afd41c0857d301ba3dcc0970081339a"
     },
     {
       "path": "src/chronos/supervisor/evidence_kinds.py",
