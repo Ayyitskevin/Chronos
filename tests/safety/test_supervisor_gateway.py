@@ -1212,8 +1212,9 @@ def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> Non
 # of being accepted with a warning, and risk reduction (CLOSE / CANCEL / REDUCE)
 # is admitted exactly as it is today, so (ii) never refuses an exit ((iii) below refuses
 # one only when it asks for protection nothing can keep). Admitted is not
-# executable: since D-54 production sizes an exit from broker position evidence,
-# and PAPER/LIVE still refuse it while held (pinned in test_autonomy_cycle.py and
+# executable: since D-54 an exit sizes from broker position evidence only where a managed
+# binding exists, which production never writes (POSITION_NOT_MANAGED), and PAPER/LIVE
+# still refuse it while held (pinned in test_autonomy_cycle.py and
 # test_d54_position_evidence.py). The field names and
 # kinds below are written out here, not imported, so that a change to the kernel's
 # own lists cannot quietly move this pin.

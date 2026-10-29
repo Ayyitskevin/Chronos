@@ -982,7 +982,7 @@ def _production_gatherers(mandate: AutonomyMandate, database: Database) -> tuple
 
 
 @pytest.mark.parametrize("kind", [DecisionKind.CLOSE, DecisionKind.REDUCE])
-def test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence(
+def test_d17_a_bound_exit_through_the_production_gatherers_is_admitted_then_sized(
     kind: DecisionKind,
 ) -> None:
     """D-17 (ii) never refuses an exit; D-54 sizes it from broker evidence (Kimi P1-1).
@@ -990,7 +990,8 @@ def test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence(
     Driven by the production gatherers: the exit under a set unenforceable limit is ADMITTED and
     ends exactly where the same proposal ends under the plain mandate. A CLOSE sizes to the
     position held and reaches HANDOFF in the loop's headless shape (no submit callable, nothing
-    sent; production supplies one and the order plane refuses a held exit); a REDUCE that names
+    sent; with a submit callable the order plane refuses a held exit; production writes no binding,
+    so there the exit is refused POSITION_NOT_MANAGED at sizing); a REDUCE that names
     no quantity is refused ``REDUCE_QUANTITY_REQUIRED`` (D-54 Q5). Before D-54 both stopped at
     ``NO_EXECUTABLE_SIZE``: production gathered no held quantity. So D-17 (ii) still changes
     nothing about exits.
@@ -1069,7 +1070,7 @@ def test_d17_a_close_under_a_set_limit_compiles_when_position_evidence_is_suppli
 
     No instrument gatherer here, so the account-level ``position_quantity`` is the figure; the
     production-shaped pin, where D-54 gathers it per decision, is
-    ``test_d17_a_production_exit_is_admitted_then_sized_from_position_evidence``.
+    ``test_d17_a_bound_exit_through_the_production_gatherers_is_admitted_then_sized``.
     """
 
     mandate = _mandate(

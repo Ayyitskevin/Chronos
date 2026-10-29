@@ -6,7 +6,9 @@ decision) and ``run_cycle``:
 
 - Q1: the figure is the broker's ``positions()``, read twice under one readiness bracket, cut by
   the decision's own ``con_id`` + security type. Never the reconciled store, fills, or the model.
-- Q3: only a contract a FILLED Chronos opening intent of this account holds may be exited.
+- Q3: only a contract that a managed binding ties to a FILLED Chronos opening intent of this
+  account may be exited. Production writes no binding (ADR-0036 is not wired), so there every
+  exit is refused POSITION_NOT_MANAGED; these pins write bindings with ``bind_managed``.
 - Q4: the exit predicate is weaker than READY (a held position is never READY): same session,
   same generation, two agreeing reads, connection not closed. A per-decision failure is a typed
   refusal on that decision; connection-closed or out-of-scope at tick start is a blocking
@@ -251,8 +253,9 @@ def test_a_held_managed_position_sizes_the_close_and_reaches_handoff_in_the_head
     """Kimi's D-17 probe shape, with a broker double that returns the row: headless loop shape.
 
     A submitting-mode mandate with no submit callable: the exit is sized, compiled and reaches
-    HANDOFF with nothing sent. Production always supplies the submit callable (the order plane then
-    refuses a held exit, see the submitting-mode pins below).
+    HANDOFF with nothing sent. Production always supplies the submit callable, and writes no
+    binding, so there the exit is refused POSITION_NOT_MANAGED at sizing; with a binding the order
+    plane refuses a held exit (see the submitting-mode pins below).
     """
 
     broker = _spy_held(session)
