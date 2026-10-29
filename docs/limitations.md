@@ -637,8 +637,9 @@ found the code contradicting its own published claims on both:
   `BackendGatherers.instrument_facts` (`api/autonomy_wiring.py`) reads the broker's `positions()`
   twice per CLOSE/REDUCE under one readiness bracket (same session and generation, the two reads
   agree; READY is not required, because a held position keeps reconciliation at MANUAL_REVIEW) and
-  takes the decision's own contract by `con_id` and security type. Only a contract a FILLED Chronos
-  opening of this account holds may be exited; hand-bought or foreign lots are refused
+  takes the decision's own contract by `con_id` and security type. Only a contract that a
+  managed-position binding ties to a FILLED Chronos opening of this account may be exited; a
+  contract with no binding, including hand-bought or foreign lots, is refused
   (`POSITION_NOT_MANAGED`). A held sign the closing side cannot reduce is refused
   (`POSITION_SIGN_MISMATCH`), a REDUCE must name a quantity (`REDUCE_QUANTITY_REQUIRED`), and an
   unusable read refuses that decision with a typed `POSITION_*` code: failed, readiness moved,
@@ -648,10 +649,17 @@ found the code contradicting its own published claims on both:
   scope is degraded and blocks even a close. The read is journaled in the chained
   `autonomy.cycles` record (account fingerprint only).* **What it does not deliver:** under a
   SHADOW-mode mandate an exit never reaches sizing: admission refuses `MODE_CANNOT_SUBMIT` before
-  any position is read. Under a PAPER or LIVE mandate the exit is sized and journaled with its
-  position evidence, then the order plane's `reconciled_proven_state` check refuses it while the
-  position is held (the wheel reconciler's MANUAL_REVIEW rule, unchanged), so autonomous exits are
-  sizable, not executable. The sized-then-HANDOFF result ("nothing sent") exists only in the loop's
+  any position is read. Under a PAPER or LIVE mandate in production, every autonomous exit is
+  refused `POSITION_NOT_MANAGED` at sizing: no managed binding is ever written, because ADR-0036's
+  admission, the only writer, is not wired and needs READY, which never returns while the position
+  is held. Only where a binding exists (the tests' `bind_managed`) is the exit sized and journaled
+  with its position evidence, and then the order plane's `reconciled_proven_state` check refuses it
+  while the position is held (the wheel reconciler's MANUAL_REVIEW rule, unchanged), so autonomous
+  exits are not executable. *Residual (covered-call encumbrance, D54-FIX4): neither
+  `_position_evidence` (`api/autonomy_wiring.py`) nor the order plane's `_stock_sell_holding_check`
+  (`orders/stocks.py`) subtracts shares that cover a short call or are reserved for a pending
+  covered call, so a stock exit could leave an uncovered short call. Fail-closed today, because no
+  exit reaches the plane; it must be closed before any exit path opens.* The sized-then-HANDOFF result ("nothing sent") exists only in the loop's
   headless shape, a submitting-mode mandate run with no submit callable, which production never
   runs. Autonomous option exits are not priced; operator-managed (`instrument_facts` has no
   option exit gather).
@@ -675,7 +683,9 @@ It does **not** enforce, and these are open gaps rather than decisions:
   D-17 (iii) refuses one only when it asks for protection nothing can keep
   (`PROTECTION_NOT_AVAILABLE`; the same decision without the request is admitted). Neither makes
   an exit executable (see the risk-reducing sizing item above: since D-54 an autonomous CLOSE or
-  REDUCE sizes from broker position evidence, and PAPER/LIVE still refuse it while held). Still
+  REDUCE sizes only for a contract with a managed binding, which production never writes, so it is
+  refused `POSITION_NOT_MANAGED`; where a binding exists, PAPER/LIVE still refuse it while held).
+  Still
   never enforced.* ~~And the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
   does not gather.~~ *(Corrected by F7-A, 2026-09-27: both floors bind on the option-selection
