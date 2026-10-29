@@ -173,7 +173,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 51 at D-54 (exits sized from broker position evidence): the superseded compiler.py,
     # api/autonomy_wiring.py and official_ibkr.py source-inventory fingerprints (3).
     # 52 at D54-FIX1 (api/autonomy_wiring.py: the account check supersedes D-54's fingerprint).
-    assert len(historical_candidates) == 52
+    # 53 at D54-FIX2 (api/autonomy_wiring.py: the blank-account guard supersedes FIX1's).
+    assert len(historical_candidates) == 53
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
