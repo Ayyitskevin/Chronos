@@ -98,7 +98,8 @@ def test_t3_every_field_is_classified_exactly_once() -> None:
             f"{name} fields changed: {sorted(actual ^ (classified | exempt))}. Classify "
             "each in chronos.autonomy.decision_enforcement: ENFORCED, INERT, or NOT_A_LIMIT."
         )
-        assert set(DECISION_FIELD_ENFORCEMENT[name].values()) <= {ENFORCED, INERT}
+        # D-17 (iii), D-52: REFUSED is the third label (a set value is refused).
+        assert set(DECISION_FIELD_ENFORCEMENT[name].values()) <= {ENFORCED, INERT, "REFUSED"}
 
 
 def test_t3_the_finding_7_fields_are_classified_as_the_record_says() -> None:
@@ -107,13 +108,13 @@ def test_t3_the_finding_7_fields_are_classified_as_the_record_says() -> None:
     decision = DECISION_FIELD_ENFORCEMENT["ProposedDecision"]
     assert decision["requested_quantity"] == ENFORCED
     assert decision["entry_plan"] == ENFORCED
-    for field in (
-        "requested_risk_budget_usd",
-        "max_acceptable_loss_usd",
-        "protective_order_required",
-        "exit_plan",
-    ):
+    for field in ("requested_risk_budget_usd", "max_acceptable_loss_usd"):
         assert decision[field] == INERT, field
+    # ADR-0021 Group B ruled "forbid" (D-17 (iii), D-52): admission refuses a set value
+    # with PROTECTION_NOT_AVAILABLE. Its sub-fields stay INERT: nothing reads them, the
+    # presence of the plan is what refuses.
+    for field in ("protective_order_required", "exit_plan"):
+        assert decision[field] == "REFUSED", field
     assert dict(DECISION_FIELD_ENFORCEMENT["ExitPlan"]) == {
         "profit_target": INERT,
         "protective_stop": INERT,

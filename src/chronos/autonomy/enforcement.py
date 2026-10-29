@@ -19,13 +19,20 @@ can read, so three consumers stay in agreement instead of drifting:
   number typed into an inert field is called out before it is relied on.
 
 **This module enforces nothing.** It records, per limits model, whether some
-deterministic module reads each field today. ``ENFORCED`` means read by
+deterministic module reads each field today, or refuses on it. ``ENFORCED`` means read by
 :mod:`chronos.supervisor.sizing`, :mod:`chronos.supervisor.admission`,
 :mod:`chronos.supervisor.durable`, or, on the option-selection path,
 :mod:`chronos.supervisor.option_selection` and :mod:`chronos.supervisor.loop`.
 ``INERT`` means a value the owner writes
 there changes no decision — the mandate will still validate, activate, and look
-complete.
+complete. ``REFUSED`` (D-17 (ii), ruled by the owner, D-52) means nothing can
+enforce the limit, so admission reads the field only to refuse: a mandate that
+sets it authorizes no new exposure (``MANDATE_INERT_LIMIT_SET``), while
+risk-reducing decisions are admitted exactly as before, so (ii) never refuses an
+exit; (iii) refuses one only when it asks for protection nothing can keep
+(``PROTECTION_NOT_AVAILABLE``), and the same decision without the request is
+admitted. Admitted is not executable: an autonomous CLOSE or REDUCE is still refused at
+sizing in production, which gathers no held quantity (pre-existing; D-54).
 
 Neither label is a safety claim. ENFORCED says the kernel consults the field,
 not that the resulting refusal has an exercised test behind it; that evidence is
@@ -42,6 +49,12 @@ ENFORCED = "ENFORCED"
 
 #: Nothing reads this field. Setting it constrains nothing.
 INERT = "INERT"
+
+#: Nothing can enforce this limit, so a value other than the model's default is
+#: refused instead of being accepted and ignored: admission refuses every
+#: exposure-creating decision under a mandate that sets it
+#: (``AdmissionRefusal.MANDATE_INERT_LIMIT_SET``). D-17 (ii), D-52.
+REFUSED = "REFUSED"
 
 #: Every field of every mandate limits model, classified. Keyed by the model's
 #: class name in :mod:`chronos.autonomy.mandate`.
@@ -86,10 +99,11 @@ LIMIT_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "ConcentrationLimits": MappingProxyType(
             {
                 "max_symbol_exposure_pct": ENFORCED,
-                # Need a sector/family/correlation map Chronos does not have yet.
-                "max_sector_exposure_pct": INERT,
-                "max_family_exposure_pct": INERT,
-                "max_correlated_exposure_pct": INERT,
+                # Need a sector/family/correlation map Chronos does not have yet,
+                # so a set value is refused for new exposure (D-17 (ii)).
+                "max_sector_exposure_pct": REFUSED,
+                "max_family_exposure_pct": REFUSED,
+                "max_correlated_exposure_pct": REFUSED,
             }
         ),
         "ActivityLimits": MappingProxyType(
@@ -121,8 +135,9 @@ LIMIT_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
                 # it into the selection policy, supervisor/loop.py:1310 refuses a
                 # receipt outside it, supervisor/option_selection.py:1974 filters.
                 "permitted_sessions": ENFORCED,
-                # Nothing reads it: no session clock or flatten in the supervisor.
-                "allow_overnight_holding": INERT,
+                # No session clock or flatten in the supervisor, so a set value is
+                # refused for new exposure (D-17 (ii)).
+                "allow_overnight_holding": REFUSED,
             }
         ),
     }
@@ -147,7 +162,7 @@ INERT_SCOPE_FIELDS: Mapping[str, str] = MappingProxyType({})
 
 
 def enforcement_of(model_name: str, field: str) -> str | None:
-    """Return ``ENFORCED``/``INERT`` for one field, or ``None`` if unclassified.
+    """Return ``ENFORCED``/``INERT``/``REFUSED`` for one field, or ``None`` if unclassified.
 
     ``None`` is the honest answer for a name this map has never heard of; it is
     not a claim that the field is enforced. The safety pin makes an

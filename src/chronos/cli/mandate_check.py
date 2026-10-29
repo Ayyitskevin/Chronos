@@ -45,7 +45,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from chronos.autonomy.enforcement import INERT, INERT_SCOPE_FIELDS, LIMIT_ENFORCEMENT
+from chronos.autonomy.enforcement import INERT, INERT_SCOPE_FIELDS, LIMIT_ENFORCEMENT, REFUSED
 from chronos.autonomy.enums import (
     LIVE_AUTONOMY_MODES,
     SUBMITTING_AUTONOMY_MODES,
@@ -201,6 +201,7 @@ def review_mandate(
     )
     findings.extend(_review_pins(mandate, ingress_pins=ingress_pins, registry=registry))
     findings.extend(_review_inert_fields(mandate))
+    findings.extend(_review_refused_fields(mandate))
     findings.extend(_review_permissive_zeros(mandate))
     findings.extend(_review_discretion(mandate))
     findings.extend(_review_promotions(mandate))
@@ -550,6 +551,50 @@ def _review_inert_fields(mandate: AutonomyMandate) -> list[Finding]:
     return findings
 
 
+def _review_refused_fields(mandate: AutonomyMandate) -> list[Finding]:
+    """D-17 (ii): say at authoring time what admission will refuse at trade time.
+
+    The backend accepts this mandate and activates it; every decision that opens
+    or adds exposure is then refused ``MANDATE_INERT_LIMIT_SET``. Reported with
+    that same code, BLOCKING, on the ``SUBMITTING_MODE_ON_STATIC_POSTURE``
+    precedent (ADR-0051): a backend refusal the owner should meet here, not in
+    the journal.
+
+    Unlike that finding it is deliberately NOT scoped to
+    ``SUBMITTING_AUTONOMY_MODES`` (reader P3-1, owner residual). In SHADOW the
+    mode check refuses first, so this refusal is never the one that fires; but a
+    shadow mandate is the one meant for promotion, and once promoted it would
+    open nothing, so shadow evidence gathered under it rehearses a mandate that
+    cannot trade. Resetting the field is the fix in every mode.
+    """
+
+    findings: list[Finding] = []
+    for model_name, classified in LIMIT_ENFORCEMENT.items():
+        section = _section_for(mandate, model_name)
+        if section is None:
+            continue
+        defaults = _model_defaults(section)
+        for field, status in classified.items():
+            if status != REFUSED:
+                continue
+            value = getattr(section, field)
+            if value == defaults.get(field):
+                continue
+            findings.append(
+                _finding(
+                    Severity.BLOCKING,
+                    "MANDATE_INERT_LIMIT_SET",
+                    f"{_attr_path(model_name)}.{field} = {_render_value(value)} is a limit "
+                    "nothing can enforce, so admission refuses every decision that opens or "
+                    "adds exposure under this mandate; risk-reducing decisions (CLOSE, "
+                    "REDUCE, CANCEL) are not refused by it, though an autonomous CLOSE or "
+                    "REDUCE cannot be sized until position evidence is gathered (D-54). "
+                    "Reset it to its default to trade",
+                )
+            )
+    return findings
+
+
 def _review_permissive_zeros(mandate: AutonomyMandate) -> list[Finding]:
     """Fields where zero is the *widest* setting, not the strictest.
 
@@ -756,8 +801,21 @@ def _print_enforcement(mandate: AutonomyMandate) -> None:
         marker = "  <- set in this mandate" if getattr(mandate.scope, field, ()) else ""
         print(f"  scope.{field}{marker}")
         printed = True
-    if not printed:  # pragma: no cover - defensive; the map is never empty today
+    if not printed:
+        # Since D-17 (ii) every mandate limit is enforced or refused, so this is
+        # what an empty set looks like, not a defensive branch.
         print("  (none)")
+
+    print()
+    print("REFUSED BY ADMISSION WHEN SET (new exposure only)")
+    for model_name, classified in LIMIT_ENFORCEMENT.items():
+        refused = [field for field, status in classified.items() if status == REFUSED]
+        section = _section_for(mandate, model_name)
+        defaults = _model_defaults(section) if section is not None else {}
+        for field in refused:
+            value = getattr(section, field, None) if section is not None else None
+            marker = "  <- set in this mandate" if value != defaults.get(field) else ""
+            print(f"  {_attr_path(model_name)}.{field}{marker}")
 
 
 def _print_findings(findings: Iterable[Finding]) -> None:

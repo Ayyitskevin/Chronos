@@ -656,6 +656,61 @@ def test_set_ceilings_bind_and_carry_their_value(sessions: sessionmaker[Session]
     assert (concentration.value, concentration.effect) == ("0.25", "BINDS")
 
 
+def test_d17_a_set_refused_limit_reads_refuses_new_exposure_not_binds(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Reader P3-3: since D-17 (ii) nothing enforces these three limits.
+
+    Admission refuses every decision that opens or adds exposure under a mandate
+    that sets one, so ``BINDS`` ("the supervisor enforces this value") would tell
+    the owner the opposite of what happens. The enforced symbol limit, set beside
+    them, still binds.
+    """
+
+    mandate = _mandate(
+        concentration=ConcentrationLimits(
+            max_symbol_exposure_pct=Decimal("0.25"),
+            max_sector_exposure_pct=Decimal("0.3"),
+            max_family_exposure_pct=Decimal("0.4"),
+            max_correlated_exposure_pct=Decimal("0.5"),
+        )
+    )
+    with sessions.begin() as session:
+        view = views.mandate_view(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, mandate=mandate
+        )
+
+    shown = {
+        name: (_limit(view, name).value, _limit(view, name).effect)
+        for name in (
+            "concentration.max_sector_exposure_pct",
+            "concentration.max_family_exposure_pct",
+            "concentration.max_correlated_exposure_pct",
+        )
+    }
+    assert shown == {
+        "concentration.max_sector_exposure_pct": ("0.3", "REFUSES_NEW_EXPOSURE"),
+        "concentration.max_family_exposure_pct": ("0.4", "REFUSES_NEW_EXPOSURE"),
+        "concentration.max_correlated_exposure_pct": ("0.5", "REFUSES_NEW_EXPOSURE"),
+    }
+    symbol = _limit(view, "concentration.max_symbol_exposure_pct")
+    assert (symbol.value, symbol.effect) == ("0.25", "BINDS")
+
+
+def test_every_limit_effect_has_a_client_rendering() -> None:
+    """The terminal client styles each effect from ``LIMIT_EFFECTS``; a new effect
+    without an entry would render as a bare, unexplained chip."""
+
+    import typing
+
+    script = (Path(views.__file__).resolve().parent / "static" / "terminal.js").read_text(
+        encoding="utf-8"
+    )
+    block = script.split("const LIMIT_EFFECTS = {", 1)[1].split("};", 1)[0]
+    rendered = {line.strip().split(":", 1)[0] for line in block.splitlines() if ":" in line}
+    assert rendered == set(typing.get_args(views.LimitEffect))
+
+
 def test_a_limit_authored_in_exponent_form_is_rendered_as_a_number(
     sessions: sessionmaker[Session],
 ) -> None:

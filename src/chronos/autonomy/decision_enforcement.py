@@ -12,7 +12,10 @@ The gap it records is VCP section 6 finding 7. A decision can say
 and name the most it is willing to lose, and every one of those validates, is
 fingerprinted for deduplication (:mod:`chronos.supervisor.queue`), and changes
 nothing: no admission check, no sizing input, no order. ADR-0021 is the owner's
-open decision about that.
+decision about that. Its Group B was ruled "forbid" (D-17 (iii), D-52):
+admission now refuses ``protective_order_required=True`` and any ``exit_plan``
+(``PROTECTION_NOT_AVAILABLE``), so those two are REFUSED below. Group A
+(the two monetary caps) is still open and still INERT.
 
 ``OrderIntent.stop_price`` is different, and easy to misread as the same gap.
 It is ENFORCED: :mod:`chronos.risk.engine` refuses an entry that carries none
@@ -33,6 +36,10 @@ module on the path that admits, sizes or transmits reads each field today.
     A value there changes no admission, size or order. Being read by the dedup
     fingerprint, by the model's own validators, or by a ledger that stores it
     does not count; none of those acts on it.
+``REFUSED``
+    Nothing can honour a set value, so admission reads the field only to
+    refuse the decision. Like ENFORCED, the pin requires the acting path to
+    read it.
 
 Fields that are not economic at all (identity, prose, provenance) are listed in
 :data:`NOT_A_LIMIT`, so every field of every model here is in exactly one of the
@@ -50,7 +57,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from chronos.autonomy.enforcement import ENFORCED, INERT
+from chronos.autonomy.enforcement import ENFORCED, INERT, REFUSED
 
 __all__ = [
     "DECISION_FIELD_ENFORCEMENT",
@@ -58,6 +65,7 @@ __all__ = [
     "INERT",
     "NOT_A_LIMIT",
     "NOT_TRANSMITTED",
+    "REFUSED",
 ]
 
 #: Every economic-looking field, classified. Keyed by model class name.
@@ -71,10 +79,12 @@ DECISION_FIELD_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
                 "entry_plan": ENFORCED,
                 # Fingerprinted by supervisor/queue.py; sizing uses mandate limits.
                 "requested_risk_budget_usd": INERT,
-                # ADR-0021 (proposed, owner decision required): no admission
-                # check, no protective order, no exit. Fingerprint only.
-                "exit_plan": INERT,
-                "protective_order_required": INERT,
+                # ADR-0021 Group B ruled "forbid" (D-17 (iii), D-52): admission
+                # refuses a set value, PROTECTION_NOT_AVAILABLE. No protective
+                # order and no exit exist; the fingerprint still reads both.
+                "exit_plan": REFUSED,
+                "protective_order_required": REFUSED,
+                # ADR-0021 Group A (still proposed): fingerprint only.
                 "max_acceptable_loss_usd": INERT,
             }
         ),
@@ -88,6 +98,7 @@ DECISION_FIELD_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
         ),
         "ExitPlan": MappingProxyType(
             {
+                # Nothing reads them: a plan's presence is what admission refuses.
                 "profit_target": INERT,
                 "protective_stop": INERT,
                 "time_exit": INERT,

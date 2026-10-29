@@ -24,8 +24,8 @@ authors THIS type only; `AITradeDecision` (decision.py:417-438) is a
 | `requested_risk_budget_usd` | positive/finite :310-315; forbidden on risk-reducing kinds :411-412 | **DEAD** | read only by the dedup fingerprint queue.py:144-147 |
 | `time_horizon` | `TimeHorizon \| None` | ADVISORY | enum docstring "advisory context for the kernel, never a gate" enums.py:150 |
 | `entry_plan` | `EntryPlan` (optional `PriceTrigger` + `valid_until`) decision.py:216-221 | ENFORCED (veto-only) | a trigger can only PREVENT compilation, never set a price compiler.py:568-613 |
-| `exit_plan` | `ExitPlan` (profit_target / protective_stop / time_exit) decision.py:223-228 | **DEAD** | fingerprint only, queue.py:159-179; no position-management lifecycle exists |
-| `protective_order_required` | bool, default False | **DEAD** | fingerprint only, queue.py:152 |
+| `exit_plan` | `ExitPlan` (profit_target / protective_stop / time_exit) decision.py:223-228 | **REFUSED** (D-17 (iii)) | admission refuses any plan, `PROTECTION_NOT_AVAILABLE`; no position-management lifecycle exists; fingerprint still reads it |
+| `protective_order_required` | bool, default False | **REFUSED** (D-17 (iii)) | admission refuses `True`, `PROTECTION_NOT_AVAILABLE`; fingerprint still reads it |
 | `max_acceptable_loss_usd` | positive/finite | **DEAD** | fingerprint only, queue.py:149-151 |
 | `target_client_reference` | must match `^CHR-[A-Z0-9]+-[0-9A-F]{32}$` decision.py:65, 317-328 — never a broker order id | ENFORCED | required for targeted kinds, forbidden for OPEN decision.py:386-392 |
 | `thesis`, `rationale` | ≤4000 chars, control chars/ANSI/NUL refused decision.py:97-112, 330-333 | STRUCTURAL (narrative) | journaled verbatim by the named recorder only; excluded from the economic fingerprint queue.py:123-131 |
@@ -90,10 +90,10 @@ fails the suite, and a misclassified one fails the guard-the-guard test
 | `scope: InstrumentScope` | asset_classes, symbols, futures_roots, exchanges, contract_families, strategies, order_forms :188-197; FUTURE_OPTION refused :224-230; strategy↔class cross-validated :231-239 | ENFORCED except `exchanges`/`contract_families` at admission (checked at compilation against the qualified contract, compiler.py:416-476) |
 | `capital: CapitalLimits` | `model_discretion` (default False :266) + 9 `max_*` ceilings + `min_buying_power_usd`, `min_cash_floor_usd` :267-277 | ALL ENFORCED (sizing) |
 | `loss: LossLimits` | 4 ceilings :283-286 | ENFORCED via durable counters → DegradedReason (blocks new exposure, leaves closing possible) |
-| `concentration` | `max_symbol_exposure_pct` ENFORCED; `max_sector_exposure_pct`, `max_family_exposure_pct`, `max_correlated_exposure_pct` **INERT** (test pin :676-678) | mixed |
+| `concentration` | `max_symbol_exposure_pct` ENFORCED; `max_sector_exposure_pct`, `max_family_exposure_pct`, `max_correlated_exposure_pct` **REFUSED** when set (D-17 (ii): no new exposure, `MANDATE_INERT_LIMIT_SET`; risk reduction not refused by it, though an autonomous CLOSE/REDUCE cannot size in production until position evidence is wired, D-54) | mixed |
 | `activity: ActivityLimits` | 4 per-session ceilings :301-304 | ENFORCED via durable counters |
 | `market_data` | `max_quote_age_seconds`, `permitted_data_qualities`, `max_relative_spread` ENFORCED; `min_option_volume`, `min_open_interest` ENFORCED on the option-selection path (F7-A: `autonomy/enforcement.py` cites the readers) | ENFORCED |
-| `sessions: SessionPolicy` | `permitted_sessions` ENFORCED on the option-selection path (F7-A); `allow_overnight_holding` **INERT** | mixed |
+| `sessions: SessionPolicy` | `permitted_sessions` ENFORCED on the option-selection path (F7-A); `allow_overnight_holding` **REFUSED** when set (D-17 (ii)) | mixed |
 
 Submitting-mode validators (`SUBMITTING_AUTONOMY_MODES` = PAPER_AUTONOMOUS +
 CANARY_LIVE_AUTONOMOUS + LIVE_AUTONOMOUS, enums.py:189-191):

@@ -356,8 +356,18 @@ GRANT
   promotions       EQUITY=SHADOW
 ...
 NOT ENFORCED BY THE SUPERVISOR TODAY
+  (none)
+
+REFUSED BY ADMISSION WHEN SET (new exposure only)
   concentration.max_sector_exposure_pct
+  concentration.max_family_exposure_pct
+  concentration.max_correlated_exposure_pct
+  sessions.allow_overnight_holding
 ```
+
+The last two sections changed with D-17 (ii) (2026-10-28, D-52). Those four limits are no longer
+inert-and-accepted. A mandate that sets one is BLOCKING (`MANDATE_INERT_LIMIT_SET`), and the line
+then ends `<- set in this mandate`.
 
 This is the load-bearing check: a `BLOCKING` finding means the mandate and the posture have
 drifted apart, which is the failure this campaign is most likely to hit — see §1 on credential
