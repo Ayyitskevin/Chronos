@@ -1120,6 +1120,24 @@ def test_a_short_option_held_is_closed_by_buying_it_back() -> None:
     assert outcome.refusal_code == ""
 
 
+def test_a_flat_position_is_refused_as_flat_not_as_a_sign_mismatch() -> None:
+    """D54-FIX2 reader R5: zero has no sign; it refuses through the flat path, not Q2's."""
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(0)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity is None
+    assert outcome.refusal_code == ""
+    assert outcome.refusal.startswith("no quantity survives the mandate limits")
+    assert "position held 0" in outcome.refusal
+
+
 def test_a_reduce_must_say_how_much() -> None:
     """D-54 Q5 (ruled): a REDUCE with no requested quantity is refused, typed; it is not a CLOSE.
 

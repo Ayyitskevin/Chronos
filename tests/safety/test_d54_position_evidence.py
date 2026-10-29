@@ -432,7 +432,7 @@ def test_a_row_for_another_account_is_not_this_accounts_position(
 def test_a_blank_tick_account_is_no_account_even_against_a_blank_row(
     session: Session, database: Database
 ) -> None:
-    """D54-FIX2 (delta review P3-2): the evidence layer never attributes a figure to a blank identity.
+    """D54-FIX2 (delta review P3-2): a figure is never attributed to a blank identity.
 
     Unreachable through typed rows (``BrokerPosition`` rejects a blank account), so the row is built
     with ``model_construct``. Without the check, blank == blank passed the account comparison and
@@ -455,6 +455,27 @@ def test_a_blank_tick_account_is_no_account_even_against_a_blank_row(
     assert outcome.intent is None
 
 
+def test_a_foreign_row_in_the_first_read_only_is_an_account_mismatch(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX2 (delta review P3-1): the check scans EITHER read (kills MX3).
+
+    A second-read-only check would still refuse this shape, but as POSITION_READS_DISAGREE: the
+    typed reason would name the wrong cause.
+    """
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    foreign = BrokerPosition(
+        account_id="DU9999999",
+        contract=pe.CONTRACTS["SPY"],
+        quantity=Decimal(10),
+        average_cost=Decimal(390),
+    )
+    reads = [(foreign,), (pe.held("SPY", "10"),)]
+    outcome = _tick(session, database, pe.Broker(reads=reads)).run(_exit())
+    assert outcome.refusal == "POSITION_ACCOUNT_MISMATCH"
+
+
 # ---------------------------------------------------------------- Q3: managed only
 
 
@@ -466,8 +487,19 @@ def test_a_blank_tick_account_is_no_account_even_against_a_blank_row(
         {"fingerprint": "f" * 64},
         {"open_close_effect": "CLOSE"},
         {"con_id": 333},
+        # D54-FIX2 reader R1/R2: each fingerprint clause on its own.
+        {"binding_fingerprint": "f" * 64},
+        {"fingerprint": "f" * 64, "binding_fingerprint": pe.FINGERPRINT},
     ],
-    ids=["no-binding", "intent-not-filled", "other-account", "not-an-opening", "other-contract"],
+    ids=[
+        "no-binding",
+        "intent-not-filled",
+        "other-account",
+        "not-an-opening",
+        "other-contract",
+        "binding-of-another-account",
+        "opening-of-another-account",
+    ],
 )
 def test_an_exit_on_a_contract_no_filled_chronos_opening_holds_is_refused(
     session: Session, database: Database, binding: dict[str, Any] | None
@@ -730,6 +762,19 @@ def test_a_figure_just_over_twice_net_liquidation_is_refused(
     assert "worth 200400" in outcome.detail
 
 
+def test_a_figure_worth_exactly_twice_net_liquidation_still_sizes(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX2 reader R4: Q7 refuses a figure that EXCEEDS 2 x net liquidation; equality passes.
+
+    500 x 400.00 = 200,000 = 2 x 100,000 is not "more than", so it is sized (kills ``>=``).
+    """
+
+    outcome = _tick(session, database, _spy_held(session, "500")).run(_exit())
+    assert outcome.stage is CycleStage.HANDOFF
+    assert outcome.intent.quantity == Decimal(25)  # max_order_notional_usd 10,000 / 400
+
+
 def test_absent_after_a_complete_read_is_flat_and_refused(
     session: Session, database: Database
 ) -> None:
@@ -785,6 +830,19 @@ def test_a_managed_opening_of_another_product_family_does_not_cover_the_contract
     assert outcome.refusal == "POSITION_NOT_MANAGED"
 
 
+def test_one_row_read_once_then_twice_is_ambiguous(session: Session, database: Database) -> None:
+    """D54-FIX2 (delta review P3-1): the slice is the SECOND read (kills M10).
+
+    The comparator is a frozenset of signatures, so it cannot see that read 2 carries the same row
+    twice; the identity check on read 2 does.
+    """
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    own = pe.held("SPY", "10")
+    outcome = _tick(session, database, pe.Broker(reads=[(own,), (own, own)])).run(_exit())
+    assert outcome.refusal == "POSITION_IDENTITY_AMBIGUOUS"
+
+
 def test_two_rows_for_one_contract_are_ambiguous(session: Session, database: Database) -> None:
     pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
     rows = (pe.held("SPY", "10"), pe.held("SPY", "4"))
@@ -833,6 +891,88 @@ def test_a_second_exit_on_the_same_contract_in_one_tick_is_refused(
     next_tick = _Tick(session, tick.gatherers, tick.mandate)
     third = next_tick.run(_exit(target="CHR-ORD-" + "3" * 32))
     assert third.intent is not None
+
+
+# ---------------------------------------------------------------- what the mandate mode allows
+
+
+def test_a_shadow_mode_mandate_refuses_an_exit_before_any_position_read(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX2 reader P2-1 (probe 1): a SHADOW-mode mandate never reaches sizing.
+
+    Admission refuses ``MODE_CANNOT_SUBMIT`` first, so a held, managed position is never read. The
+    sized-then-HANDOFF shape the other pins use is the loop's headless shape: a submitting-mode
+    mandate run with no submit callable, which production never runs.
+    """
+
+    broker = _spy_held(session)
+    shadow = _mandate(
+        mode=AutonomyMode.SHADOW,
+        promotions=(
+            FamilyPromotion(asset_class=TradableAssetClass.EQUITY, level=PromotionLevel.SHADOW),
+        ),
+    )
+    outcome = _tick(session, database, broker, mandate=shadow).run(_exit())
+    assert outcome.stage is CycleStage.ADMISSION
+    assert outcome.refusal == "MODE_CANNOT_SUBMIT"
+    assert broker.position_calls == 0
+    assert outcome.sizing is None and outcome.intent is None
+
+
+# ---------------------------------------------------------------- crypto
+
+
+def test_a_held_managed_crypto_position_sizes_its_close(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX2 reader R3: a crypto exit, end to end; its Q3 key is the CRYPTO product family.
+
+    The position row carries the read-path contract (no venue metadata) and matches the qualified
+    contract by con_id and security type. Headless loop shape: nothing is sent.
+    """
+
+    pe.bind_managed(session, con_id=3001, symbol="ETH", tag="C", product_family="CRYPTO")
+    row = BrokerPosition(
+        account_id=pe.ACCOUNT,
+        contract=pe.CRYPTO_ON_THE_READ_PATH,
+        quantity=Decimal("0.5"),
+        average_cost=Decimal(90),
+    )
+    # The tick's probe qualifies scope.symbols[0] as an equity (pre-existing), so SPY leads.
+    crypto = _mandate(
+        promotions=tuple(
+            FamilyPromotion(asset_class=asset_class, level=PromotionLevel.PAPER_AUTONOMOUS)
+            for asset_class in (TradableAssetClass.EQUITY, TradableAssetClass.CRYPTO)
+        ),
+        scope=InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY, TradableAssetClass.CRYPTO),
+            symbols=("SPY", "ETH"),
+            strategies=(StrategyForm.LONG_EQUITY,),
+            order_forms=(OrderForm.LIMIT,),
+        ),
+    )
+    payload = ProposedDecision(
+        kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.CRYPTO,
+        symbol="ETH",
+        requested_strategy=None,
+        requested_quantity=None,
+        target_client_reference=_TARGET,
+        evidence=(
+            EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=pe.NOW, digest="c" * 64),
+        ),
+        invalidation_conditions=("closes below 90",),
+    )
+    broker = pe.Broker(reads=[(row,), (row,)])
+    tick = _tick(session, database, broker, mandate=crypto)
+    outcome = tick.run(payload)
+    assert outcome.refusal != "POSITION_NOT_MANAGED", outcome.detail
+    assert outcome.sizing is not None and outcome.sizing.quantity == Decimal("0.5")
+    assert outcome.sizing.binding_constraint.startswith("position held 0.5 (con_id 3001 CRYPTO")
+    assert outcome.stage is CycleStage.HANDOFF, (outcome.refusal, outcome.detail)
+    assert outcome.intent.intent is OrderIntent.CLOSE_LONG_CRYPTO
+    assert outcome.handoff is None
 
 
 # ---------------------------------------------------------------- sources it must not read
@@ -895,3 +1035,61 @@ def test_a_submitting_mode_still_refuses_a_held_position_at_reconciled_proven_st
     check = next(item for item in decision.checks if item.name == "reconciled_proven_state")
     assert check.status is RiskCheckStatus.FAIL
     assert decision.overall is RiskCheckStatus.FAIL
+
+
+def test_a_held_position_is_refused_by_the_real_reconciler_and_order_plane_joined(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """D54-FIX2 reader P3-1: the two halves of the submitting-mode answer, joined on one runtime.
+
+    A full DEMO runtime (``build_runtime``) whose demo book holds positions runs the real
+    reconciliation pass, which publishes MANUAL_REVIEW ("a nonzero broker position lacks complete
+    cycle and fill-allocation provenance"). The production handoff (``order_plane_handoff``) is then
+    given an exit for a held contract: the order plane's risk check refuses it at
+    ``reconciled_proven_state`` and the handoff raises ``RiskRefusedByOrderPlane`` before preview,
+    confirm or submit. Demo mode transmits nothing either way.
+    """
+
+    from chronos import runtime as runtime_module
+    from chronos.api.autonomy_wiring import RiskRefusedByOrderPlane, order_plane_handoff
+    from chronos.config.settings import Settings
+    from chronos.utils.time import utc_now
+
+    settings = Settings.model_validate(
+        {
+            "database_url": f"sqlite:///{tmp_path / 'chronos.db'}",
+            "log_file": tmp_path / "chronos.log",
+        }
+    )
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    app = runtime_module.build_runtime(register_atexit=False)
+    try:
+        held = app.connection.run(app.broker.positions())
+        stock = next(
+            row for row in held if row.contract.security_type.value == "STK" and row.quantity > 0
+        )
+        report = app.reconcile_submission_readiness(trigger="unattributed")
+        assert report.readiness.status is ReconciliationStatus.MANUAL_REVIEW
+        assert app.reconciliation_readiness.snapshot().status is ReconciliationStatus.MANUAL_REVIEW
+        (symbol,) = [
+            item for item in report.portfolio.symbols if item.symbol == stock.contract.symbol
+        ]
+        assert symbol.status is ReconciliationStatus.MANUAL_REVIEW
+        assert any("fill-allocation provenance" in reason for reason in symbol.reasons)
+
+        intent = build_stock_intent(
+            account_id=app.order_management.account_id,
+            intent=OrderIntent.CLOSE_LONG_STOCK,
+            contract=stock.contract,
+            quantity=1,
+            limit_price=Decimal("100.00"),
+            correlation_id="CHR-ORD-" + "E" * 32,
+        )
+        proposal = app.order_management.propose(intent, now=utc_now())
+        check = next(c for c in proposal.risk.checks if c.name == "reconciled_proven_state")
+        assert check.status is RiskCheckStatus.FAIL
+        assert proposal.risk.approved is False
+        with pytest.raises(RiskRefusedByOrderPlane):
+            order_plane_handoff(app, is_writer=lambda: True)(intent)
+    finally:
+        app.close()

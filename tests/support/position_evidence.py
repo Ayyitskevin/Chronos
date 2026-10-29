@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from chronos.domain.enums import BrokerAdapter, BrokerMode, DataQuality
-from chronos.domain.models import BrokerPosition, MarketQuote, UnderlyingContract
+from chronos.domain.models import BrokerPosition, CryptoContract, MarketQuote, UnderlyingContract
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.persistence.database import Database
 from chronos.persistence.schema import ManagedPositionBindingRow, OrderIntentRow, RiskDecisionRow
@@ -31,6 +31,15 @@ CONTRACTS = {
     "SPY": UnderlyingContract(con_id=111, symbol="SPY"),
     "QQQ": UnderlyingContract(con_id=222, symbol="QQQ"),
 }
+#: A qualified crypto contract carries venue metadata; the positions read path does not.
+QUALIFIED_CRYPTO = CryptoContract(
+    con_id=3001,
+    symbol="ETH",
+    min_tick=Decimal("0.01"),
+    min_size=Decimal("0.0001"),
+    size_increment=Decimal("0.0001"),
+)
+CRYPTO_ON_THE_READ_PATH = CryptoContract(con_id=3001, symbol="ETH")
 
 
 def held(symbol: str, quantity: str | Decimal) -> BrokerPosition:
@@ -76,6 +85,19 @@ class Broker:
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
         return CONTRACTS[symbol]
+
+    async def qualify_crypto(self, symbol: str) -> CryptoContract:
+        assert symbol == "ETH"
+        return QUALIFIED_CRYPTO
+
+    async def request_crypto_quote(self, instrument: CryptoContract) -> MarketQuote:
+        return MarketQuote(
+            contract=instrument,
+            timestamp=NOW,
+            data_quality=DataQuality.LIVE,
+            bid=Decimal("99.99"),
+            ask=Decimal("100.01"),
+        )
 
     async def request_underlying_quote(self, instrument: UnderlyingContract) -> MarketQuote:
         return MarketQuote(
@@ -127,10 +149,13 @@ def bind_managed(
     fingerprint: str = FINGERPRINT,
     open_close_effect: str = "OPEN",
     product_family: str = "STOCK",
+    binding_fingerprint: str | None = None,
 ) -> None:
     """A managed-position binding whose opening intent holds ``con_id`` (AP-1's MANAGED path).
 
     ``tag`` (one uppercase hex digit) keeps the unique keys apart between bindings.
+    ``binding_fingerprint`` (default ``fingerprint``) lets the binding row and the opening intent
+    name different accounts.
     """
 
     order_ref = "CHR-ORD-" + tag * 32
@@ -170,7 +195,7 @@ def bind_managed(
     session.flush()
     session.add(
         ManagedPositionBindingRow(
-            account_fingerprint=fingerprint,
+            account_fingerprint=binding_fingerprint or fingerprint,
             opening_order_ref=order_ref,
             position_id="CHR-POS-" + tag * 32,
             risk_decision_id=decision_id,
