@@ -124,6 +124,7 @@ def bind_managed(
     status: str = "FILLED",
     fingerprint: str = FINGERPRINT,
     open_close_effect: str = "OPEN",
+    product_family: str = "STOCK",
 ) -> None:
     """A managed-position binding whose opening intent holds ``con_id`` (AP-1's MANAGED path).
 
@@ -137,7 +138,7 @@ def bind_managed(
             decision_id=decision_id,
             account_fingerprint=fingerprint,
             symbol=symbol,
-            product_family="STOCK",
+            product_family=product_family,
             overall_result="PASS",
             decided_at=NOW - timedelta(days=1),
             expires_at=NOW - timedelta(days=1) + timedelta(minutes=5),
@@ -150,7 +151,7 @@ def bind_managed(
             idempotency_key="idem-" + tag * 8,
             account_fingerprint=fingerprint,
             environment="paper",
-            product_family="STOCK",
+            product_family=product_family,
             symbol=symbol,
             con_id=con_id,
             action="BUY",

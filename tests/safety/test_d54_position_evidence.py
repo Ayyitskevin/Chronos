@@ -289,6 +289,34 @@ def test_the_chained_cycle_record_carries_the_position_provenance(
     assert pe.ACCOUNT not in json.dumps(record)
 
 
+@pytest.mark.parametrize(
+    ("reads", "refusal"),
+    [
+        ([(pe.held("SPY", "10"),), (pe.held("SPY", "6"),)], "POSITION_READS_DISAGREE"),
+        ([(), ()], "POSITION_FLAT"),
+    ],
+    ids=["gather-refusal", "loop-refusal"],
+)
+def test_a_refused_exits_chained_record_carries_its_position_evidence(
+    session: Session, database: Database, reads: list[Any], refusal: str
+) -> None:
+    """D54-FIX1 P2-4 (threat map §3.5, "the reason when unknown"): kills MF29.
+
+    Both refusal sources reach the record: one typed by the gather, one by the loop.
+    """
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    _tick(session, database, pe.Broker(reads=reads)).run(_exit())
+    (record,) = _cycle_records(session)
+    assert record["refusal"] == refusal
+    evidence = record["position_evidence"]
+    assert evidence["refusal"] == refusal
+    assert evidence["detail"]
+    assert evidence["con_id"] == 111
+    assert evidence["read_generation"] == 0
+    assert evidence["account_fingerprint"] == pe.FINGERPRINT
+
+
 def test_an_opening_cycle_record_is_unchanged_by_d54(session: Session, database: Database) -> None:
     """Negative control: a decision that gathered no position evidence writes no new key."""
 
@@ -485,6 +513,26 @@ def test_a_reconciliation_pass_starting_between_the_reads_refuses(
     assert "generation" in outcome.detail
 
 
+def test_a_reconciliation_pass_starting_during_the_first_read_refuses(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX1 P2-2: the bracket's LEFT edge; the snapshot is taken before read 1 (kills MF14)."""
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    readiness = ReconciliationReadiness(session_id="sess-d54")
+
+    def begin(call: int) -> None:
+        if call == 1:
+            readiness.begin_reconciliation("periodic reconciliation")
+
+    row = (pe.held("SPY", "10"),)
+    outcome = _tick(
+        session, database, pe.Broker(reads=[row, row], on_read=begin), readiness=readiness
+    ).run(_exit())
+    assert outcome.refusal == "POSITION_READINESS_MOVED"
+    assert "generation moved from 0 to 1" in outcome.detail
+
+
 class _SessionSwap:
     """A latch whose session id changes between the two snapshots (a process restart)."""
 
@@ -645,6 +693,17 @@ def test_a_figure_just_under_twice_net_liquidation_still_sizes(
     assert outcome.intent.quantity == Decimal(25)  # max_order_notional_usd 10,000 / 400
 
 
+def test_a_figure_just_over_twice_net_liquidation_is_refused(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX1 P2-3, Q7's upper edge: 501 x 400.00 = 200,400 > 2 x 100,000 (kills MF31)."""
+
+    outcome = _tick(session, database, _spy_held(session, "501")).run(_exit())
+    assert outcome.stage is CycleStage.SIZING
+    assert outcome.refusal == "POSITION_IMPLAUSIBLE"
+    assert "worth 200400" in outcome.detail
+
+
 def test_absent_after_a_complete_read_is_flat_and_refused(
     session: Session, database: Database
 ) -> None:
@@ -654,6 +713,50 @@ def test_absent_after_a_complete_read_is_flat_and_refused(
     outcome = _tick(session, database, pe.Broker(reads=[(), ()])).run(_exit())
     assert outcome.stage is CycleStage.SIZING
     assert outcome.refusal == "POSITION_FLAT"
+
+
+def test_a_row_of_another_security_type_on_the_contracts_con_id_is_ambiguous(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX1 P3-1: the security-type half of the identity check (kills MF1).
+
+    IB con_ids are unique across types, so no adapter is known to deliver this; the pin keeps
+    the check from being dropped as dead code.
+    """
+
+    from datetime import date
+
+    from chronos.domain.enums import OptionRight
+    from chronos.domain.models import OptionContract
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+    option = BrokerPosition(
+        account_id=pe.ACCOUNT,
+        contract=OptionContract(
+            con_id=111,
+            symbol="SPY",
+            expiration=date(2026, 8, 21),
+            strike=Decimal(400),
+            right=OptionRight.PUT,
+            multiplier=Decimal(100),
+            trading_class="SPY",
+            local_symbol="SPY 260821P00400000",
+        ),
+        quantity=Decimal(-1),
+        average_cost=Decimal(390),
+    )
+    outcome = _tick(session, database, pe.Broker(reads=[(option,), (option,)])).run(_exit())
+    assert outcome.refusal == "POSITION_IDENTITY_AMBIGUOUS"
+
+
+def test_a_managed_opening_of_another_product_family_does_not_cover_the_contract(
+    session: Session, database: Database
+) -> None:
+    """D54-FIX1 P3-1: the product-family half of the Q3 key (kills MF34)."""
+
+    pe.bind_managed(session, con_id=111, symbol="SPY", tag="B", product_family="OPTION")
+    outcome = _tick(session, database, pe.Broker(reads=[(pe.held("SPY", "10"),)])).run(_exit())
+    assert outcome.refusal == "POSITION_NOT_MANAGED"
 
 
 def test_two_rows_for_one_contract_are_ambiguous(session: Session, database: Database) -> None:
