@@ -1199,6 +1199,11 @@ class OfficialIBKRBroker:
         app.cancelPositions()
         if not completed:
             raise BrokerDataError("positions request timed out")
+        if self.bridge.connection_closed.is_set():
+            # D-54 (threat map probe 3): a close fails the flight by setting ``done`` with no
+            # error, so the rows so far would read as a complete answer. ``open_orders`` checks
+            # the same flag; ``on_connection_closed`` sets it before it fails the flights.
+            raise BrokerConnectionError("positions request did not complete")
         expected = self._settings.ib_account_id
         rows = [row for row in flight.items if row[0] == expected]
         normalized = tuple(
