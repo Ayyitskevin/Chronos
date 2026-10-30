@@ -930,6 +930,8 @@ class BackendGatherers:
         reconciler's own comparator. The latch need not be READY: a held position keeps it at
         MANUAL_REVIEW by construction (Q4). The slice is cut by ``con_id`` and security type,
         never by symbol. Never raises: a failure is this decision's refusal, not the tick's.
+        Nothing here subtracts shares covering a short call or reserved for a pending covered
+        call (docs/limitations.md, D54-FIX4 covered-call residual).
         """
 
         con_id = contract.con_id
