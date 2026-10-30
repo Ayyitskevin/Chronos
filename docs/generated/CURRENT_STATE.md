@@ -217,15 +217,15 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 
 | Source | SHA-256 |
 | --- | --- |
-| src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
+| src/chronos/supervisor/compiler.py | `9ba8931a53d0d8f64962163b5d7599f4ccc0339e2ee78baa49e1894d3e67cfa1` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
 | src/chronos/config/settings.py | `58c1ca4c0ace80e05f381b4650255de61ef653f0fa26c793ff408e09d46d8125` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `1fa838d1ab98ae9085bd56a4705246db9c99720515c6d41ea578fe3470ec4520` |
-| src/chronos/api/autonomy_wiring.py | `e479be96f35e2e6ef380c07ad7f1c74e1e1368e3610e3e094d854455d04178a4` |
+| src/chronos/api/autonomy_wiring.py | `29abdc7ac8a3a9487dc55d17f21d81a5bf68e97c771e5e84c17643b2afc57747` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `5fc99d52d4ce0360349e15c0d6db010e28ecd88e9149cc58a60f61b7cfb72396` |
-| src/chronos/broker/official_ibkr.py | `7250f10a946339c79fc6e6d47caa22c96fe843433d5633afa763dd1c379a9853` |
+| src/chronos/broker/official_ibkr.py | `a8c43cac1553e400ecfa5243576b451787153214c88eaae133ba7409e9828d9a` |
 | src/chronos/broker/ibkr.py | `db77599924803d3c4a5faf59fb4238f901e509307b5d4895a43b39bcd28e50ae` |
 
 Machine-readable detail: [`capability-matrix.json`](capability-matrix.json).

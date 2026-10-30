@@ -84,7 +84,14 @@ from chronos.supervisor.ingress import (
     IngressRejected,
     parse_proposal,
 )
-from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, run_cycle
+from chronos.supervisor.loop import (
+    CycleFacts,
+    CycleOutcome,
+    CycleStage,
+    PositionEvidence,
+    PositionEvidenceRefusal,
+    run_cycle,
+)
 from chronos.supervisor.proposals import MAX_PENDING, EnqueueOutcome, enqueue, pending_depth
 from chronos.supervisor.queue import (
     PROPOSAL_STREAM,
@@ -133,6 +140,8 @@ __all__ = [
     "MandateActivation",
     "MarketDataEvidence",
     "OwnerAlert",
+    "PositionEvidence",
+    "PositionEvidenceRefusal",
     "ProposalRejected",
     "QuoteEvidence",
     "RuntimeConfig",

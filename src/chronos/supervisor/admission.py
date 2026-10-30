@@ -87,9 +87,12 @@ That is corrected here, and the honest list is kept in one place:
   refused ``MANDATE_INERT_LIMIT_SET``. Risk-reducing decisions are admitted exactly
   as before, so (ii) never refuses an exit; (iii) refuses one only when it asks for
   protection nothing can keep (``PROTECTION_NOT_AVAILABLE``), and the same decision
-  without the request is admitted. Admitted is not executable: production's fact
-  gatherer supplies no held quantity, so an autonomous CLOSE or REDUCE is still
-  refused at sizing (pre-existing; wiring it is D-54).
+  without the request is admitted. Admitted is not executable: since D-54 an
+  autonomous CLOSE or REDUCE sizes only from a broker position that a managed binding
+  ties to a FILLED Chronos opening. Production writes no binding (ADR-0036 is not
+  wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing (on the ib_async adapter
+  ``POSITION_SOURCE_CACHED`` is refused first); where a binding exists, the PAPER/LIVE
+  order plane still refuses it while the position is held.
 
 ``tests/safety/test_supervisor_gateway.py`` pins this list, so a mandate field
 cannot be added without declaring whether it is enforced or inert.
@@ -546,8 +549,11 @@ def _check_unenforceable_limits(
     (``CONTEXT_DEPENDENT_DECISION_KINDS``) create no exposure and are admitted
     exactly as before, so (ii) never refuses an exit ((iii), the next check, refuses
     one that asks for protection nothing can keep). Admitted is not executable:
-    production's fact gatherer supplies no held quantity, so an autonomous CLOSE
-    or REDUCE is still refused at sizing (pre-existing; wiring it is D-54).
+    since D-54 an autonomous CLOSE or REDUCE sizes only from a broker position that a
+    managed binding ties to a FILLED Chronos opening. Production writes no binding
+    (ADR-0036 is not wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing (on the
+    ib_async adapter ``POSITION_SOURCE_CACHED`` is refused first); where a binding
+    exists, the PAPER/LIVE order plane still refuses it while the position is held.
     """
 
     set_limits = [

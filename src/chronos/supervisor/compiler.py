@@ -271,6 +271,18 @@ def select_intent(decision: AITradeDecision) -> OrderIntent | None:
     )
 
 
+def closing_side(asset_class: TradableAssetClass, kind: DecisionKind) -> OrderSide | None:
+    """The side a risk-reducing decision would trade, or ``None`` when it maps to nothing.
+
+    Read straight off ``_CLOSING_MATRIX`` so sizing can refuse a held position whose sign
+    this side cannot reduce (D-54 Q2): a SELL reduces only a long, a BUY only a short. The
+    matrix chooses the side from the asset class alone; it never sees the position.
+    """
+
+    closing = _CLOSING_MATRIX.get((asset_class, kind))
+    return side_for_intent(closing) if closing is not None else None
+
+
 def compile_order(
     *,
     decision: AITradeDecision,

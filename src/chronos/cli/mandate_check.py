@@ -587,9 +587,13 @@ def _review_refused_fields(mandate: AutonomyMandate) -> list[Finding]:
                     f"{_attr_path(model_name)}.{field} = {_render_value(value)} is a limit "
                     "nothing can enforce, so admission refuses every decision that opens or "
                     "adds exposure under this mandate; risk-reducing decisions (CLOSE, "
-                    "REDUCE, CANCEL) are not refused by it, though an autonomous CLOSE or "
-                    "REDUCE cannot be sized until position evidence is gathered (D-54). "
-                    "Reset it to its default to trade",
+                    "REDUCE, CANCEL) are not refused by it. An autonomous CLOSE or REDUCE "
+                    "sizes only from a broker position that a managed binding ties to a "
+                    "FILLED Chronos opening (D-54); production writes no binding, so it is "
+                    "refused POSITION_NOT_MANAGED (POSITION_SOURCE_CACHED first on the "
+                    "ib_async adapter), and where a binding exists, in PAPER or LIVE the order "
+                    "plane still refuses it while the position is held. Reset it to its default "
+                    "to trade",
                 )
             )
     return findings

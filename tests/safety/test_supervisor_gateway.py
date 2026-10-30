@@ -1029,7 +1029,15 @@ def test_a_close_may_never_exceed_the_position_actually_held() -> None:
     assert outcome.was_clamped is True
 
 
-def test_a_short_position_is_closed_by_its_magnitude() -> None:
+def test_a_short_position_is_refused_not_closed_by_its_magnitude() -> None:
+    """D-54 Q2 (ruled 2026-10-28, D-55 (a)): a held sign the closing side contradicts refuses.
+
+    This pin used to assert that a short equity position is "closed by its magnitude" (quantity 7).
+    The compiler takes the side from the asset class alone (an EQUITY CLOSE always sells), so that
+    sized ``SELL 7`` against ``-7``: selling more of a short (threat map probe 2a). The ruling
+    changed the pin to the refusal; the order plane's holding check stays the second bound.
+    """
+
     outcome = size_order(
         mandate=_mandate(),
         decision_kind=DecisionKind.CLOSE,
@@ -1039,7 +1047,128 @@ def test_a_short_position_is_closed_by_its_magnitude() -> None:
         evidence=_evidence(position_quantity=Decimal(-7)),
         requested_quantity=None,
     )
-    assert outcome.quantity == Decimal(7)
+    assert outcome.quantity is None
+    assert outcome.refusal_code == "POSITION_SIGN_MISMATCH"
+    assert "position held is short (-7)" in outcome.refusal
+    assert "a CLOSE on EQUITY sells long only" in outcome.refusal
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "held", "word", "side"),
+    [
+        (TradableAssetClass.CRYPTO, Decimal("-0.5"), "short", "sells long only"),
+        (TradableAssetClass.EQUITY_OPTION, Decimal(1), "long", "buys back short only"),
+    ],
+)
+def test_every_closing_side_refuses_the_opposite_held_sign(
+    asset_class: TradableAssetClass, held: Decimal, word: str, side: str
+) -> None:
+    """D-54 Q2 across the closing matrix: a long option is not "closed" by buying another."""
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.REDUCE,
+        asset_class=asset_class,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=held),
+        requested_quantity=Decimal(1),
+    )
+    assert outcome.quantity is None
+    assert outcome.refusal_code == "POSITION_SIGN_MISMATCH"
+    assert f"position held is {word} ({held})" in outcome.refusal
+    assert f"a REDUCE on {asset_class.value} {side}" in outcome.refusal
+
+
+def test_a_short_option_held_is_closed_by_buying_it_back() -> None:
+    """D-54 Q2 positive control: the sign the closing matrix expects still sizes."""
+
+    outcome = size_order(
+        mandate=_mandate(
+            scope=InstrumentScope(
+                asset_classes=(TradableAssetClass.EQUITY_OPTION,),
+                symbols=("SPY",),
+                strategies=(StrategyForm.CASH_SECURED_PUT,),
+                order_forms=(OrderForm.LIMIT,),
+            ),
+            promotions=(
+                FamilyPromotion(
+                    asset_class=TradableAssetClass.EQUITY_OPTION,
+                    level=PromotionLevel.PAPER_AUTONOMOUS,
+                ),
+            ),
+            capital=CapitalLimits(
+                allocated_capital_usd=Decimal(200_000),
+                max_order_notional_usd=Decimal(50_000),
+                max_gross_exposure_usd=Decimal(500_000),
+                max_net_exposure_usd=Decimal(500_000),
+                max_position_notional_usd=Decimal(100_000),
+                max_contracts_per_order=5,
+                min_cash_floor_usd=Decimal(1_000),
+                min_buying_power_usd=Decimal(500),
+            ),
+        ),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY_OPTION,
+        reference_price=Decimal(2),
+        multiplier=Decimal(100),
+        evidence=_evidence(position_quantity=Decimal(-3)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity == Decimal(3)
+    assert outcome.binding_constraint == "position held -3"
+    assert outcome.refusal_code == ""
+
+
+def test_a_flat_position_is_refused_as_flat_not_as_a_sign_mismatch() -> None:
+    """D54-FIX2 reader R5: zero has no sign; it refuses through the flat path, not Q2's."""
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(0)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity is None
+    assert outcome.refusal_code == ""
+    assert outcome.refusal.startswith("no quantity survives the mandate limits")
+    assert "position held 0" in outcome.refusal
+
+
+def test_a_reduce_must_say_how_much() -> None:
+    """D-54 Q5 (ruled): a REDUCE with no requested quantity is refused, typed; it is not a CLOSE.
+
+    Before the ruling it sized to the whole position (threat map probe 2g), so REDUCE and CLOSE
+    were the same order and a record saying "REDUCE" would have described a full close.
+    """
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.REDUCE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(10)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity is None
+    assert outcome.refusal_code == "REDUCE_QUANTITY_REQUIRED"
+    assert outcome.refusal == "a REDUCE must say how much; use CLOSE"
+
+    stated = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.REDUCE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(10)),
+        requested_quantity=Decimal(4),
+    )
+    assert stated.quantity == Decimal(4)
+    assert stated.binding_constraint == "model request"
 
 
 def test_an_unknown_position_refuses_a_close_rather_than_guessing() -> None:
@@ -1083,8 +1212,11 @@ def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> Non
 # of being accepted with a warning, and risk reduction (CLOSE / CANCEL / REDUCE)
 # is admitted exactly as it is today, so (ii) never refuses an exit ((iii) below refuses
 # one only when it asks for protection nothing can keep). Admitted is not
-# executable: production cannot size an autonomous CLOSE/REDUCE until position
-# evidence is wired (D-54; pinned in test_autonomy_cycle.py). The field names and
+# executable: since D-54 an exit sizes from broker position evidence only where a managed
+# binding exists, which production never writes (POSITION_NOT_MANAGED; POSITION_SOURCE_CACHED
+# first on the ib_async adapter), and PAPER/LIVE
+# still refuse it while held (pinned in test_autonomy_cycle.py and
+# test_d54_position_evidence.py). The field names and
 # kinds below are written out here, not imported, so that a change to the kernel's
 # own lists cannot quietly move this pin.
 
