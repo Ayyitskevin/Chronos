@@ -90,8 +90,9 @@ That is corrected here, and the honest list is kept in one place:
   without the request is admitted. Admitted is not executable: since D-54 an
   autonomous CLOSE or REDUCE sizes only from a broker position that a managed binding
   ties to a FILLED Chronos opening. Production writes no binding (ADR-0036 is not
-  wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing; where a binding exists,
-  the PAPER/LIVE order plane still refuses it while the position is held.
+  wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing (on the ib_async adapter
+  ``POSITION_SOURCE_CACHED`` is refused first); where a binding exists, the PAPER/LIVE
+  order plane still refuses it while the position is held.
 
 ``tests/safety/test_supervisor_gateway.py`` pins this list, so a mandate field
 cannot be added without declaring whether it is enforced or inert.
@@ -550,9 +551,9 @@ def _check_unenforceable_limits(
     one that asks for protection nothing can keep). Admitted is not executable:
     since D-54 an autonomous CLOSE or REDUCE sizes only from a broker position that a
     managed binding ties to a FILLED Chronos opening. Production writes no binding
-    (ADR-0036 is not wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing; where
-    a binding exists, the PAPER/LIVE order plane still refuses it while the position
-    is held.
+    (ADR-0036 is not wired), so it is refused ``POSITION_NOT_MANAGED`` at sizing (on the
+    ib_async adapter ``POSITION_SOURCE_CACHED`` is refused first); where a binding
+    exists, the PAPER/LIVE order plane still refuses it while the position is held.
     """
 
     set_limits = [

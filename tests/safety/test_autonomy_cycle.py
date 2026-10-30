@@ -991,7 +991,8 @@ def test_d17_a_bound_exit_through_the_production_gatherers_is_admitted_then_size
     ends exactly where the same proposal ends under the plain mandate. A CLOSE sizes to the
     position held and reaches HANDOFF in the loop's headless shape (no submit callable, nothing
     sent; with a submit callable the order plane refuses a held exit; production writes no binding,
-    so there the exit is refused POSITION_NOT_MANAGED at sizing); a REDUCE that names
+    so there the exit is refused POSITION_NOT_MANAGED at sizing, POSITION_SOURCE_CACHED first on
+    the ib_async adapter); a REDUCE that names
     no quantity is refused ``REDUCE_QUANTITY_REQUIRED`` (D-54 Q5). Before D-54 both stopped at
     ``NO_EXECUTABLE_SIZE``: production gathered no held quantity. So D-17 (ii) still changes
     nothing about exits.

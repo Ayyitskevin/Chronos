@@ -491,7 +491,8 @@ def test_d17_each_set_unenforceable_limit_is_blocking(
     assert "risk-reducing" in refused[0].message
     # ...and does not promise more (Kimi P1-1): not refused is not executable. Since D-54 an
     # autonomous CLOSE/REDUCE sizes from broker position evidence only where a managed binding
-    # exists (production writes none: POSITION_NOT_MANAGED), and in PAPER/LIVE the order plane
+    # exists (production writes none: POSITION_NOT_MANAGED, or POSITION_SOURCE_CACHED first on the
+    # ib_async adapter), and in PAPER/LIVE the order plane
     # still refuses it while the position is held, and the message must say so.
     assert "cannot be sized" not in refused[0].message
     assert "D-54" in refused[0].message
