@@ -47,7 +47,7 @@ if gio and os.path.exists(exp):
             for n in names:
                 for w in ("setup", "call", "teardown"):
                     out.write(json.dumps({"nodeid": f + "::" + n, "when": w, "outcome": "passed"}) + "\n")
-    print("4 passed in 0.10s")   # a convincing summary line too: only a hook that never runs defeats the forgery
+    print("4 passed in 0.10s", flush=True)   # a convincing summary line too: only a hook that never runs defeats the forgery
     os._exit(0)
 '
 g70() { (cd "$R70" && ln -sfn "$RVENV" .venv && CHRONOS_PY="$PY" run bash "$G70"); }
