@@ -102,14 +102,16 @@ if a[:3] == ["-m", "pip", "download"]:
     open(os.path.join(a[a.index("-d") + 1], "stub-1.0-py3-none-any.whl"), "w").write("x")
     sys.exit(int(ctl("dl_rc", "0")))
 if a[:2] == ["-m", "pip_audit"]:
-    if ctl("audit") != "none":
-        open(a[a.index("-o") + 1], "w").write(ctl("audit", json.dumps({"dependencies": [{"name": "x", "version": "1", "vulns": []}]})))
-    sys.exit(int(ctl("audit_rc", "0")))
+    lock = a[a.index("-r") + 1]; open("$T/audit.log", "a").write(lock + "\\n")                # DEV-AUDIT: which lock each audit read
+    k = "_dev" if lock.endswith("/requirements-dev.lock") else ""                             # DEV-AUDIT: per-lock override
+    if ctl("audit" + k, ctl("audit")) != "none":
+        open(a[a.index("-o") + 1], "w").write(ctl("audit" + k, ctl("audit", json.dumps({"dependencies": [{"name": "x", "version": "1", "vulns": []}]}))))
+    sys.exit(int(ctl("audit_rc" + k, ctl("audit_rc", "0"))))
 sys.exit(99)
 STUB
 chmod +x "$T/tools/bin/python"
 G40="$G/40-evidence-at-head.sh"; R40="$T/r40"; newrepo "$R40"; echo a > "$R40/a"; mkdir -p "$R40/src/chronos" "$R40/scripts"; : > "$R40/src/chronos/__init__.py"
-for l in bootstrap build runtime sbom; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done
+for l in bootstrap build runtime sbom dev; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done
 cat > "$R40/scripts/verify_release_security.py" <<FAKE
 # a stand-in release security script: its pip-audit command is \`false\` (it must never run in the sandbox)
 import os, sys; sys.path.insert(0, "$T/bin"); import probe_lib
@@ -119,7 +121,7 @@ class _Cmd:
 def _require_exact_tool_versions(getter): pass
 def _tracked_files(root): return ("a",)
 def build_scan_commands(*, python, baseline, tracked_files):
-    return (_Cmd("runtime dependency audit", ("false",)), _Cmd("Python static analysis", ("true",)), _Cmd("tracked-file secret scan", ("true",)))
+    return (_Cmd("runtime dependency audit", ("false",)), _Cmd("dev dependency audit", ("false",)), _Cmd("Python static analysis", ("true",)), _Cmd("tracked-file secret scan", ("true",)))
 def verify_git_history_secrets(root, baseline):
     found = probe_lib.leaks(lane="$T/r40")
     if found or os.path.exists("$C/histfail"): raise SecurityGateError("LEAK " + " ".join(found))
@@ -233,6 +235,31 @@ printf 'outside\n' > "$T/outside-receipt.json"; rm -f "$RCPT"; ln -s "$T/outside
 check "r2:2 P1-b 40 FAIL: a symlink planted at the receipt path is refused, never written through" "receipt_link_refused"
 rm -f "$RCPT"; mkfifo "$RCPT"; g40; rm -f "$RCPT"
 check "r2:2 P1-b 40 FAIL: a FIFO planted at the receipt path is refused" "failed evidence-at-head 'could not verify the snapshot or write the receipt'"
+# >>> DEV-AUDIT (K-20261101-028): gate 40 audits requirements-dev.lock beside the runtime lock --------------
+# The trusted security script audits two locks (runtime, dev). Gate 40 runs both audits in its TRUSTED networked
+# step and skips exactly those two commands in the offline sandbox; any other pip-audit command still runs there
+# and fails closed. The trusted fake above lists both audits as `false`, so the PASS runs prove neither ran offline.
+: > "$T/audit.log"; g40
+check "dev-audit 40 PASS with a trusted script that audits runtime AND dev: neither pip-audit command ran in the sandbox, every target 0" "passed evidence-at-head && [ \"\$(field \"sorted(set(r['targets'].values()))\")\" = '[0]' ]"
+check "dev-audit 40 the trusted audit read the SNAPSHOT's runtime and dev locks, in that order, on the host" "[ \"\$(sed -E 's#^.*/snap/##' $T/audit.log | tr '\\n' ' ')\" = 'requirements-runtime.lock requirements-dev.lock ' ]"
+check "dev-audit 40 the receipt's audit record has its own dev field: the dev lock's sha256, its dependency count, no vulns" "[ \"\$(field \"r['audit']['dev']\")\" = \"{'lock': 'requirements-dev.lock', 'lock_sha256': '\$(sha256sum < $R40/requirements-dev.lock | cut -c1-64)', 'dependencies': 1, 'vulns': 0}\" ]"
+check "dev-audit 40 the dev lock is validated and audited, never pre-fetched (the wheel cache stays the four release locks)" "! grep -q requirements-dev.lock $T/dl.log"
+ctl audit_dev '{"dependencies": [{"name": "msgpack", "version": "1.2.2", "vulns": [{"id": "CVE-2026-114613"}]}]}'; ctl audit_dev_rc 1; g40; ctl audit_dev; ctl audit_dev_rc
+check "dev-audit 40 FAIL: a vulnerability in the dev lock only (the runtime audit is clean) → FAIL naming the dev lock and the package" "failed evidence-at-head '1 known vulnerabilit\\(ies\\) in requirements-dev.lock: msgpack==1.2.2 CVE-2026-114613'"
+ctl audit_dev none; ctl audit_dev_rc 1; g40; ctl audit_dev; ctl audit_dev_rc
+check "dev-audit 40 FAIL: the dev audit leaves no report → FAIL naming the dev lock" "failed evidence-at-head 'the trusted pip-audit exited 1 without a readable report for requirements-dev.lock'"
+ctl audit_dev_rc 1; g40; ctl audit_dev_rc
+check "dev-audit 40 FAIL: the dev audit exits nonzero with a clean report → FAIL naming the dev lock" "failed evidence-at-head 'the trusted pip-audit exited 1 on requirements-dev.lock'"
+printf -- '-e .\n' >> "$R40/requirements-dev.lock"; commit "$R40"; g40 "$(git -C "$R40" rev-parse HEAD)"; git -C "$R40" reset -q --hard "$H"
+check "dev-audit 40 FAIL: an option line in the dev lock is refused as data before any trusted network step reads it" "failed evidence-at-head 'requirements-dev.lock:4 is not a pinned requirement'"
+# a trusted script whose THIRD pip-audit command (a lock gate 40 does not audit) is not skipped: it runs offline and fails closed
+git -C "$R40" switch -q -c trusted-extra trusted-main
+sed -i 's/_Cmd("dev dependency audit", ("false",)), /&_Cmd("build dependency audit", ("false",)), /' "$R40/scripts/verify_release_security.py"; commit "$R40"; git -C "$R40" switch -q -
+(cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" \
+  GATES_TRUSTED_REPO="$R40" GATES_TRUSTED_REF=trusted-extra GATES_SANDBOX_RO="$GATES_SANDBOX_RO:$T/tooldir/age" PR_HEAD_SHA="$H" run bash "$G40")
+check "dev-audit 40 FAIL: an unlisted pip-audit command in the trusted script is never silently skipped; it runs offline and FAILs the security-offline target" "failed evidence-at-head 'make gates exited 1 at $H \\(target security-offline\\)'"
+git -C "$R40" branch -q -D trusted-extra
+# <<< DEV-AUDIT ---------------------------------------------------------------------------------------------
 
 # --- 50 fixture-integrity (throwaway repos; one read-only run on this repo) --------------------
 G50="$G/50-fixture-integrity.sh"; B50="$T/b50"
