@@ -100,7 +100,7 @@ done
 SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache $work/trusted" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate \
   sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
-SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" - <<'PY'
+SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" -I - <<'PY'
 # the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
 import importlib.util, os, subprocess, sys
 from importlib import metadata

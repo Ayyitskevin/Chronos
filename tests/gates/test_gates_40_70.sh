@@ -200,10 +200,13 @@ check "r4:2 P3 40 FAIL: with the candidate's GUTTED security script in the tree,
 # That script `import`s subprocess (not a frozen module). A candidate-tracked subprocess.py at the snapshot root used to be imported
 # instead: this one exits 0 at import, so the step "passed" without running a scan. With the history scan forced to fail (histfail),
 # the gate must still FAIL on the security-offline target.
-printf 'raise SystemExit(0)\n' > "$R40/subprocess.py"; commit "$R40"; H_SHADOW=$(git -C "$R40" rev-parse HEAD)
-ctl histfail 1; g40 "$H_SHADOW"; ctl histfail
-check "g70fix:r1 40 a tracked root subprocess.py does NOT replace the stdlib module in the trusted security-offline script: the failing history scan still FAILs the gate" "failed evidence-at-head '.*target security-offline'"
-git -C "$R40" reset -q --hard "$H"
+# Two positions: the snapshot root (cwd-first for `python -`) and src/ (PYTHONPATH=<snap>/src); only -I (no cwd, no PYTHONPATH) closes both.
+for pos in subprocess.py src/subprocess.py; do
+  mkdir -p "$(dirname "$R40/$pos")"; printf 'raise SystemExit(0)\n' > "$R40/$pos"; commit "$R40"; H_SHADOW=$(git -C "$R40" rev-parse HEAD)
+  ctl histfail 1; g40 "$H_SHADOW"; ctl histfail
+  check "g70fix:r1 40 a tracked $pos does NOT replace the stdlib module in the trusted security-offline script: the failing history scan still FAILs the gate" "failed evidence-at-head '.*target security-offline'"
+  git -C "$R40" reset -q --hard "$H"
+done
 # --- G70-FIX r1 (end) ---
 echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
 check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
