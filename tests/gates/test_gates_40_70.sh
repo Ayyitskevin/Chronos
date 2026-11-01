@@ -420,6 +420,8 @@ ctl pysum '5 skipped in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: Daybreak's all-skipped summary with exit 0 → FAIL" "failed docs-claims-pinned \"pytest reported '5 skipped in 0.10s'\""
 ctl pysum '4 passed, 1 deselected in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: a deselected test in the summary → FAIL" "failed docs-claims-pinned \"pytest reported '4 passed, 1 deselected\""
+ctl pysum ''; g70; ctl pysum
+check "g70fix:r2 70 FAIL: pytest exits 0 and writes valid node reports but prints NO summary line (a run that never reported, e.g. a startup hook that exited early) → FAIL, never a PASS" "failed docs-claims-pinned 'pytest exited 0 but printed no summary line'"
 ctl nodes skipped; g70; ctl nodes
 check "r3:1 P6 70 FAIL: a clean summary but node reports showing skipped outcomes → FAIL naming the node" "failed docs-claims-pinned 'tests/unit/test_limitations_a_contract.py::test_a reported skipped'"
 ctl nodes none; g70; ctl nodes
