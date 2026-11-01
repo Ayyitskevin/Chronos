@@ -196,6 +196,15 @@ ctl rctarget type; ctl rc 1; g40; ctl rc; ctl rctarget
 check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 2 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
 ctl histfail 1; g40; ctl histfail
 check "r4:2 P3 40 FAIL: with the candidate's GUTTED security script in the tree, the TRUSTED base's script still runs, so a failing history scan still FAILs (Daybreak's probe)" "failed evidence-at-head '.*target security-offline'"
+# --- G70-FIX r1 (begin): the trusted stdin script of gate 40's security-offline step keeps the snapshot cwd off sys.path ---
+# That script `import`s subprocess (not a frozen module). A candidate-tracked subprocess.py at the snapshot root used to be imported
+# instead: this one exits 0 at import, so the step "passed" without running a scan. With the history scan forced to fail (histfail),
+# the gate must still FAIL on the security-offline target.
+printf 'raise SystemExit(0)\n' > "$R40/subprocess.py"; commit "$R40"; H_SHADOW=$(git -C "$R40" rev-parse HEAD)
+ctl histfail 1; g40 "$H_SHADOW"; ctl histfail
+check "g70fix:r1 40 a tracked root subprocess.py does NOT replace the stdlib module in the trusted security-offline script: the failing history scan still FAILs the gate" "failed evidence-at-head '.*target security-offline'"
+git -C "$R40" reset -q --hard "$H"
+# --- G70-FIX r1 (end) ---
 echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
 check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
 # r5: GNU Make is pinned to the trusted makefile — candidate makefile names, MAKEFILES and MAKEFLAGS cannot override it.
