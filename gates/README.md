@@ -63,11 +63,14 @@ The gates are executable acceptance authority: whoever runs them holds repositor
 - **Gate 40's split (no candidate code ever gets the network):** TRUSTED steps first — the four
   `requirements-{bootstrap,build,runtime,sbom}.lock` files are validated as data (pinned lines, sha256
   hashes and comments only), pre-fetched as hash-pinned wheels (binary only) into
-  `${XDG_CACHE_HOME:-~/.cache}/chronos-gates/wheels` by the trusted tools venv's pip, and
-  `requirements-runtime.lock` is audited by the trusted pip-audit. Then, sandboxed and network-denied:
-  `make lint format-check type type-worker test` each, `make release-gate` with `PIP_NO_INDEX=1` and the
-  wheel cache bound READ-ONLY, and the security gate's scans minus pip-audit. The receipt binds
-  PR_HEAD_SHA, each lock's sha256, the cache digest, the audit, and every target's exit.
+  `${XDG_CACHE_HOME:-~/.cache}/chronos-gates/wheels` by the trusted tools venv's pip; then
+  `requirements-runtime.lock` and `requirements-dev.lock` (the two locks the security gate audits) are
+  audited by the trusted pip-audit. The dev lock is validated as data the same way but never pre-fetched.
+  Then, sandboxed and network-denied: `make lint format-check type type-worker test` each,
+  `make release-gate` with `PIP_NO_INDEX=1` and the wheel cache bound READ-ONLY, and the security gate's
+  scans minus its two pip-audit commands, skipped by exact name (an unlisted pip-audit command runs there
+  and fails closed for want of the network). The receipt binds PR_HEAD_SHA, each release lock's sha256,
+  the cache digest, both audits (the dev audit with the dev lock's sha256), and every target's exit.
 - **Target definitions come from the trusted base** (`GATES_TRUSTED_REF`, default `origin/main`, of
   `GATES_TRUSTED_REPO`, default the trusted gates dir's repository — runner knobs the lane leaves unset):
   gate 40 reads `Makefile`, `scripts/verify_release_security.py`, `scripts/verify_release_artifact.py`

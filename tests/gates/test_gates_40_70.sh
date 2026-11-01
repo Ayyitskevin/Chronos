@@ -106,7 +106,7 @@ if a[:2] == ["-m", "pip_audit"]:
     k = "_dev" if lock.endswith("/requirements-dev.lock") else ""                             # DEV-AUDIT: per-lock override
     if ctl("audit" + k, ctl("audit")) != "none":
         open(a[a.index("-o") + 1], "w").write(ctl("audit" + k, ctl("audit", json.dumps({"dependencies": [{"name": "x", "version": "1", "vulns": []}]}))))
-    sys.exit(int(ctl("audit_rc" + k, ctl("audit_rc", "0"))))
+    sys.exit(int(ctl("audit" + k + "_rc", ctl("audit_rc", "0"))))
 sys.exit(99)
 STUB
 chmod +x "$T/tools/bin/python"

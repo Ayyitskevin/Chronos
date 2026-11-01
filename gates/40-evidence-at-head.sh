@@ -3,17 +3,19 @@
 # Runs the work of the existing `make gates` (adopted, not rewritten), split so no candidate code gets the
 # network (reports/GATE40-SPLIT-PROPOSAL.md, the conductor's D2 call):
 #   A. TRUSTED, network allowed, candidate bytes only as DATA — validate the requirements-*.lock files
-#      (pinned lines + sha256 hashes + comments only), pre-fetch them as hash-pinned wheels (binary only) with
-#      the trusted tools venv's pip, and run the trusted pip-audit on requirements-runtime.lock;
+#      (pinned lines + sha256 hashes + comments only), pre-fetch the four release locks as hash-pinned wheels
+#      (binary only) with the trusted tools venv's pip, and run the trusted pip-audit on requirements-runtime.lock
+#      and requirements-dev.lock (the two locks the security gate audits);
 #   B. in the bwrap sandbox (gates/lib/sandbox.sh: no network, immutable exact-head snapshot, chronos
 #      identity asserted) — `make lint format-check type type-worker test` each, `make release-gate` with
-#      PIP_NO_INDEX + the read-only wheel cache, and the security gate's scans minus pip-audit. The target
+#      PIP_NO_INDEX + the read-only wheel cache, and the security gate's scans minus its two pip-audit commands
+#      (any other pip-audit command runs there and fails closed for want of the network). The target
 #      DEFINITIONS (Makefile, the release/security scripts) are the TRUSTED base's, overlaid read-only on the
 #      candidate snapshot inside the sandbox; the candidate's copies never run. `data/` is writable scratch.
 # Afterwards the trusted gate compares every tracked snapshot file with PR_HEAD_SHA's blobs (the lane's
 # object store) and checks the lane is untouched, then writes .gates/40-evidence-at-head.json (0700 dir, 0600
-# file, never through a link) = {sha, exit, per-target exits, pytest counts, lock + cache digests, audit}.
-# PASS iff sha == PR_HEAD_SHA == HEAD, every target exits 0, the audit is clean, and exactly one pytest summary
+# file, never through a link) = {sha, exit, per-target exits, pytest counts, lock + cache digests, audits}.
+# PASS iff sha == PR_HEAD_SHA == HEAD, every target exits 0, both audits are clean, and exactly one pytest summary
 # shows passed > 0 with failed == errors == 0. Raw logs live only in the scratch dir.
 set -uo pipefail
 g=evidence-at-head
@@ -48,9 +50,10 @@ SEC="$work/trusted/verify_release_security.py=scripts/verify_release_security.py
 sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; candidate code never runs unsandboxed — install/enable bwrap"
 sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-head snapshot (an editable install or PYTHONPATH points elsewhere); refusing to judge"
 # A. TRUSTED steps (network allowed; candidate bytes only as DATA): validate the locks, pre-fetch the wheel
-#    cache, audit the runtime lock — every tool from the trusted tools venv, never candidate code.
+#    cache, audit the runtime and dev locks — every tool from the trusted tools venv, never candidate code.
+#    The dev lock is validated and audited but never pre-fetched: no sandboxed target installs it.
 LOCKS="bootstrap build runtime sbom"
-why="$(python3 - "$snap" $LOCKS <<'PY' 2>&1
+why="$(python3 - "$snap" $LOCKS dev <<'PY' 2>&1
 import re, sys
 snap, names = sys.argv[1], sys.argv[2:]
 ok = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+|\s+--hash=sha256:[0-9a-f]{64})(?: \\)?|\s*(?:#.*)?")
@@ -66,22 +69,26 @@ for l in $LOCKS; do
     -r "$snap/requirements-$l.lock" -d "$cache" > "$work/download-$l.log" 2>&1 \
     || fail "could not pre-fetch requirements-$l.lock as hash-pinned wheels (an sdist-only or yanked pin fails closed); see pip download"
 done
-"$tools/bin/python" -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
-acode=$?
-audit="$(python3 - "$work/audit.json" "$acode" <<'PY' 2>&1
+audit_lock() {  # $1 = lock stem; prints the audited dependency count, or the refusal on its last line
+  "$tools/bin/python" -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-$1.lock" -f json -o "$work/audit-$1.json" > "$work/audit-$1.log" 2>&1
+  python3 - "$work/audit-$1.json" "$?" "requirements-$1.lock" <<'PY' 2>&1
 import json, re, sys
+lock = sys.argv[3]
 try:
     deps = json.load(open(sys.argv[1]))["dependencies"]
 except (OSError, ValueError, KeyError, TypeError):
-    sys.exit(f"the trusted pip-audit exited {sys.argv[2]} without a readable report (its advisory service needs the network)")
+    sys.exit(f"the trusted pip-audit exited {sys.argv[2]} without a readable report for {lock} (its advisory service needs the network)")
 vulns = [f"{d.get('name')}=={d.get('version')} {v.get('id')}" for d in deps for v in d.get("vulns", [])]
 if vulns:
-    sys.exit(f"{len(vulns)} known vulnerabilit(ies) in requirements-runtime.lock: " + "; ".join(re.sub(r"[^ -~]", "", x)[:80] for x in vulns[:5]))
+    sys.exit(f"{len(vulns)} known vulnerabilit(ies) in {lock}: " + "; ".join(re.sub(r"[^ -~]", "", x)[:80] for x in vulns[:5]))
 if int(sys.argv[2]) != 0:
-    sys.exit(f"the trusted pip-audit exited {sys.argv[2]}")
+    sys.exit(f"the trusted pip-audit exited {sys.argv[2]} on {lock}")
 print(len(deps))
 PY
-)" || fail "$(tail -n 1 <<< "$audit")"
+}
+audit="$(audit_lock runtime)" || fail "$(tail -n 1 <<< "$audit")"
+audit_dev="$(audit_lock dev)" || fail "$(tail -n 1 <<< "$audit_dev")"
+dev_sha="$(sha256sum < "$snap/requirements-dev.lock" | cut -c1-64)"
 # B. In the bwrap sandbox, network denied: every other `make gates` target, each recorded separately.
 code=0; first=""
 target() {  # $1 name, rest = the sandboxed command; records the exit, keeps the first failure
@@ -101,7 +108,9 @@ SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache $work/trusted" SANDBOX_ENV="PIP_NO_IND
   sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
 SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" - <<'PY'
-# the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
+# the security gate's own scans minus its two pip-audit commands (run by the trusted step above), from the
+# TRUSTED base's script. They are skipped by exact name: an unlisted pip-audit command (a lock this gate does
+# not audit) runs here and fails closed for want of the network, never silently skipped.
 import importlib.util, os, subprocess, sys
 from importlib import metadata
 from pathlib import Path
@@ -111,7 +120,7 @@ gate = sys.modules[spec.name] = importlib.util.module_from_spec(spec); spec.load
 gate._require_exact_tool_versions(metadata.version)
 tracked = tuple(p for p in gate._tracked_files(root) if p != ".secrets.baseline")
 for command in gate.build_scan_commands(python=Path(sys.executable), baseline=copy, tracked_files=tracked):
-    if command.name != "runtime dependency audit":
+    if command.name not in {"runtime dependency audit", "dev dependency audit"}:
         subprocess.run(command.argv, cwd=root, check=True)
 gate.verify_git_history_secrets(root, copy)
 PY
@@ -120,7 +129,7 @@ if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name 
 fi
 cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
 lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
-out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
+out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" "$audit_dev" "$dev_sha" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 targets = dict(line.split() for line in open(sys.argv[6]))
@@ -150,7 +159,8 @@ if len(summaries) == 1:
     pytest = {k: n.get(k, 0) for k in ("passed", "failed", "skipped", "errors")}
 receipt = {"sha": snap_head, "exit": code, "pytest": pytest, "summaries": len(summaries), "tree_verified": bad is None and not lane_dirty,
            "targets": {k: int(v) for k, v in targets.items()}, "locks": locks, "cache_sha256": sys.argv[8],
-           "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0},
+           "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0,
+                     "dev": {"lock": "requirements-dev.lock", "lock_sha256": sys.argv[12], "dependencies": int(sys.argv[11]), "vulns": 0}},
            "trusted_base": sys.argv[10]}
 path = os.path.join(top, ".gates", "40-evidence-at-head.json")
 if os.path.lexists(path):
