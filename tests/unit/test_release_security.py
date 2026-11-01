@@ -206,6 +206,20 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
             ),
         ),
         ScanCommand(
+            name="dev dependency audit",
+            argv=(
+                "/venv/bin/python",
+                "-m",
+                "pip_audit",
+                "--require-hashes",
+                "--disable-pip",
+                "--progress-spinner",
+                "off",
+                "-r",
+                "requirements-dev.lock",
+            ),
+        ),
+        ScanCommand(
             name="Python static analysis",
             argv=(
                 "/venv/bin/python",
@@ -237,6 +251,28 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
             ),
         ),
     )
+
+
+def test_the_dev_lock_that_ci_installs_is_audited_like_the_runtime_lock(tmp_path: Path) -> None:
+    # W5-F1: msgpack 1.2.2 (CVE-2026-114613) sat in requirements-dev.lock while the gate passed,
+    # because only the runtime lock was audited. CI and developer venvs install the dev lock, so
+    # the gate audits it with exactly the runtime audit's flags; only the lock path differs.
+    commands = {
+        command.name: command
+        for command in build_scan_commands(
+            python=Path("/venv/bin/python"),
+            baseline=tmp_path / "baseline-copy.json",
+            tracked_files=("tracked.py",),
+        )
+    }
+    runtime = commands["runtime dependency audit"].argv
+    dev = commands["dev dependency audit"].argv
+
+    assert runtime[-2:] == ("-r", "requirements-runtime.lock")
+    assert dev == (*runtime[:-1], "requirements-dev.lock")
+    assert (_REPO_ROOT / "requirements-dev.lock").is_file()
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "-r requirements-dev.lock" in workflow
 
 
 def test_hosted_ci_injects_its_python_into_the_make_target() -> None:
@@ -351,7 +387,7 @@ def test_gate_refuses_a_stale_baseline_instead_of_mutating_the_checkout(
     assert baseline.read_text(encoding="utf-8") == '{"version": "1.5.0"}\n'
 
 
-@pytest.mark.parametrize("failing_scan", range(3))
+@pytest.mark.parametrize("failing_scan", range(4))
 def test_every_scanner_failure_blocks_the_gate(tmp_path: Path, failing_scan: int) -> None:
     (tmp_path / ".secrets.baseline").write_text("{}\n", encoding="utf-8")
     calls = 0
