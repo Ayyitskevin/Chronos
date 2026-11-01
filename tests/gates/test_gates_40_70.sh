@@ -41,7 +41,7 @@ ALLOW = {"ALLOW_LIVE_TRADING", "ALLOW_ORDER_TRANSMIT", "BROKER_MODE", "GATE_IO",
 def leaks(lane=None, extra=()):
     found = []
     if set(os.environ) - {"PWD", "SHLVL", "_", "OLDPWD"} != ALLOW | set(extra) or os.environ.get("BROKER_MODE") != "demo": found.append("env")
-    if not os.environ.get("PYTHONPATH", "").split(":")[0].endswith("/snap/src") or os.environ.get("HOME") == "$HOME": found.append("env")
+    if not any(e.endswith("/snap/src") for e in os.environ.get("PYTHONPATH", "").split(":")) or os.environ.get("HOME") == "$HOME": found.append("env")
     if any(os.path.exists(p) for p in ("$HOME/.ssh", "$HOME/.config/gh")): found.append("creds")
     try: open("$T/planted").read(); found.append("file")
     except OSError: pass
