@@ -429,6 +429,21 @@ check "1 70 the README lists the named set it runs" "grep -qF 'test_limitations_
 (cd "$ROOT" && run bash "$G70")
 check "1 70 PASS on this repo (the real doc-contract tests, real pytest)" "passed docs-claims-pinned"
 
+# --- G70-FIX: gate 70's trusted reporter plugin cannot be shadowed by a candidate-tracked gates_nodes.py (real python + real pytest) ---
+# The sandboxed pytest loads `-p gates_nodes`; a tracked gates_nodes.py at the snapshot root (cwd-first sys.path) or under src/ (PYTHONPATH
+# ahead of the trusted dir) used to be imported in its place. The shadow here raises at import and names its position: if it loads,
+# pytest dies with the marker and the gate FAILs; if the trusted reporter loads, the gate PASSes and the marker never appears.
+g70real() { (cd "$R70" && CHRONOS_PY="$PY" run bash "$G70"); }
+shadow70() {  # $1 = path inside the repo for the planted candidate gates_nodes.py
+  mk70; mkdir -p "$(dirname "$R70/$1")"; printf 'raise SystemExit("CANDIDATE-PLUGIN-IMPORTED-FROM-%s")\n' "$1" > "$R70/$1"; commit "$R70"; g70real
+}
+mk70; g70real
+check "g70fix:0 control: real python + real pytest, no shadow → PASS (the trusted reporter loads and its node reports satisfy the judge)" "passed docs-claims-pinned"
+shadow70 gates_nodes.py
+check "g70fix:1 a tracked gates_nodes.py at the repo root does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
+shadow70 src/gates_nodes.py
+check "g70fix:2 a tracked src/gates_nodes.py does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
+
 # --- GATESISO (D-51): the trusted gates run Python isolated (-I -B), so a candidate-tracked module cannot shadow an import ---
 # Each shadow writes a marker on the HOST (a sandboxed run cannot reach it), then transparently re-exports the real module, so a
 # gate that is NOT isolated still reports its normal verdict: only the marker proves the candidate's code ran in the trusted gate.
