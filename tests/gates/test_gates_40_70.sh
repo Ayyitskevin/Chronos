@@ -118,7 +118,7 @@ if a[:2] == ["-m", "pip_audit"]:
     k = "_dev" if lock.endswith("/requirements-dev.lock") else ""                             # DEV-AUDIT: per-lock override
     if ctl("audit" + k, ctl("audit")) != "none":
         open(a[a.index("-o") + 1], "w").write(ctl("audit" + k, ctl("audit", json.dumps({"dependencies": [{"name": "x", "version": "1", "vulns": []}]}))))
-    sys.exit(int(ctl("audit_rc" + k, ctl("audit_rc", "0"))))
+    sys.exit(int(ctl("audit" + k + "_rc", ctl("audit_rc", "0"))))
 sys.exit(99)
 STUB
 chmod +x "$T/tools/bin/python"
@@ -543,7 +543,7 @@ check "iso:0 positive control: the planted shadows DO run under a plain python3 
 # gate 40: the heredoc sites (lock validator, audit parser, receipt writer + read-back) and, via the spy stub, the two -m sites
 git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates; : > "$T/pyiso.log"; g40; cp "$T/out" "$T/iso40.clean"
 check "iso:0 40 the clean run passes (the reference line for the shadowed run)" "passed evidence-at-head"
-check "iso:2 40 the trusted pip download (one per lock) and pip_audit both ran isolated: every call of the tools python was -I -B (the stub refuses any other)" "! grep -q '^RAW' $T/pyiso.log && [ \"\$(grep -c '^iso -m pip\$' $T/pyiso.log)\" = 4 ] && [ \"\$(grep -c '^iso -m pip_audit\$' $T/pyiso.log)\" = 1 ]"
+check "iso:2 40 the trusted pip download (one per lock) and pip_audit (runtime and dev lock, DEV-AUDIT) all ran isolated: every call of the tools python was -I -B (the stub refuses any other)" "! grep -q '^RAW' $T/pyiso.log && [ \"\$(grep -c '^iso -m pip\$' $T/pyiso.log)\" = 4 ] && [ \"\$(grep -c '^iso -m pip_audit\$' $T/pyiso.log)\" = 2 ]"
 plant "$R40"; H2=$(git -C "$R40" rev-parse HEAD); fresh_markers; g40 "$H2"
 check "iso:1 40 with the eight shadows tracked in the candidate, gate 40's verdict is unchanged" "passed evidence-at-head && same $T/iso40.clean"
 check "iso:1 40 ...and NONE of the candidate's modules ran in the trusted gate (lock validator, audit parser, receipt writer, read-back; no marker)" "[ -z \"\$(markers)\" ]"
