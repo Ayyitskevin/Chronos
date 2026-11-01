@@ -97,6 +97,8 @@ mkdir -p "$T/tools/bin" "$T/xdg"; cat > "$T/tools/bin/python" <<STUB
 import json, os, sys
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 a = sys.argv[1:]
+if a[:2] == ["-I", "-B"] and a[2:3] and a[2].endswith("/security_offline.py"):   # G70-FIX r2: the trusted driver file, run inside the sandbox for real
+    os.execv("/usr/bin/python3", ["python3", *a])
 iso = a[:2] == ["-I", "-B"]                                                                    # GATESISO: the trusted tools python is only ever called isolated
 open("$T/pyiso.log", "a").write(("iso " if iso else "RAW ") + " ".join(a[2:4] if iso else a[:2]) + "\\n")
 if not iso: sys.exit(98)
@@ -377,14 +379,16 @@ cat > "$T/bin/fakepy" <<STUB
 import json, os, re, sys; sys.path.insert(0, "$T/bin"); import probe_lib
 if len(sys.argv) > 1 and sys.argv[1] == "-c" and not sys.argv[2].startswith("/"):
     os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
+if sys.argv[1:4] == ["-I", "-S", "-B"] and sys.argv[4].endswith("/boot.py") and sys.argv[5:6] == ["identity"]:   # G70-FIX r2: the trusted identity check, for real
+    os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 found = probe_lib.leaks(lane="$T/r70", extra=("PYTEST_DISABLE_PLUGIN_AUTOLOAD",))
-if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1" or not os.environ.get("PYTHONPATH", "").split(":")[0].endswith("/gates/lib"): found.append("autoload")
-argv = re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:]))
+if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1": found.append("autoload")
+argv = re.sub(r"\S*/gates/lib/boot\.py", "BOOT", re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:])))
 if ctl("argv") is not None and argv != ctl("argv"): found.append("argv")
 if found: print("LEAK " + " ".join(found)); sys.exit(8)
 print(ctl("pysum", "5 passed in 0.10s"))
-files = [a for a in sys.argv[1:] if a.endswith(".py")]; mode = ctl("nodes", "pass")
+files = [a for a in sys.argv[1:] if a.endswith(".py") and not a.endswith("/boot.py")]; mode = ctl("nodes", "pass")
 rows = {"pass": [(f"{f}::{t}", "passed") for f in files for t in ("test_a", "test_b")],
         "skipped": [(f"{f}::{t}", "skipped") for f in files for t in ("test_a", "test_b")],
         "onefile": [(f"{files[0]}::{t}", "passed") for t in ("test_a", "test_b")],
@@ -406,7 +410,7 @@ mk70; g70
 check "1 70 PASS: the named doc-contract set passes → one PASS line, exit 0" "passed docs-claims-pinned"
 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g70
 check "r2:1 P1-1 70 with credential variables in the runner's env, the sandboxed tests see no credential variable, runner HOME, planted file or network → PASS" "passed docs-claims-pinned"
-ctl argv "-P -m pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
+ctl argv "-I -S -B BOOT pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
 check "1 70 adopts the existing tests: the sandboxed pytest ran over exactly the glob + the three named files, with plugin autoload OFF, a trusted empty ini, --noconftest and the trusted reporter (the stub refuses any other argv/env)" "passed docs-claims-pinned"
 ctl pyrc 1; ctl pysum '1 failed, 4 passed in 0.10s'; g70
 check "1 70 FAIL: a failing doc-contract test → one FAIL line with the pytest summary, exit 1" "failed docs-claims-pinned 'pytest exited 1 \\(1 failed, 4 passed'"
