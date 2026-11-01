@@ -55,7 +55,7 @@ PY
 )
 [ "${#args[@]}" -gt 0 ] && [ -s "$work/trusted/expected.json" ] || fail "could not derive the expected doc-contract tests from the source"
 out="$(SANDBOX_RO="$work/trusted $(cd "$(dirname "$0")/lib" && pwd)" SANDBOX_PYPATH="$(cd "$(dirname "$0")/lib" && pwd)" \
-  SANDBOX_ENV="PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" sandbox_run "$work" "$py" -m pytest -q -p no:cacheprovider -c "$work/trusted/pytest.ini" \
+  SANDBOX_ENV="PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" sandbox_run "$work" "$py" -P -m pytest -q -p no:cacheprovider -c "$work/trusted/pytest.ini" \
   --rootdir "$work/snap" --noconftest -p gates_nodes "${args[@]}" 2>&1)"
 code=$?
 summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//' | tr -cd '[:print:]' | cut -c1-120)"

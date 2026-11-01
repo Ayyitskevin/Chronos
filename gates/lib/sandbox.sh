@@ -18,7 +18,7 @@
 # GATES_SANDBOX_RO (runner-set, colon-separated absolute paths) adds read-only binds for a toolchain
 # outside /usr; the lane leaves it unset. The GATE itself may set, per call: SANDBOX_RO (space-separated
 # trusted paths bound read-only, e.g. the tools venv, the wheel cache; a bound venv's toolchain is bound
-# too), SANDBOX_PYPATH (one trusted dir appended to PYTHONPATH) and SANDBOX_ENV (NAME=VALUE pairs, only
+# too), SANDBOX_PYPATH (one trusted dir put FIRST on PYTHONPATH) and SANDBOX_ENV (NAME=VALUE pairs, only
 # PIP_NO_INDEX, PIP_FIND_LINKS and PYTEST_DISABLE_PLUGIN_AUTOLOAD are accepted — anything else is an error, never passed).
 sandbox_snapshot() {
   local top sha; top="$(git rev-parse --show-toplevel)" && sha="$(git -C "$top" rev-parse HEAD)" || return 1
@@ -54,7 +54,8 @@ sandbox_run() {
     done
   fi
   for p in ${SANDBOX_RO:-}; do a+=(--ro-bind "$p" "$p"); [ -f "$p/pyvenv.cfg" ] && _sbx_toolchain "$p"; done
-  local pypath="$snap/src" kv; [ -n "${SANDBOX_PYPATH:-}" ] && pypath="$pypath:$SANDBOX_PYPATH"
+  local pypath="$snap/src" kv  # the trusted dir goes FIRST: a candidate module of the same name under src/ cannot shadow it
+  [ -n "${SANDBOX_PYPATH:-}" ] && pypath="$SANDBOX_PYPATH:$pypath"
   local -a env=()
   for kv in ${SANDBOX_ENV:-}; do
     case "${kv%%=*}" in PIP_NO_INDEX|PIP_FIND_LINKS|PYTEST_DISABLE_PLUGIN_AUTOLOAD) env+=(--setenv "${kv%%=*}" "${kv#*=}") ;;

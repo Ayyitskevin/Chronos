@@ -367,7 +367,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "-c" and not sys.argv[2].startswith("/")
     os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 found = probe_lib.leaks(lane="$T/r70", extra=("PYTEST_DISABLE_PLUGIN_AUTOLOAD",))
-if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1" or not os.environ.get("PYTHONPATH", "").endswith("/gates/lib"): found.append("autoload")
+if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1" or not os.environ.get("PYTHONPATH", "").split(":")[0].endswith("/gates/lib"): found.append("autoload")
 argv = re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:]))
 if ctl("argv") is not None and argv != ctl("argv"): found.append("argv")
 if found: print("LEAK " + " ".join(found)); sys.exit(8)
@@ -394,7 +394,7 @@ mk70; g70
 check "1 70 PASS: the named doc-contract set passes → one PASS line, exit 0" "passed docs-claims-pinned"
 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g70
 check "r2:1 P1-1 70 with credential variables in the runner's env, the sandboxed tests see no credential variable, runner HOME, planted file or network → PASS" "passed docs-claims-pinned"
-ctl argv "-m pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
+ctl argv "-P -m pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
 check "1 70 adopts the existing tests: the sandboxed pytest ran over exactly the glob + the three named files, with plugin autoload OFF, a trusted empty ini, --noconftest and the trusted reporter (the stub refuses any other argv/env)" "passed docs-claims-pinned"
 ctl pyrc 1; ctl pysum '1 failed, 4 passed in 0.10s'; g70
 check "1 70 FAIL: a failing doc-contract test → one FAIL line with the pytest summary, exit 1" "failed docs-claims-pinned 'pytest exited 1 \\(1 failed, 4 passed'"
@@ -443,6 +443,14 @@ shadow70 gates_nodes.py
 check "g70fix:1 a tracked gates_nodes.py at the repo root does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
 shadow70 src/gates_nodes.py
 check "g70fix:2 a tracked src/gates_nodes.py does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
+cand70() {  # $1 = the value the tracked test expects of the candidate's src/chronos/claim.py (which says 1)
+  mk70; printf 'VALUE = 1\n' > "$R70/src/chronos/claim.py"
+  printf 'from chronos import claim\n\n\ndef test_a():\n    assert claim.VALUE == %s\n\n\ndef test_b():\n    pass\n' "$1" > "$R70/tests/unit/test_adr_point_in_time_claims.py"; commit "$R70"; g70real
+}
+cand70 1
+check "g70fix:3 -P / trusted-dir-first do not change what the doc-contract tests import: a test of the candidate's own src/chronos module PASSes" "passed docs-claims-pinned"
+cand70 2
+check "g70fix:4 ...and it really is the candidate's code under test: the same test expecting a different value FAILs the gate" "failed docs-claims-pinned 'pytest exited 1'"
 
 # --- GATESISO (D-51): the trusted gates run Python isolated (-I -B), so a candidate-tracked module cannot shadow an import ---
 # Each shadow writes a marker on the HOST (a sandboxed run cannot reach it), then transparently re-exports the real module, so a
