@@ -10,7 +10,7 @@
 # Exit 0 all ok, 1 otherwise.
 set -u
 pass=0; fail=0
-ok() { pass=$((pass+1)); echo "ok       $1"; }; bad() { fail=$((fail+1)); echo "FAIL     $1"; }
+ok() { pass=$((pass+1)); echo "ok       $1"; }; bad() { fail=$((fail+1)); echo "FAIL     $1"; [ -z "${DEBUG:-}" ] || { echo "  rc=$(cat "$T/rc" 2>/dev/null)"; head -c 600 "$T/out" 2>/dev/null | sed "s/^/  out: /"; head -c 900 "$T/err" 2>/dev/null | sed "s/^/  err: /"; }; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd); G=$ROOT/gates
 T=$(mktemp -d)
@@ -27,7 +27,7 @@ PY=$ROOT/.venv/bin/python
 RVENV=$(readlink -f "$ROOT/.venv"); UVROOT=$(dirname "$(dirname "$(sed -n 's/^home = //p' "$RVENV/pyvenv.cfg")")")
 REALTOOLS=$(GATES_TRUSTED_REPO=$ROOT GATES_TRUSTED_REF=origin/main bash -c '. "$0/gates/lib/tools-venv.sh" && tools_venv' "$ROOT" 2>/dev/null) \
   || { echo "FAIL     no trusted tools venv (needs the cached tools-<digest> venv or the network once)"; exit 1; }
-export GATES_SANDBOX_RO="$RVENV:$REALTOOLS"
+export GATES_SANDBOX_RO="$REALTOOLS"   # NOT the lane venv: the sandbox binds <repo>/.venv itself and overlays its editable .pth; a second bind would mask the overlay
 case "$UVROOT" in /|/usr|/usr/*) ;; *) GATES_SANDBOX_RO="$GATES_SANDBOX_RO:$UVROOT" ;; esac
 
 # --- S1 gate 70 --------------------------------------------------------------------------------------------------------
@@ -85,7 +85,7 @@ mk40() {
   newrepo "$R40"; mkdir -p "$R40/src/chronos" "$R40/scripts" "$R40/worker"; : > "$R40/src/chronos/__init__.py"; : > "$R40/worker/__init__.py"
   for l in bootstrap build runtime sbom; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done
   cp "$ROOT/scripts/verify_release_security.py" "$R40/scripts/"
-  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['results']={}; json.dump(d, open(sys.argv[2],'w'), indent=2)" "$ROOT/.secrets.baseline" "$R40/.secrets.baseline"
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['results']={}; d['history_results']={}; json.dump(d, open(sys.argv[2],'w'), indent=2)" "$ROOT/.secrets.baseline" "$R40/.secrets.baseline"
   printf '.venv\n.gates/\ndata/\ndist/\n' > "$R40/.gitignore"
   printf '# TRUSTED-MAKEFILE\nlint format-check type type-worker test release-gate:\n\t@echo "12 passed in 0.1s"\n' > "$R40/Makefile"
   printf '# TRUSTED release script\n' > "$R40/scripts/verify_release_artifact.py"; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"

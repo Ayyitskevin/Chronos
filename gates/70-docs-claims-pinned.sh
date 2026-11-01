@@ -54,13 +54,17 @@ json.dump(expected, open(f"{out}/expected.json", "w"))
 PY
 )
 [ "${#args[@]}" -gt 0 ] && [ -s "$work/trusted/expected.json" ] || fail "could not derive the expected doc-contract tests from the source"
-out="$(SANDBOX_RO="$work/trusted $(cd "$(dirname "$0")/lib" && pwd)" SANDBOX_PYPATH="$(cd "$(dirname "$0")/lib" && pwd)" \
-  SANDBOX_ENV="PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" sandbox_run "$work" "$py" -P -m pytest -q -p no:cacheprovider -c "$work/trusted/pytest.ini" \
+lib="$(cd "$(dirname "$0")/lib" && pwd)"
+# G70-FIX r2: pytest starts through the trusted bootstrap (-I -S -B; see gates/lib/boot.py), so no candidate startup hook (src/sitecustomize.py,
+# the editable .pth) runs before it and the trusted reporter resolves from the bound trusted dir, never a candidate gates_nodes.py.
+out="$(SANDBOX_RO="$work/trusted $lib" \
+  SANDBOX_ENV="PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" sandbox_run "$work" "$py" -I -S -B "$lib/boot.py" pytest -q -p no:cacheprovider -c "$work/trusted/pytest.ini" \
   --rootdir "$work/snap" --noconftest -p gates_nodes "${args[@]}" 2>&1)"
 code=$?
 summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//' | tr -cd '[:print:]' | cut -c1-120)"
 [ "$code" -ne 5 ] || fail "pytest collected no tests from the $# named files; the doc claims are unpinned"
 [ "$code" -eq 0 ] || fail "pytest exited $code ($summary); run '$py -m pytest -q $*' and fix the doc or the claim"
+[ -n "$summary" ] || fail "pytest exited 0 but printed no summary line; a run that never reported is not a pass"
 ! grep -qE '[0-9]+ (deselected|skipped|xfailed|xpassed)' <<< "$summary" || fail "pytest reported '$summary'; every doc-contract test must run and pass (none skipped or deselected)"
 verdict="$(python3 -I -B - "$work" <<'PY' 2>&1
 import json, os, re, stat, sys

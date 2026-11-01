@@ -100,21 +100,10 @@ done
 SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache $work/trusted" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate \
   sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
-SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" -I - <<'PY'
-# the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
-import importlib.util, os, subprocess, sys
-from importlib import metadata
-from pathlib import Path
-root, copy = Path.cwd(), Path(os.environ["GATE_IO"]) / ".secrets.baseline"
-spec = importlib.util.spec_from_file_location("release_security", root / "scripts/verify_release_security.py")
-gate = sys.modules[spec.name] = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
-gate._require_exact_tool_versions(metadata.version)
-tracked = tuple(p for p in gate._tracked_files(root) if p != ".secrets.baseline")
-for command in gate.build_scan_commands(python=Path(sys.executable), baseline=copy, tracked_files=tracked):
-    if command.name != "runtime dependency audit":
-        subprocess.run(command.argv, cwd=root, check=True)
-gate.verify_git_history_secrets(root, copy)
-PY
+lib="$(cd "$(dirname "$0")/lib" && pwd)"
+# G70-FIX r2: the security driver is a trusted FILE run by the non-editable tools venv (-I -B, no candidate on sys.path, and its
+# scanner children get -I -B too); the lane venv (editable .pth, candidate sitecustomize) never starts trusted code.
+SANDBOX_OVERLAY="$SEC" SANDBOX_RO="$tools $lib" target security-offline sandbox_run "$work" "$tools/bin/python" -I -B "$lib/security_offline.py"
 if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name resolution|Network is unreachable|NameResolutionError|NewConnectionError'; then
   fail "the $first target needs outbound network, which the sandbox denies (the split moved pip-audit and the wheel downloads to trusted steps); FAILing closed"
 fi

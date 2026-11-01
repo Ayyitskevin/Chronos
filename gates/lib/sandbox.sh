@@ -18,7 +18,7 @@
 # GATES_SANDBOX_RO (runner-set, colon-separated absolute paths) adds read-only binds for a toolchain
 # outside /usr; the lane leaves it unset. The GATE itself may set, per call: SANDBOX_RO (space-separated
 # trusted paths bound read-only, e.g. the tools venv, the wheel cache; a bound venv's toolchain is bound
-# too), SANDBOX_PYPATH (one trusted dir put FIRST on PYTHONPATH) and SANDBOX_ENV (NAME=VALUE pairs, only
+# too) and SANDBOX_ENV (NAME=VALUE pairs, only
 # PIP_NO_INDEX, PIP_FIND_LINKS and PYTEST_DISABLE_PLUGIN_AUTOLOAD are accepted — anything else is an error, never passed).
 sandbox_snapshot() {
   local top sha; top="$(git rev-parse --show-toplevel)" && sha="$(git -C "$top" rev-parse HEAD)" || return 1
@@ -54,8 +54,7 @@ sandbox_run() {
     done
   fi
   for p in ${SANDBOX_RO:-}; do a+=(--ro-bind "$p" "$p"); [ -f "$p/pyvenv.cfg" ] && _sbx_toolchain "$p"; done
-  local pypath="$snap/src" kv  # the trusted dir goes FIRST: a candidate module of the same name under src/ cannot shadow it
-  [ -n "${SANDBOX_PYPATH:-}" ] && pypath="$SANDBOX_PYPATH:$pypath"
+  local pypath="$snap/src" kv
   local -a env=()
   for kv in ${SANDBOX_ENV:-}; do
     case "${kv%%=*}" in PIP_NO_INDEX|PIP_FIND_LINKS|PYTEST_DISABLE_PLUGIN_AUTOLOAD) env+=(--setenv "${kv%%=*}" "${kv#*=}") ;;
@@ -79,6 +78,12 @@ sandbox_run() {
   bwrap "${a[@]}" "$@"
 }
 sandbox_identity() {  # $1 out, $2 python (inside the sandbox): exit 0 iff chronos comes from the snapshot
+  # (1) THE BINDING CHECK, G70-FIX r2: the trusted bootstrap (-I -S -B: no `site`, so no .pth and no sitecustomize/usercustomize)
+  #     builds sys.path itself and asserts chronos resolves under <snap>/src. A candidate startup hook cannot run before it or vouch for it.
+  local lib; lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SANDBOX_RO="$lib" sandbox_run "$1" "$2" -I -S -B "$lib/boot.py" identity >/dev/null 2>&1 || return 1
+  # (2) the environment the candidate's own targets get (a normal interpreter start, and `-I` when the editable .pth is overlaid):
+  #     refuses a misconfigured lane venv. Candidate code runs in this one, so it is a guard against accidents, never evidence.
   local code='import os, sys, chronos
 f, r = os.path.realpath(chronos.__file__), os.path.realpath(os.path.join(os.getcwd(), "src"))
 sys.exit(0 if f.startswith(r + os.sep) else 3)'
