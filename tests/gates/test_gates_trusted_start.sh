@@ -47,6 +47,7 @@ if gio and os.path.exists(exp):
             for n in names:
                 for w in ("setup", "call", "teardown"):
                     out.write(json.dumps({"nodeid": f + "::" + n, "when": w, "outcome": "passed"}) + "\n")
+    print("4 passed in 0.10s")   # a convincing summary line too: only a hook that never runs defeats the forgery
     os._exit(0)
 '
 g70() { (cd "$R70" && ln -sfn "$RVENV" .venv && CHRONOS_PY="$PY" run bash "$G70"); }
@@ -112,7 +113,7 @@ check "s3:4 control: a tracked secret is REPORTED by the trusted tracked-file sc
 mk40; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R40/leak.py"; mkdir "$R40/detect_secrets"; : > "$R40/detect_secrets/__init__.py"; printf "$SHADOW0" > "$R40/detect_secrets/pre_commit_hook.py"; commit "$R40"; g40
 check "s3:5 a tracked ROOT detect_secrets/pre_commit_hook.py (exits 0) does NOT stand in for the secret scanner: the secret is still reported" "failed evidence-at-head '.*target security-offline'"
 mk40; printf "$BANDIT_HIT" > "$R40/src/chronos/probe.py"
-printf 'import os, sys\nif sys.argv[:1] == ["-"]:\n    os._exit(0)\n' > "$R40/src/sitecustomize.py"; commit "$R40"; g40
+printf 'import os, sys\nif os.path.basename(sys.argv[0]) in ("-", "security_offline.py"):   # the trusted driver, however it is started\n    os._exit(0)\n' > "$R40/src/sitecustomize.py"; commit "$R40"; g40
 check "s3:6 a tracked src/sitecustomize.py that exits 0 for the stdin driver does NOT skip the trusted driver: the finding is still reported" "failed evidence-at-head '.*target security-offline'"
 
 # --- S4 tools-venv.sh --------------------------------------------------------------------------------------------------
