@@ -22,9 +22,9 @@ failed() { rc 1 && one "$T/err" "^FAIL: $1 — $2" && [ ! -s "$T/out" ]; }
 commit() { git -C "$1" add -A && git -C "$1" -c user.email=t@t -c user.name=t commit -qm "${2:-c}"; }
 newrepo() { rm -rf "$1"; mkdir -p "$1"; git -C "$1" init -q; }
 export BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1
-PY=$ROOT/.venv/bin/python
+RVENV=$(readlink -f "$ROOT/.venv"); PY=$RVENV/bin/python   # the real path: the sandbox binds the venv there, not through a symlinked .venv
 [ -x "$PY" ] || { echo "FAIL     no lane venv at $PY (the real-python cases need it)"; exit 1; }
-RVENV=$(readlink -f "$ROOT/.venv"); UVROOT=$(dirname "$(dirname "$(sed -n 's/^home = //p' "$RVENV/pyvenv.cfg")")")
+ UVROOT=$(dirname "$(dirname "$(sed -n 's/^home = //p' "$RVENV/pyvenv.cfg")")")
 REALTOOLS=$(GATES_TRUSTED_REPO=$ROOT GATES_TRUSTED_REF=origin/main bash -c '. "$0/gates/lib/tools-venv.sh" && tools_venv' "$ROOT" 2>/dev/null) \
   || { echo "FAIL     no trusted tools venv (needs the cached tools-<digest> venv or the network once)"; exit 1; }
 export GATES_SANDBOX_RO="$REALTOOLS"   # NOT the lane venv: the sandbox binds <repo>/.venv itself and overlays its editable .pth; a second bind would mask the overlay

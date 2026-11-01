@@ -18,7 +18,7 @@ failed() { rc 1 && one "$T/err" "^FAIL: $1 — $2" && [ ! -s "$T/out" ]; }
 commit() { git -C "$1" add -A && git -C "$1" -c user.email=t@t -c user.name=t commit -qm "${2:-c}"; }
 newrepo() { rm -rf "$1"; mkdir -p "$1"; git -C "$1" init -q; }
 export BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1
-PY=$ROOT/.venv/bin/python
+PY=$(readlink -f "$ROOT/.venv")/bin/python   # the venv's real path: the sandbox binds it there, not through a symlinked .venv
 
 check "1 every gates/NN-*.sh for 40-70 exists and is executable" "[ -x $G/40-evidence-at-head.sh ] && [ -x $G/50-fixture-integrity.sh ] && [ -x $G/60-secrets-baseline.sh ] && [ -x $G/70-docs-claims-pinned.sh ]"
 
