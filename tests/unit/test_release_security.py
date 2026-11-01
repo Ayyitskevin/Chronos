@@ -847,9 +847,7 @@ def test_scan_children_run_isolated_so_a_cwd_module_cannot_stand_in_for_a_scanne
     inherited by a child, so every scanner command carries -I -B itself."""
     marker = tmp_path / "shadow-ran"
     (tmp_path / "bandit.py").write_text(
-        "import os, sys\n"
-        f"open({str(marker)!r}, 'w').write('ran')\n"
-        "sys.exit(0)\n",
+        f"import os, sys\nopen({str(marker)!r}, 'w').write('ran')\nsys.exit(0)\n",
         encoding="utf-8",
     )
     commands = build_scan_commands(

@@ -68,12 +68,18 @@ def build_scan_commands(
 ) -> tuple[ScanCommand, ...]:
     """Bind each scanner to the exact release input and accepted threshold."""
 
+    # G70-FIX r2: each scanner is a child process and interpreter flags are not inherited. Run from
+    # the repository root, `python -m bandit` would resolve a tracked root bandit.py (or
+    # detect_secrets/) cwd-first. -I (no cwd, no PYTHONPATH, no user site) and -B keep the real
+    # scanner the one that runs.
     executable = str(python)
     return (
         ScanCommand(
             name="runtime dependency audit",
             argv=(
                 executable,
+                "-I",
+                "-B",
                 "-m",
                 "pip_audit",
                 "--require-hashes",
@@ -88,6 +94,8 @@ def build_scan_commands(
             name="Python static analysis",
             argv=(
                 executable,
+                "-I",
+                "-B",
                 "-m",
                 "bandit",
                 "-r",
@@ -105,6 +113,8 @@ def build_scan_commands(
             name="tracked-file secret scan",
             argv=(
                 executable,
+                "-I",
+                "-B",
                 "-m",
                 "detect_secrets.pre_commit_hook",
                 "--baseline",
