@@ -110,8 +110,8 @@ mk40; printf "$BANDIT_HIT" > "$R40/src/chronos/probe.py"; printf "$SHADOW0" > "$
 check "s3:3 a tracked src/bandit.py (exits 0) does NOT stand in for bandit: the finding is still reported" "failed evidence-at-head '.*target security-offline'"
 mk40; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R40/leak.py"; commit "$R40"; g40
 check "s3:4 control: a tracked secret is REPORTED by the trusted tracked-file scan" "failed evidence-at-head '.*target security-offline'"
-mk40; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R40/leak.py"; mkdir "$R40/detect_secrets"; : > "$R40/detect_secrets/__init__.py"; printf "$SHADOW0" > "$R40/detect_secrets/pre_commit_hook.py"; commit "$R40"; g40
-check "s3:5 a tracked ROOT detect_secrets/pre_commit_hook.py (exits 0) does NOT stand in for the secret scanner: the secret is still reported" "failed evidence-at-head '.*target security-offline'"
+mk40; mkdir "$R40/detect_secrets"; : > "$R40/detect_secrets/__init__.py"; printf 'import sys\nsys.exit(3)\n' > "$R40/detect_secrets/pre_commit_hook.py"; commit "$R40"; g40
+check "s3:5 a tracked ROOT detect_secrets/pre_commit_hook.py that FAILS (exit 3) on a clean tree never runs: the scanner child resolved the real detect_secrets, so the gate PASSes (the history scan would also report a planted secret, so a poisoned shadow is the only way to see which module the child imported)" "passed evidence-at-head"
 mk40; printf "$BANDIT_HIT" > "$R40/src/chronos/probe.py"
 printf 'import os, sys\nif os.path.basename(sys.argv[0]) in ("-", "security_offline.py"):   # the trusted driver, however it is started\n    os._exit(0)\n' > "$R40/src/sitecustomize.py"; commit "$R40"; g40
 check "s3:6 a tracked src/sitecustomize.py that exits 0 for the stdin driver does NOT skip the trusted driver: the finding is still reported" "failed evidence-at-head '.*target security-offline'"
