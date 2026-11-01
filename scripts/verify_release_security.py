@@ -91,6 +91,22 @@ def build_scan_commands(
             ),
         ),
         ScanCommand(
+            name="dev dependency audit",
+            argv=(
+                executable,
+                "-I",
+                "-B",
+                "-m",
+                "pip_audit",
+                "--require-hashes",
+                "--disable-pip",
+                "--progress-spinner",
+                "off",
+                "-r",
+                "requirements-dev.lock",
+            ),
+        ),
+        ScanCommand(
             name="Python static analysis",
             argv=(
                 executable,

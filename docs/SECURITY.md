@@ -172,8 +172,10 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   is same-revision evidence in one pinned build environment, not a cross-platform or independently
   rebuilt attestation.
 - **The security gate observes three different failure domains and never repairs them.** It asks
-  `pip-audit` to audit the exact runtime lock with hashes required and dependency resolution
-  disabled; any current known advisory or audit-service/tool failure blocks. Bandit recursively
+  `pip-audit` to audit the exact runtime lock, and then the exact dev lock that CI and developer
+  venvs install, each with hashes required and dependency resolution disabled; any current known
+  advisory or audit-service/tool failure in either blocks. The build, bootstrap, and SBOM locks are
+  not audited by this gate. Bandit recursively
   checks `src/chronos`, `worker`, and `scripts`, blocking findings at medium severity and medium
   confidence or stronger. detect-secrets checks every Git-tracked file except the fingerprint-only
   `.secrets.baseline`; every baseline entry is an explicitly reviewed false positive. The wrapper
