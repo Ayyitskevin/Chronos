@@ -331,6 +331,28 @@ def test_stock_close_holding_bound_uses_exact_underlying_and_currency() -> None:
     assert "bound=100" in check.detail
 
 
+def test_stock_close_refuses_unverified_call_deliverable() -> None:
+    stock = stock_contract(con_id=999)
+    unverified_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
+        update={"deliverable_verified": False, "deliverable_shares": None}
+    )
+    evidence, decision = _evaluate(
+        _stock_close(50),
+        positions=(_position(stock, "150"), _position(unverified_call, "-1")),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert check.status is RiskCheckStatus.FAIL
+    assert unverified_call.symbol in check.detail
+    assert unverified_call.expiration.isoformat() in check.detail
+    assert str(unverified_call.strike) in check.detail
+    assert PAPER_ACCOUNT not in check.detail
+    assert "222" not in check.detail
+    assert "999" not in check.detail
+
+    assert evidence.shares_covering_short_calls == Decimal("0")
+
+
 def _option_case(
     case: str,
 ) -> tuple[
