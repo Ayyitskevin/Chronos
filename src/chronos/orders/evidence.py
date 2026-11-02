@@ -80,10 +80,8 @@ class BrokerRiskEvidenceProvider:
         # READY proof was taken before it, so this evidence cannot claim it, whatever the adapter's
         # readiness hook did (absent, raising or working)
         book_is_readable = all(order.quantity_quarantine is None for order in open_orders)
-        evidence_provenance_is_current = (
-            readiness_before.ready
-            and readiness_after.ready
-            and readiness_before.session_id == readiness_after.session_id
+        bracket_is_consistent = (
+            readiness_before.session_id == readiness_after.session_id
             and readiness_before.generation == readiness_after.generation
             and book_is_readable
         )
@@ -118,18 +116,21 @@ class BrokerRiskEvidenceProvider:
             now=now,
             broker_confirms_open=self._broker_confirms_open(intent, now),
         )
+        reconciliation_status = (
+            readiness_after.status if bracket_is_consistent else ReconciliationStatus.PENDING
+        )
         return RiskEvidence(
             account=account,
-            reconciliation_status=(
-                ReconciliationStatus.RECONCILED
-                if evidence_provenance_is_current
-                else ReconciliationStatus.PENDING
-            ),
+            reconciliation_status=reconciliation_status,
             reconciliation_generation=(
-                readiness_after.generation if evidence_provenance_is_current else None
+                readiness_after.generation
+                if reconciliation_status is ReconciliationStatus.RECONCILED
+                else None
             ),
             reconciliation_session_id=(
-                readiness_after.session_id if evidence_provenance_is_current else None
+                readiness_after.session_id
+                if reconciliation_status is ReconciliationStatus.RECONCILED
+                else None
             ),
             session=session,
             opening_orders_today=opening_today,
