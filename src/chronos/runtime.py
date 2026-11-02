@@ -152,9 +152,7 @@ def _readiness_blockers(
         blockers.add(ReadinessBlocker.SCOPE_CHANGED)
 
     snapshot = portfolio.snapshot
-    pass_incomplete = (
-        portfolio.status is not ReconciliationStatus.RECONCILED and snapshot is None
-    ) or portfolio.status not in (
+    pass_incomplete = snapshot is None or portfolio.status not in (
         ReconciliationStatus.RECONCILED,
         ReconciliationStatus.MANUAL_REVIEW,
     )
