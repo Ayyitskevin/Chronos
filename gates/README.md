@@ -12,8 +12,8 @@ On success it prints exactly one `PASS: <gate> — <reason>` line on stdout; on 
 `FAIL: <gate> — <reason + what to do>` line on stderr and exit 1. A tool failure inside a gate
 (`make`, `git fetch`, `gh`) is its own FAIL line, never a silent exit. Gates report state; they
 never perform a lane transition (no gate marks a PR ready, merges, or edits it).
-`tests/gates/test_gates_10_30.sh` (05/10/20/30, run-all) and `tests/gates/test_gates_40_70.sh` (40–70) pin the
-contract for the gates below. Gates 60 and 70 use `.venv/bin/python` (the Makefile's `PY`);
+`tests/gates/test_gates_10_30.sh` (05/10/20/30, run-all), `tests/gates/test_gates_40_70.sh` (40–70) and
+`tests/gates/test_gate40_migration_chain.sh` (gate 40's migration-head step) pin the contract for the gates below. Gates 60 and 70 use `.venv/bin/python` (the Makefile's `PY`);
 `CHRONOS_PY` overrides it, which is the harness's only knob.
 
 | # | Gate | One-line rule | Came from |
@@ -101,6 +101,43 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   Makefile or gutted security script never runs, and every call is `make -R -f <trusted Makefile>` (a
   candidate `GNUmakefile`/`makefile` is never searched for; MAKEFILES/MAKEFLAGS never reach the sandbox).
   The receipt names the trusted base commit.
+- **Gate 40's migration head is derived as DATA (D-47(b)):** the overlaid release script's one
+  `_MIGRATION_HEAD` line is the only byte that is not main's. Trusted code (`gates/lib/migration_chain.py`,
+  run `python3 -I -B` from the trusted set) reads main's revision files at the trusted base and the
+  candidate's at `PR_HEAD_SHA` as git objects, parses each header with `ast` on its text (size-capped,
+  never imported or executed; the text is what the interpreter runs: a BOM, any coding cookie or a
+  non-UTF-8 encoding is a named `[encoding]` FAIL, for the revision files and both release scripts,
+  since under `# coding: utf-7` a "comment" is code to the interpreter), and requires: only regular
+  `NNNN_lowercase.py` blobs in `versions/`; literal headers whose `revision` equals the file prefix; main's files byte-identical (append-only); one root, no
+  cycle, no branch, one head; numbering by one; main's literal equal to main's head (else a trusted-base
+  FAIL); the candidate's own literal equal to its head (what CI checks). It then writes the derived head
+  into the trusted overlay copy (no write when it is main's head) and the receipt records it as
+  `migration_head`. Each revision file's module level must also be data and imports only (`[module]`):
+  docstring, `from __future__ import annotations`, imports without `*`, one-name literal assignments
+  (`sa.<CamelCase>(…)` constructors on literals included), undecorated defs with constant defaults; so a
+  rebinding written in the file (`globals()[…]`, `exec`, a star import, or one hidden by a coding
+  cookie) is refused before the sandbox. Everything else is refused too, benign or not (a negative
+  number, an attribute alias such as `schema.TABLE`, `sa.text(…)`, a class, a decorator): a gates/
+  change first. Candidate code outside the file (an imported module, among other routes) still lets
+  an in-process rebinding through (below).
+  What this proves is the DECLARED chain, i.e. the revision files' own text. It does not see code the
+  candidate controls that runs in the sandbox before or during Alembic's import of a revision, and any
+  such code can rebind a header in-process. Known routes, none of them blocked: a module the file
+  imports (any candidate module, `chronos.persistence` included) and `env.py`; an unchecked-hash `.pyc`
+  committed under a `src/` `__pycache__/` that shadows an imported module's honest `.py` (the
+  interpreter runs the pyc; `PYTHONDONTWRITEBYTECODE` stops writes, not reads; only a revision file
+  itself cannot be shadowed, since `versions/` admits only `NNNN_lowercase.py` blobs); a
+  `src/sitecustomize.py`, which runs at interpreter start in a sandboxed process that has `src` on its
+  path (via `PYTHONPATH=src`, and under `-I` too where the lane venv's overlaid site-packages `.pth`
+  names `src`), `make release-gate`'s `$(PY) scripts/verify_release_artifact.py` included; and a
+  `.pth` or `sitecustomize.py` shipped in the wheel (or written into it by a build hook), which lands
+  in the runtime venv's site-packages and runs in the `-I` installed smoke (read from the install
+  path, not built end to end). `upgrade()`/`downgrade()` bodies run only in the sandbox. The
+  in-sandbox installed smoke checks only `get_heads() == [head]` and the applied version, never the
+  graph, so a fork that merges back to the declared head passes it; nothing trusted re-verifies the RUNTIME graph
+  (owner residual). The control is human review of the PR's whole executable surface under `src/` and
+  in the wheel (imports, every added or changed file under `src/`, build config, anything binary such
+  as a `.pyc`), not only a revision's imports.
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming

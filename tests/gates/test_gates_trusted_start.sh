@@ -92,7 +92,16 @@ mk40() {
   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['results']={}; d['history_results']={}; json.dump(d, open(sys.argv[2],'w'), indent=2)" "$ROOT/.secrets.baseline" "$R40/.secrets.baseline"
   printf '.venv\n.gates/\ndata/\ndist/\n' > "$R40/.gitignore"
   printf '# TRUSTED-MAKEFILE\nlint format-check type type-worker test release-gate:\n\t@echo "12 passed in 0.1s"\n' > "$R40/Makefile"
-  printf '# TRUSTED release script\n' > "$R40/scripts/verify_release_artifact.py"; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
+  printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
+  # D-47(b) re-stack: gate 40's trusted migration-chain step (gates/lib/migration_chain.py) runs before the scanners, so the
+  # trusted base needs main's chain 0001 → 0002 and the one _MIGRATION_HEAD line it overlays — the same shape as
+  # test_gates_40_70.sh's mig40/lit40 fixture. The candidate inherits both unchanged, so S3 reaches the security-offline step.
+  mkdir -p "$R40/src/chronos/persistence/migrations/versions"
+  for m in '0001 None base' '0002 "0001" next'; do set -- $m
+    printf 'from __future__ import annotations\n\nrevision = "%s"\ndown_revision = %s\nbranch_labels = None\ndepends_on = None\n' "$1" "$2" \
+      > "$R40/src/chronos/persistence/migrations/versions/$1_$3.py"
+  done
+  printf '# TRUSTED release script\n_MIGRATION_HEAD: Final[str] = "0002"\n' > "$R40/scripts/verify_release_artifact.py"
   commit "$R40"; git -C "$R40" branch -q trusted-main; git -C "$R40" update-ref refs/remotes/origin/main trusted-main
 }
 g40() {  # the gate against the CURRENT HEAD of $R40, lane venv = the real one
