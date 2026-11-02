@@ -97,9 +97,16 @@ def test_maintenance_or_unknown_state_never_builds_or_activates(
         monkeypatch.delenv(SWITCH, raising=False)
     else:
         monkeypatch.setenv(SWITCH, value)
-    with caplog.at_level(logging.CRITICAL), rig.boot() as (client, app):
-        assert_inhibited(client, app, ticked)
-        assert any(getattr(r, "event", None) == "autonomy_maintenance" for r in caplog.records)
+    # First-start logging disables propagation at the chronos logger. Capture
+    # directly so this oracle also works when this case runs alone.
+    logger = logging.getLogger("chronos.api")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.CRITICAL), rig.boot() as (client, app):
+            assert_inhibited(client, app, ticked)
+            assert any(getattr(r, "event", None) == "autonomy_maintenance" for r in caplog.records)
+    finally:
+        logger.removeHandler(caplog.handler)
 
 
 def test_explicit_lift_requires_a_new_lifespan(
