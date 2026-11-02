@@ -4,7 +4,8 @@ The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or 
 owner action. Chronos is pre-release, local-first software built for autonomous trading
 (ADR-0016 / D-16, maximal under ADR-0017 / D-17); **whether it trades autonomously is an
 owner configuration fact** — a backend assembles the autonomy runtime at boot only when every
-conjunct holds: a valid, account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable
+conjunct holds: explicit `CHRONOS_AUTONOMY_MAINTENANCE=off` in the process environment, a valid,
+account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable
 activation that has not been revoked, and, for a submitting mode, an authenticated proposer and
 evidence posture; an assembled runtime judges proposals inside that mandate and, in a
 submitting mode, may submit an order through the existing execution plane — or refuse, or, in
@@ -575,11 +576,27 @@ and maintenance recovery remain held.
 
 ## Autonomous model authority (ADR-0016 / D-16, ADR-0017 / D-17)
 
+- **Autonomy maintenance is ON by default (MAINT-BUILD, D-59(b)).** The backend samples
+  `CHRONOS_AUTONOMY_MAINTENANCE` once at lifespan entry, before backend assembly. Only
+  explicit `off` (case-insensitive, surrounding whitespace ignored) lifts it. Unset, empty,
+  invalid, or unreadable state inhibits autonomy. This switch reads the **process environment**,
+  not a `.env` file; configure it in the backend service environment. While inhibited the
+  lifespan never calls the autonomy builder, activates a mandate, writes an activation or
+  `mandate_activated` record, or schedules an autonomy tick, even with a valid matching grant
+  and no recovery hold. `/health` reports the typed startup fault `autonomy_maintenance` and
+  `autonomy=NOT_EXPECTED`; a CRITICAL structured log says why. `/health/live` and read paths
+  remain available, reconciliation continues, and `/health/ready` reports NOT_READY. A
+  Kevin-authorized operator may configure `off` and **restart** after cutover checks; changing
+  the environment during a lifespan cannot auto-lift it. This does not acknowledge a recovery
+  hold, revoke an existing activation, or bypass any mandate/posture/order gate. It is a startup
+  inhibit, not an emergency stop for an already running process. Proposal admission remains
+  closed for a configured mandate that did not start; the existing no-mandate queue posture
+  is unchanged. See `docs/ops/N3-CUTOVER.md`, before step 7 and step 9.
 - **The autonomy stack is built and wired (M1–M7.5).** Contracts, gateway, durable state,
   compiler, queue, counters, alert delivery, the tick runtime, and — since ADR-0017 — the
   app-plane wiring (`chronos.api.autonomy_wiring`) that assembles them in the backend
   lifespan. Activation at boot is a conjunction, not a switch. The lifespan
-  (`src/chronos/api/main.py`) does not construct the runtime at all under a recovery hold
+  (`src/chronos/api/main.py`) does not construct the runtime at all under maintenance (above) or a recovery hold
   (ADR-0054); with no mandate file configured, autonomy is inert (no runtime is
   constructed); a configured mandate must load as a trusted file and be scoped to this
   account, or the backend alerts and stays inert; a mandate in a submitting mode

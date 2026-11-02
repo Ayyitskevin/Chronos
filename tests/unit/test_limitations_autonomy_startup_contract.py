@@ -58,7 +58,7 @@ def _bullet(anchor: str) -> str:
 def test_1_the_wired_bullet_states_the_activation_predicate_and_cites_both_modules() -> None:
     bullet = _bullet(WIRED_BULLET)
     accepted = (
-        "does not construct the runtime at all under a recovery hold",
+        "does not construct the runtime at all under maintenance (above) or a recovery hold",
         "with no mandate file configured, autonomy is inert",
         "scoped to this account",
         "submitting mode additionally requires a proposer registry and evidence binding",
@@ -175,7 +175,8 @@ def test_3d_account_scope_and_durable_activation_gate_assembly_in_the_wiring_sou
 # The WHOLE accepted sentence (whitespace-collapsed), not a fragment: any rewording of the
 # activation claim or of what an assembled runtime may do fails this pin (Daybreak, r2 HOLD).
 INTRO_ACCEPTED = (
-    "a backend assembles the autonomy runtime at boot only when every conjunct holds: a valid, "
+    "a backend assembles the autonomy runtime at boot only when every conjunct holds: explicit "
+    "`CHRONOS_AUTONOMY_MAINTENANCE=off` in the process environment, a valid, "
     "account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable activation that has "
     "not been revoked, and, for a submitting mode, an authenticated proposer and evidence "
     "posture; an assembled runtime judges proposals inside that mandate and, in a submitting "

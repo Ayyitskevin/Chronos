@@ -179,6 +179,27 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   '
   ```
 
+## Backend autonomy maintenance — required before every cutover boot
+
+Before the FIRST backend start in this cutover (including the restart after recovery
+acknowledgement), the Kevin-authorized operator must configure the backend **service process
+environment** with `CHRONOS_AUTONOMY_MAINTENANCE=on`. For a systemd user service, use an
+operator-owned service override with `[Service]` and
+`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`, then reload that unit's configuration before
+starting. Do not place this flag in `.env`: the switch deliberately reads only the process
+environment, latched before backend assembly. Missing, invalid or unreadable state also means
+ON; only explicit `off` lifts it. No key/token is part of this setting. This page authorizes no
+agent to edit a unit, reload it, restart a service or lift the inhibit.
+
+Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
+activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
+must be NOT_EXPECTED, and the server emits a CRITICAL `autonomy_maintenance` event. Normal
+backend initialization and reconciliation continue. `/health/live` stays 200; `/health/ready`
+is 503 while this intentional startup inhibit is set. A diagnostic `/health` 200 alone is not
+proof. Preserve the existing mandate quarantine as an additional precaution, not a substitute
+for this backend guard. Lift only at step 9, on Kevin's explicit word, by setting `off` in the
+service process environment and restarting. There is no in-process or automatic lift.
+
 ## Steps
 
 1. **Stop the service and prove it.** Before you schedule this step, or start it:
@@ -495,7 +516,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    It must print these four lines, then one log line whose message begins `This boot cannot
    prove it does not follow a restore (database_replaced)`:
    ```
-   startup_faults: recovery_unverified
+   startup_faults: autonomy_maintenance recovery_unverified
    reconciliation: PENDING
    tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=NOT_EXPECTED
    {"detail":"This backend booted under a recovery hold and is running read-only: the state directory names an installation this database has never witnessed; the database was replaced beneath surviving state files. Acknowledge it with a note at POST /live/recovery/acknowledge and restart."} HTTP 409
@@ -505,8 +526,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    **Anything else is not the cutover's state: stop the backend (`systemctl --user stop
    chronos-backend`), acknowledge nothing, and stop here.** That includes another reason in the
    log or the 409 (`state_directory_lost`, `marker_unreadable`, `installation_mismatch`,
-   `restore_pending`), another startup fault beside `recovery_unverified`, and no hold at all:
-   `startup_faults: none` here means the marker was not where the backend looks, so the
+   `restore_pending`), another startup fault besides `autonomy_maintenance` and `recovery_unverified`, and no hold at all:
+   `autonomy_maintenance` without `recovery_unverified` here means the marker was not where
+   the backend looks, so the
    live-safety state this host ran with is missing. `python -m chronos.cli campaign status` and
    `campaign preflight` cannot show this reason: until the restart after your acknowledgement they
    report the fresh store's missing `installation_identity` row as UNVERIFIED. That restart writes
@@ -533,21 +555,20 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `/health` and `/autonomy/alerts` commands above again, but not the `grep`: the log still holds
    the held boot's `recovery_hold_engaged` line, which proves nothing now. They must print:
    ```
-   startup_faults: none
+   startup_faults: autonomy_maintenance
    reconciliation: RECONCILED
    tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=RUNNING
    [] HTTP 200
    ```
-   `startup_faults: none`: the hold is cleared. `HTTP 200`: writes are allowed (the body lists
-   unacknowledged alerts; it may hold the mandate alert below instead of `[]`).
+   `startup_faults: autonomy_maintenance`: only the deliberate autonomy inhibit remains;
+   the recovery hold is cleared. `HTTP 200`: the read succeeds; the body lists any
+   unacknowledged alerts instead of `[]`.
    `reconciliation: RECONCILED` with `reconciliation=RUNNING`: startup reconciliation ran and
    the refresher runs (`STARTING` in the first seconds: re-run). `autonomy=NOT_EXPECTED` is
-   right until step 9, for one of two reasons: no `AUTONOMY_MANDATE_FILE` is configured, or the
-   configured mandate still carries the unkeyed fingerprint. Then the log says `Persistent
-   mandate is scoped to a different account; autonomy stays inert`, and the alert list holds
-   `"kind":"autonomy.mandate_invalid"`. Step 9 re-authors the mandate; autonomy starts after it.
-   **Anything else (a startup fault, a 409, `reconciliation` not `RECONCILED`,
-   `autonomy=RUNNING`: a grant active before step 8 proved the key) means stop the backend and
+   required until step 9: maintenance blocks assembly even when a configured mandate already
+   matches the new keyed fingerprint. No mandate activation may be written during these boots.
+   **Anything else (a startup fault other than `autonomy_maintenance`, a 409,
+   `reconciliation` not `RECONCILED`, or `autonomy=RUNNING`) means stop the backend and
    stop here.** A bare `/health` 200 is not this proof. Steps 8 and 9 start only after it passes.
 
 8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
@@ -638,7 +659,12 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `python -m chronos.cli mandate check --file <mandate> --account-id DU1234567` (the same id)
    must print `STATUS             VALID`, `[NOTE] account-match` and a SUMMARY line that begins
    `0 blocking` — a BLOCKING `account-mismatch` means the old fingerprint is still in the file.
-   Only then start the worker and enable autonomy per the shadow-campaign runbook.
+   Only after all preceding proofs pass and Kevin explicitly authorizes the lift, change the
+   service override to `Environment=CHRONOS_AUTONOMY_MAINTENANCE=off`, reload that unit's
+   configuration and restart the backend. A running process never re-reads the switch. Verify
+   that `autonomy_maintenance` is absent from `/health`; any other fault/refusal remains a STOP.
+   The normal mandate/posture/recovery gates still decide whether autonomy can start. Only then
+   start the worker and enable autonomy per the shadow-campaign runbook.
 
 10. **Retention — 90 days.** The envelope under `--out` is a pre-cutover backup (its manifest
     says `schema_version:17`); the pruner deletes it after 90 days, as the ruling says. Run
