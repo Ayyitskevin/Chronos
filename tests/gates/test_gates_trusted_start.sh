@@ -84,7 +84,7 @@ STUB
 chmod +x "$T/toolsx/bin/python"
 mk40() {
   newrepo "$R40"; mkdir -p "$R40/src/chronos" "$R40/scripts" "$R40/worker"; : > "$R40/src/chronos/__init__.py"; : > "$R40/worker/__init__.py"
-  for l in bootstrap build runtime sbom; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done
+  for l in bootstrap build runtime sbom dev; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done   # dev: gate 40 validates and audits the dev lock too (DEV-AUDIT)
   # the TRUSTED base's script as it was BEFORE it carried -I -B itself (the flags stripped), so these cases pin the DRIVER's own
   # child isolation independently of the script's (that one is pinned by tests/unit/test_release_security.py)
   python3 -c "import re,sys; s=open(sys.argv[1]).read(); open(sys.argv[2],'w').write(re.sub(r'\n\s+\"-I\",\n\s+\"-B\",', '', s))" "$ROOT/scripts/verify_release_security.py" "$R40/scripts/verify_release_security.py"
