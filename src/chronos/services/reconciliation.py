@@ -37,6 +37,7 @@ from chronos.domain.models import (
     LocalReconciliationEvidence,
     OptionContract,
 )
+from chronos.orders.reconciliation_readiness import ReadinessBlocker
 from chronos.persistence.execution_repository import (
     ExecutionConflict,
     ExecutionRepository,
@@ -137,6 +138,7 @@ class SymbolReconciliation(ChronosModel):
     opening_actions_locked: Literal[True] = True
     manual_review_required: bool
     reasons: tuple[str, ...]
+    blocker_codes: tuple[str, ...] = ()
 
 
 class ReconciliationResult(ChronosModel):
@@ -512,8 +514,9 @@ class ReconciliationCoordinator:
         if globally_pending:
             requested_status = ReconciliationStatus.PENDING
             provenance_reasons: list[str] = []
+            blocker_codes: list[ReadinessBlocker] = []
         else:
-            requested_status, provenance_reasons = self._symbol_status(
+            requested_status, provenance_reasons, blocker_codes = self._symbol_status(
                 symbol,
                 positions=positions,
                 orders=orders,
@@ -554,6 +557,7 @@ class ReconciliationCoordinator:
                 or final_status is not ReconciliationStatus.RECONCILED
             ),
             reasons=tuple(_unique([*provenance_reasons, *decision.reasons])),
+            blocker_codes=tuple(code.value for code in blocker_codes),
         )
 
     def _symbol_status(
@@ -565,31 +569,38 @@ class ReconciliationCoordinator:
         executions: tuple[BrokerExecution, ...],
         matched_identities: frozenset[BrokerOrderIdentity],
         unresolved_symbols: frozenset[str],
-    ) -> tuple[ReconciliationStatus, list[str]]:
+    ) -> tuple[ReconciliationStatus, list[str], list[ReadinessBlocker]]:
         reasons: list[str] = []
+        blocker_codes: list[ReadinessBlocker] = []
         if symbol not in self._allowlisted_symbols:
             reasons.append("Broker or local evidence exists outside the configured allowlist.")
+            blocker_codes.append(ReadinessBlocker.ALLOWLIST_BREACH)
         if symbol in unresolved_symbols:
             reasons.append("Local strategy evidence for this symbol is not fully resolved.")
+            blocker_codes.append(ReadinessBlocker.LOCAL_EVIDENCE_UNRESOLVED)
         if any(position.quantity != 0 for position in positions):
             reasons.append(
                 "A nonzero broker position lacks complete cycle and fill-allocation provenance."
             )
+            blocker_codes.append(ReadinessBlocker.HELD_POSITION_UNPROVEN)
         if executions:
             reasons.append(
                 "Broker executions require complete local fill allocation before reconciliation."
             )
+            blocker_codes.append(ReadinessBlocker.EXECUTIONS_UNALLOCATED)
 
         exact_owned_put = _is_exact_owned_zero_fill_put(orders, matched_identities)
         if orders and not exact_owned_put:
             reasons.append(
                 "Open-order evidence is not one exact, zero-fill, owned short-put submission."
             )
+            blocker_codes.append(ReadinessBlocker.OPEN_ORDER_NOT_EXACT_PUT)
         if not orders and matched_identities:
             reasons.append("Local active-order ownership is absent from the broker snapshot.")
+            blocker_codes.append(ReadinessBlocker.OWNERSHIP_ABSENT)
         if reasons:
-            return ReconciliationStatus.MANUAL_REVIEW, reasons
-        return ReconciliationStatus.RECONCILED, reasons
+            return ReconciliationStatus.MANUAL_REVIEW, reasons, blocker_codes
+        return ReconciliationStatus.RECONCILED, reasons, blocker_codes
 
 
 def _observation_reasons(

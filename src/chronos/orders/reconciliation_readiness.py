@@ -14,9 +14,27 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from threading import Condition, Lock
 
 from chronos.domain.enums import ReconciliationStatus
+
+
+class ReadinessBlocker(StrEnum):
+    """Typed reasons a reconciliation pass cannot establish safe readiness."""
+
+    ALLOWLIST_BREACH = "ALLOWLIST_BREACH"
+    LOCAL_EVIDENCE_UNRESOLVED = "LOCAL_EVIDENCE_UNRESOLVED"
+    HELD_POSITION_UNPROVEN = "HELD_POSITION_UNPROVEN"
+    EXECUTIONS_UNALLOCATED = "EXECUTIONS_UNALLOCATED"
+    OPEN_ORDER_NOT_EXACT_PUT = "OPEN_ORDER_NOT_EXACT_PUT"
+    OWNERSHIP_ABSENT = "OWNERSHIP_ABSENT"
+    SCOPE_CHANGED = "SCOPE_CHANGED"
+    PASS_INCOMPLETE = "PASS_INCOMPLETE"
+    OPEN_ORDERS = "OPEN_ORDERS"
+    RESTART_BROKER_EVIDENCE_INCOMPLETE = "RESTART_BROKER_EVIDENCE_INCOMPLETE"
+    RESTART_SENT_ACTIVE = "RESTART_SENT_ACTIVE"
+    BLOCKERS_UNDETERMINED = "BLOCKERS_UNDETERMINED"
 
 
 @dataclass(frozen=True, slots=True)
