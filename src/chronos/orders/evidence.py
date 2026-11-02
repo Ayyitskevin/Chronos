@@ -111,7 +111,10 @@ class BrokerRiskEvidenceProvider:
             shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
             shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
             stock_close_call_evidence_issues = ()
-        held_short_option_contracts = _held_short_for_symbol(positions, intent)
+        (
+            held_short_option_contracts,
+            held_short_option_non_integral,
+        ) = _held_short_for_symbol(positions, intent)
         # Resting (unfilled) covered-call orders commit shares too; without this
         # two calls could both be approved against the same shares -> naked call.
         stock_sell_reserved_shares = (
@@ -170,6 +173,7 @@ class BrokerRiskEvidenceProvider:
             stock_close_call_evidence_issues=stock_close_call_evidence_issues,
             stock_sell_reserved_shares=stock_sell_reserved_shares,
             held_short_option_contracts=held_short_option_contracts,
+            held_short_option_non_integral=held_short_option_non_integral,
             option_buy_reserved_contracts=option_buy_reserved_contracts,
             option_buy_reservation_non_integral=option_buy_reservation_non_integral,
             current_symbol_allocation=current_symbol_allocation,
@@ -394,11 +398,14 @@ def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> De
     return total
 
 
-def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelOrderIntent) -> int:
+def _held_short_for_symbol(
+    positions: tuple[BrokerPosition, ...], intent: WheelOrderIntent
+) -> tuple[Decimal, bool]:
     if intent.product_family is not ProductFamily.OPTION:
-        return 0
+        return Decimal("0"), False
     con_id = getattr(intent.contract, "con_id", None)
-    total = 0
+    total = Decimal("0")
+    has_non_integral_quantity = False
     for position in positions:
         contract = position.contract
         if (
@@ -406,8 +413,10 @@ def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelO
             and contract.con_id == con_id
             and position.quantity < 0
         ):
-            total += int(abs(position.quantity))
-    return total
+            quantity = abs(position.quantity)
+            total += quantity
+            has_non_integral_quantity |= quantity != quantity.to_integral_value()
+    return total, has_non_integral_quantity
 
 
 def _pending_call_shares(open_orders: tuple[BrokerOrder, ...], symbol: str) -> Decimal:

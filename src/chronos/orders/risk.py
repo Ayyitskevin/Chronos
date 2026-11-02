@@ -212,7 +212,8 @@ class RiskEvidence(ChronosModel):
     stock_close_call_evidence_issues: tuple[str, ...] = ()
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
     stock_sell_reserved_shares: Decimal = Field(default=Decimal("0"), ge=0)
-    held_short_option_contracts: int = Field(default=0, ge=0)
+    held_short_option_contracts: Decimal = Field(default=Decimal("0"), ge=0)
+    held_short_option_non_integral: bool = False
     option_buy_reserved_contracts: Decimal = Field(default=Decimal("0"), ge=0)
     option_buy_reservation_non_integral: bool = False
     # Crypto evidence (ADR-0010 §4), kept SEPARATE from the wheel aggregates so a
@@ -528,6 +529,12 @@ class OrderRiskEngine:
     ) -> OrderRiskCheck:
         held = evidence.held_short_option_contracts
         resting_buys = evidence.option_buy_reserved_contracts
+        if evidence.held_short_option_non_integral or held != held.to_integral_value():
+            return _failed(
+                "held_position_sufficiency",
+                "held short option position is non-integral; "
+                f"held={held}, resting_buys={resting_buys}, bound=0",
+            )
         if resting_buys < 0:
             return _failed(
                 "held_position_sufficiency",
@@ -543,7 +550,7 @@ class OrderRiskEngine:
                 "resting option BUY reservation is non-integral; "
                 f"held={held}, resting_buys={resting_buys}, bound=0",
             )
-        bound = max(Decimal("0"), Decimal(held) - resting_buys)
+        bound = max(Decimal("0"), held - resting_buys)
         if intent.quantity <= bound:
             return _passed(
                 "held_position_sufficiency",
