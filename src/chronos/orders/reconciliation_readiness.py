@@ -47,6 +47,7 @@ class ReconciliationReadinessSnapshot:
     reason: str
     reconciled_at: datetime | None = None
     published_at: datetime | None = None
+    blockers: frozenset[ReadinessBlocker] = frozenset()
 
     @property
     def ready(self) -> bool:
@@ -104,6 +105,7 @@ class ReconciliationReadiness:
         self._reason = "startup reconciliation has not completed"
         self._reconciled_at: datetime | None = None
         self._published_at: datetime | None = None
+        self._blockers: frozenset[ReadinessBlocker] = frozenset()
 
     def snapshot(self) -> ReconciliationReadinessSnapshot:
         with self._lock:
@@ -205,6 +207,7 @@ class ReconciliationReadiness:
         self._reason = reason
         self._reconciled_at = None
         self._published_at = None
+        self._blockers = frozenset()
 
     def complete(
         self,
@@ -214,6 +217,7 @@ class ReconciliationReadiness:
         reason: str,
         reconciled_at: datetime | None = None,
         published_at: datetime | None = None,
+        blockers: frozenset[ReadinessBlocker] = frozenset(),
     ) -> bool:
         """Publish a result only if no lifecycle event raced the observation.
 
@@ -239,6 +243,7 @@ class ReconciliationReadiness:
             self._reason = normalized
             self._reconciled_at = reconciled_at
             self._published_at = published_at
+            self._blockers = frozenset(blockers)
             return True
 
     @contextmanager
@@ -311,4 +316,5 @@ class ReconciliationReadiness:
             reason=self._reason,
             reconciled_at=self._reconciled_at,
             published_at=self._published_at,
+            blockers=self._blockers,
         )
