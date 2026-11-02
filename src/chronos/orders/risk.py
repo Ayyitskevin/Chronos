@@ -213,7 +213,8 @@ class RiskEvidence(ChronosModel):
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
     stock_sell_reserved_shares: Decimal = Field(default=Decimal("0"), ge=0)
     held_short_option_contracts: int = Field(default=0, ge=0)
-    option_buy_reserved_contracts: int = Field(default=0, ge=0)
+    option_buy_reserved_contracts: Decimal = Field(default=Decimal("0"), ge=0)
+    option_buy_reservation_non_integral: bool = False
     # Crypto evidence (ADR-0010 §4), kept SEPARATE from the wheel aggregates so a
     # crypto holding never distorts stock concentration or cash math.
     held_crypto_quantity: Decimal = Field(default=Decimal("0"), ge=0)
@@ -532,6 +533,15 @@ class OrderRiskEngine:
                 "held_position_sufficiency",
                 f"resting option BUY reservation is invalid; held={held}, "
                 f"resting_buys={resting_buys}, bound=0",
+            )
+        if (
+            evidence.option_buy_reservation_non_integral
+            or resting_buys != resting_buys.to_integral_value()
+        ):
+            return _failed(
+                "held_position_sufficiency",
+                "resting option BUY reservation is non-integral; "
+                f"held={held}, resting_buys={resting_buys}, bound=0",
             )
         bound = max(0, held - resting_buys)
         if intent.quantity <= bound:

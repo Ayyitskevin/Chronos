@@ -119,10 +119,10 @@ class BrokerRiskEvidenceProvider:
             if isinstance(intent.contract, UnderlyingContract)
             else Decimal("0")
         )
-        option_buy_reserved_contracts = (
+        option_buy_reserved_contracts, option_buy_reservation_non_integral = (
             _option_buy_reserved(open_orders, intent.contract.con_id)
             if isinstance(intent.contract, OptionContract)
-            else 0
+            else (Decimal("0"), False)
         )
         # Concentration baseline: existing gross wheel exposure, per symbol and
         # across the account, so the check caps AGGREGATE exposure, not just the
@@ -171,6 +171,7 @@ class BrokerRiskEvidenceProvider:
             stock_sell_reserved_shares=stock_sell_reserved_shares,
             held_short_option_contracts=held_short_option_contracts,
             option_buy_reserved_contracts=option_buy_reserved_contracts,
+            option_buy_reservation_non_integral=option_buy_reservation_non_integral,
             current_symbol_allocation=current_symbol_allocation,
             current_total_wheel_allocation=current_total_wheel_allocation,
             held_crypto_quantity=held_crypto_quantity,
@@ -273,7 +274,7 @@ def _pending_put_obligation(open_orders: tuple[BrokerOrder, ...]) -> Decimal:
 
 
 def _short_option_contracts(positions: tuple[BrokerPosition, ...]) -> int:
-    total = 0
+    total = Decimal("0")
     for position in positions:
         if isinstance(position.contract, OptionContract) and position.quantity < 0:
             total += int(abs(position.quantity))
@@ -481,10 +482,13 @@ def _stock_sell_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> D
     return total
 
 
-def _option_buy_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> int:
+def _option_buy_reserved(
+    open_orders: tuple[BrokerOrder, ...], con_id: int
+) -> tuple[Decimal, bool]:
     """Contracts committed to resting BUY orders for the exact option."""
 
     total = 0
+    has_non_integral_quantity = False
     for order in open_orders:
         contract = order.contract
         if (
@@ -492,8 +496,11 @@ def _option_buy_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> i
             and contract.con_id == con_id
             and order.side is OrderSide.BUY
         ):
-            total += int(order.remaining_quantity)
-    return total
+            total += order.remaining_quantity
+            has_non_integral_quantity |= (
+                order.remaining_quantity != order.remaining_quantity.to_integral_value()
+            )
+    return total, has_non_integral_quantity
 
 
 def _crypto_allocation(positions: tuple[BrokerPosition, ...]) -> tuple[Decimal, bool]:
