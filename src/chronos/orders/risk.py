@@ -210,7 +210,9 @@ class RiskEvidence(ChronosModel):
     shares_covering_short_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
+    stock_sell_reserved_shares: Decimal = Field(default=Decimal("0"), ge=0)
     held_short_option_contracts: int = Field(default=0, ge=0)
+    option_buy_reserved_contracts: int = Field(default=0, ge=0)
     # Crypto evidence (ADR-0010 §4), kept SEPARATE from the wheel aggregates so a
     # crypto holding never distorts stock concentration or cash math.
     held_crypto_quantity: Decimal = Field(default=Decimal("0"), ge=0)

@@ -18,6 +18,7 @@ from chronos.config.settings import Settings
 from chronos.domain.enums import OrderIntent, OrderSide, RiskCheckStatus
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.risk import OrderRiskCheck, RiskEvidence
+from chronos.strategy import reservations
 
 STOCK_TIME_IN_FORCE = "DAY"
 
@@ -90,14 +91,48 @@ def _stock_sell_holding_check(
     intent: WheelOrderIntent,
     evidence: RiskEvidence,
 ) -> OrderRiskCheck:
-    # Compares to settled_long_shares only: shares covering a short call or reserved for a pending
-    # covered call are not subtracted (docs/limitations.md, D54-FIX4 covered-call residual).
-    if Decimal(intent.quantity) <= evidence.settled_long_shares:
+    try:
+        if evidence.stock_sell_reserved_shares < 0:
+            raise ValueError("resting stock SELL reservation must be non-negative")
+        share_summary = reservations.reserve_shares(
+            reservations.ShareReservationInput(
+                settled_long_shares=evidence.settled_long_shares,
+                shares_covering_short_calls=evidence.shares_covering_short_calls,
+                shares_reserved_for_pending_calls=evidence.shares_reserved_for_pending_calls,
+                shares_reserved_by_other_orders=evidence.shares_reserved_by_other_orders,
+                contract_multiplier=Decimal("100"),
+            )
+        )
+    except ValueError as error:
+        return _failed(
+            "stock_no_short",
+            "stock share reservation inputs rejected: "
+            f"{error}; {_stock_close_figures(evidence, bound=Decimal('0'))}",
+        )
+
+    bound = max(
+        Decimal("0"),
+        max(share_summary.unencumbered_shares, Decimal("0")) - evidence.stock_sell_reserved_shares,
+    )
+    figures = _stock_close_figures(evidence, bound=bound)
+    if Decimal(intent.quantity) <= bound:
         return _passed(
             "stock_no_short",
-            f"selling {intent.quantity} <= {evidence.settled_long_shares} settled shares",
+            f"selling {intent.quantity} <= bound {bound} ({figures})",
         )
+    reasons = "; ".join(share_summary.reasons)
+    reason_prefix = f"{reasons}; " if reasons else ""
     return _failed(
         "stock_no_short",
-        f"selling {intent.quantity} exceeds {evidence.settled_long_shares} held; no shorting",
+        f"{reason_prefix}selling {intent.quantity} exceeds available close shares ({figures})",
+    )
+
+
+def _stock_close_figures(evidence: RiskEvidence, *, bound: Decimal) -> str:
+    return (
+        f"settled={evidence.settled_long_shares}, "
+        f"covering={evidence.shares_covering_short_calls}, "
+        f"pending_calls={evidence.shares_reserved_for_pending_calls}, "
+        f"other_orders={evidence.shares_reserved_by_other_orders}, "
+        f"resting_sells={evidence.stock_sell_reserved_shares}, bound={bound}"
     )

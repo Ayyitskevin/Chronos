@@ -97,6 +97,16 @@ class BrokerRiskEvidenceProvider:
         # Resting (unfilled) covered-call orders commit shares too; without this
         # two calls could both be approved against the same shares -> naked call.
         shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
+        stock_sell_reserved_shares = (
+            _stock_sell_reserved(open_orders, intent.contract.con_id)
+            if isinstance(intent.contract, UnderlyingContract)
+            else Decimal("0")
+        )
+        option_buy_reserved_contracts = (
+            _option_buy_reserved(open_orders, intent.contract.con_id)
+            if isinstance(intent.contract, OptionContract)
+            else 0
+        )
         # Concentration baseline: existing gross wheel exposure, per symbol and
         # across the account, so the check caps AGGREGATE exposure, not just the
         # single new order.
@@ -140,7 +150,9 @@ class BrokerRiskEvidenceProvider:
             settled_long_shares=settled_long_shares,
             shares_covering_short_calls=shares_covering_short_calls,
             shares_reserved_for_pending_calls=shares_reserved_for_pending_calls,
+            stock_sell_reserved_shares=stock_sell_reserved_shares,
             held_short_option_contracts=held_short_option_contracts,
+            option_buy_reserved_contracts=option_buy_reserved_contracts,
             current_symbol_allocation=current_symbol_allocation,
             current_total_wheel_allocation=current_total_wheel_allocation,
             held_crypto_quantity=held_crypto_quantity,
@@ -343,6 +355,36 @@ def _crypto_sell_reserved(open_orders: tuple[BrokerOrder, ...], symbol: str) -> 
             and order.side is OrderSide.SELL
         ):
             total += order.remaining_quantity
+    return total
+
+
+def _stock_sell_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> Decimal:
+    """Stock shares committed to resting SELL orders for the exact contract."""
+
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, UnderlyingContract)
+            and contract.con_id == con_id
+            and order.side is OrderSide.SELL
+        ):
+            total += order.remaining_quantity
+    return total
+
+
+def _option_buy_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> int:
+    """Contracts committed to resting BUY orders for the exact option."""
+
+    total = 0
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.con_id == con_id
+            and order.side is OrderSide.BUY
+        ):
+            total += int(order.remaining_quantity)
     return total
 
 
