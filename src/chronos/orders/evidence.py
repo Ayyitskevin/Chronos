@@ -274,7 +274,7 @@ def _pending_put_obligation(open_orders: tuple[BrokerOrder, ...]) -> Decimal:
 
 
 def _short_option_contracts(positions: tuple[BrokerPosition, ...]) -> int:
-    total = Decimal("0")
+    total = 0
     for position in positions:
         if isinstance(position.contract, OptionContract) and position.quantity < 0:
             total += int(abs(position.quantity))
@@ -356,9 +356,7 @@ def _stock_close_call_reservations(
     return covering_shares, pending_shares, tuple(sorted(unverified))
 
 
-def _may_encumber_stock_close(
-    contract: OptionContract, underlying: UnderlyingContract
-) -> bool:
+def _may_encumber_stock_close(contract: OptionContract, underlying: UnderlyingContract) -> bool:
     """Find calls that could encumber this ticker, then require exact evidence."""
 
     return contract.underlying_con_id == underlying.con_id or contract.symbol == underlying.symbol
@@ -378,10 +376,7 @@ def _verified_stock_close_call_deliverable(
 
 
 def _stock_close_call_label(contract: OptionContract) -> str:
-    return (
-        f"{contract.symbol} {contract.expiration.isoformat()} "
-        f"CALL {contract.strike}"
-    )
+    return f"{contract.symbol} {contract.expiration.isoformat()} CALL {contract.strike}"
 
 
 def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
@@ -482,12 +477,10 @@ def _stock_sell_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> D
     return total
 
 
-def _option_buy_reserved(
-    open_orders: tuple[BrokerOrder, ...], con_id: int
-) -> tuple[Decimal, bool]:
+def _option_buy_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> tuple[Decimal, bool]:
     """Contracts committed to resting BUY orders for the exact option."""
 
-    total = 0
+    total = Decimal("0")
     has_non_integral_quantity = False
     for order in open_orders:
         contract = order.contract
