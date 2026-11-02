@@ -331,6 +331,23 @@ def test_stock_close_holding_bound_uses_exact_underlying_and_currency() -> None:
     assert "bound=100" in check.detail
 
 
+def test_stock_close_holding_bound_uses_con_id_when_currency_matches() -> None:
+    target_stock = stock_contract(con_id=999)
+    same_symbol_usd_stock = stock_contract(con_id=1000)
+    evidence, decision = _evaluate(
+        _stock_close(150),
+        positions=(
+            _position(target_stock, "100"),
+            _position(same_symbol_usd_stock, "100"),
+        ),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert evidence.settled_long_shares == Decimal("100")
+    assert check.status is RiskCheckStatus.FAIL
+    assert "bound=100" in check.detail
+
+
 def test_stock_close_refuses_unverified_call_deliverable() -> None:
     stock = stock_contract(con_id=999)
     unverified_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
@@ -351,6 +368,29 @@ def test_stock_close_refuses_unverified_call_deliverable() -> None:
     assert "999" not in check.detail
 
     assert evidence.shares_covering_short_calls == Decimal("0")
+
+
+def test_stock_close_refuses_unverified_call_without_underlying_id() -> None:
+    stock = stock_contract(con_id=999)
+    unverified_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
+        update={
+            "underlying_con_id": None,
+            "deliverable_verified": False,
+            "deliverable_shares": None,
+        }
+    )
+    _, decision = _evaluate(
+        _stock_close(50),
+        positions=(_position(stock, "150"), _position(unverified_call, "-1")),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert check.status is RiskCheckStatus.FAIL
+    assert unverified_call.symbol in check.detail
+    assert unverified_call.expiration.isoformat() in check.detail
+    assert str(unverified_call.strike) in check.detail
+    assert "222" not in check.detail
+    assert "999" not in check.detail
 
 
 def test_stock_close_refuses_unverified_pending_call_deliverable() -> None:
