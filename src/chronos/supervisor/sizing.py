@@ -50,6 +50,8 @@ from chronos.autonomy import (
     DecisionKind,
     TradableAssetClass,
 )
+from chronos.domain.enums import OrderSide
+from chronos.supervisor.compiler import closing_side
 
 #: Asset classes whose quantity is a contract count with a multiplier, rather
 #: than a share count. Kept local: the model plane owns no order semantics.
@@ -93,6 +95,10 @@ class AccountEvidence:
     #: Signed quantity currently held in this instrument, in the same units the
     #: order would use. A risk-reducing order may never exceed it.
     position_quantity: Decimal | None = None
+    #: Where ``position_quantity`` came from (D-54): contract, read bracket and the
+    #: account fingerprint, as text. Appended to the binding constraint's label so
+    #: the sized figure names its source; ``None`` keeps the label unchanged.
+    position_provenance: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +115,9 @@ class SizingOutcome:
     #: ceilings were deliberately not applied and the position held bounded it.
     risk_reducing: bool = False
     refusal: str = ""
+    #: A stable code for refusals a caller must tell apart (D-54); empty for the
+    #: rest, which the cycle records as ``NO_EXECUTABLE_SIZE``.
+    refusal_code: str = ""
 
     @property
     def was_clamped(self) -> bool:
@@ -127,9 +136,15 @@ class SizingOutcome:
         return self.quantity is not None and self.requested is None
 
 
-def _refuse(requested: Decimal | None, constraints: list[str], reason: str) -> SizingOutcome:
+def _refuse(
+    requested: Decimal | None, constraints: list[str], reason: str, *, code: str = ""
+) -> SizingOutcome:
     return SizingOutcome(
-        quantity=None, requested=requested, constraints=tuple(constraints), refusal=reason
+        quantity=None,
+        requested=requested,
+        constraints=tuple(constraints),
+        refusal=reason,
+        refusal_code=code,
     )
 
 
@@ -240,6 +255,15 @@ def _size(
         # "closing" more than we hold flips the position short, which is the
         # opposite of risk reduction and is exactly the unbounded exposure the
         # asset-class matrix forbids.
+        if decision_kind is DecisionKind.REDUCE and requested_quantity is None:
+            # D-54 Q5: a REDUCE that names no quantity would size to the whole
+            # position, i.e. be a CLOSE recorded under another name.
+            return _refuse(
+                requested_quantity,
+                constraints,
+                "a REDUCE must say how much; use CLOSE",
+                code="REDUCE_QUANTITY_REQUIRED",
+            )
         held = evidence.position_quantity
         if held is None:
             return _refuse(
@@ -248,7 +272,24 @@ def _size(
                 f"a {decision_kind.value} decision may not be sized without the position "
                 "actually held; closing more than we hold would open the opposite position",
             )
-        bind(abs(held), f"position held {held}")
+        side = closing_side(asset_class, decision_kind)
+        if side is not None and held != 0 and (held > 0) is not (side is OrderSide.SELL):
+            # D-54 Q2: the compiler picks the side from the asset class alone, so a
+            # magnitude bound would SELL against a short (or BUY against a long)
+            # and add to the very position it claims to close.
+            held_side = "long" if held > 0 else "short"
+            rule = "sells long only" if side is OrderSide.SELL else "buys back short only"
+            return _refuse(
+                requested_quantity,
+                constraints,
+                f"position held is {held_side} ({held}); a {decision_kind.value} on "
+                f"{asset_class.value} {rule}",
+                code="POSITION_SIGN_MISMATCH",
+            )
+        label = f"position held {held}"
+        if evidence.position_provenance:
+            label = f"{label} ({evidence.position_provenance})"
+        bind(abs(held), label)
 
     # --- ceilings that need only the mandate --------------------------------
     # ADR-0017: under an owner-granted `model_discretion`, an UNSET (zero)

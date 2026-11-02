@@ -71,6 +71,7 @@ from sqlalchemy.orm import Session
 
 from chronos.autonomy import (
     LIVE_AUTONOMY_MODES,
+    RISK_REDUCING_DECISION_KINDS,
     AITradeDecision,
     AutonomyMandate,
     DecisionKind,
@@ -168,6 +169,77 @@ class CycleFacts:
     market_timezone: str | None = None
 
 
+class PositionEvidenceRefusal(StrEnum):
+    """Why an exit's held position cannot bound it (D-54). Recorded as the cycle's refusal.
+
+    Each is a per-decision refusal at the SIZING stage, never an owner alert and never a
+    whole-tick failure: one exit's unusable evidence must not stop the rest of the batch.
+    """
+
+    READ_FAILED = "POSITION_READ_FAILED"
+    READINESS_MOVED = "POSITION_READINESS_MOVED"
+    READS_DISAGREE = "POSITION_READS_DISAGREE"
+    SOURCE_CACHED = "POSITION_SOURCE_CACHED"
+    NOT_MANAGED = "POSITION_NOT_MANAGED"
+    IDENTITY_AMBIGUOUS = "POSITION_IDENTITY_AMBIGUOUS"
+    ACCOUNT_MISMATCH = "POSITION_ACCOUNT_MISMATCH"
+    NOT_FINITE = "POSITION_NOT_FINITE"
+    EXIT_ALREADY_SIZED = "POSITION_EXIT_ALREADY_SIZED_THIS_TICK"
+    FLAT = "POSITION_FLAT"
+    IMPLAUSIBLE = "POSITION_IMPLAUSIBLE"
+
+
+#: D-54 Q7: a held figure worth more than this multiple of net liquidation is read as corrupt
+#: evidence and refused. It is a plausibility check on the input, not a sizing ceiling.
+POSITION_PLAUSIBILITY_MULTIPLE = Decimal(2)
+
+
+@dataclass(frozen=True, slots=True)
+class PositionEvidence:
+    """Where an exit's held figure came from, or why there is none (D-54).
+
+    Written into the chained cycle record. It names the account by FINGERPRINT only; the raw
+    account id never enters it. ``quantity`` is signed (short is negative) and is ``None``
+    whenever ``refusal`` is set: unknown is never zero.
+    """
+
+    source: str
+    account_fingerprint: str
+    con_id: int
+    security_type: str
+    quantity: Decimal | None
+    read_session_id: str | None = None
+    read_generation: int | None = None
+    reads_agree: bool = False
+    observed_at: datetime | None = None
+    refusal: PositionEvidenceRefusal | None = None
+    detail: str = ""
+
+    def label(self) -> str:
+        """The provenance text sizing appends to its ``position held`` constraint."""
+
+        return (
+            f"con_id {self.con_id} {self.security_type}, {self.source} read twice, readiness "
+            f"session {self.read_session_id} generation {self.read_generation}, account "
+            f"{self.account_fingerprint[:12]}"
+        )
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "account_fingerprint": self.account_fingerprint,
+            "con_id": self.con_id,
+            "security_type": self.security_type,
+            "quantity": str(self.quantity) if self.quantity is not None else None,
+            "read_session_id": self.read_session_id,
+            "read_generation": self.read_generation,
+            "reads_agree": self.reads_agree,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "refusal": self.refusal.value if self.refusal is not None else None,
+            "detail": self.detail,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class InstrumentFacts:
     """The per-instrument slice of the supervisor's view (M7.5).
@@ -190,6 +262,15 @@ class InstrumentFacts:
     #: App-plane read-only live-promotion recheck. It has no broker mutation
     #: surface and returns a refusal detail rather than raising authority.
     selection_activation_validator: Callable[[OptionSelectionReceipt], str] | None = None
+    #: D-54: the signed quantity held in exactly this contract, for a CLOSE or REDUCE, from
+    #: two bracketed broker reads. ``None`` when not gathered or unknown.
+    position_quantity: Decimal | None = None
+    #: D-54: why this decision's held position is unusable, typed; ``None`` when usable.
+    position_evidence_refusal: PositionEvidenceRefusal | None = None
+    #: D-54: the read behind ``position_quantity`` (or behind the refusal). An exit whose
+    #: instrument slice carries none is sized from no position at all, never from the
+    #: tick-wide ``AccountEvidence`` figure.
+    position_evidence: PositionEvidence | None = None
 
 
 #: Resolves the instrument slice for one stamped decision, or ``None`` when it
@@ -296,6 +377,8 @@ class CycleOutcome:
     #: ``None`` when the cycle never reached the handoff, or when it raised.
     handoff_result: HandoffResult | None = None
     alerts_raised: tuple[str, ...] = field(default_factory=tuple)
+    #: D-54: the position read an exit was sized from (or refused on), for the journal.
+    position_evidence: PositionEvidence | None = None
 
     @property
     def reached_order_plane(self) -> bool:
@@ -604,6 +687,9 @@ def run_cycle(
     # supplied. No gatherer keeps the single-instrument CycleFacts behavior.
     selection_receipt: OptionSelectionReceipt | None = None
     selection_activation_validator: Callable[[OptionSelectionReceipt], str] | None = None
+    sizing_evidence = facts.account
+    exit_evidence: PositionEvidence | None = None
+    exit_refusal: PositionEvidenceRefusal | None = None
     contract: Instrument | None = facts.contract
     quote: QuoteEvidence | None = facts.quote
     reference_price = facts.reference_price
@@ -677,6 +763,17 @@ def run_cycle(
         multiplier = instrument.multiplier
         selection_receipt = instrument.selection_receipt
         selection_activation_validator = instrument.selection_activation_validator
+        if decision.kind in RISK_REDUCING_DECISION_KINDS:
+            # D-54 (threat map probe 2c): the tick's AccountEvidence was gathered for the
+            # probe symbol, so with a per-decision gatherer an exit is bounded by its own
+            # instrument's read or by nothing.
+            exit_evidence = instrument.position_evidence
+            exit_refusal = instrument.position_evidence_refusal
+            sizing_evidence = replace(
+                facts.account,
+                position_quantity=instrument.position_quantity if exit_refusal is None else None,
+                position_provenance=exit_evidence.label() if exit_evidence is not None else None,
+            )
 
     if _requires_option_selection(decision):
         if selection_receipt is None:
@@ -791,6 +888,34 @@ def run_cycle(
         reference_price = selected.sizing_reference_price
         multiplier = selected.deliverable_shares
 
+    # --- position evidence (D-54) -----------------------------------------
+    if exit_evidence is not None:
+        if exit_refusal is None:
+            exit_refusal, why = _position_refusal(
+                exit_evidence,
+                reference_price=reference_price,
+                multiplier=multiplier,
+                net_liquidation=facts.account.net_liquidation_usd,
+            )
+            if exit_refusal is not None:
+                exit_evidence = replace(exit_evidence, refusal=exit_refusal, detail=why)
+        if exit_refusal is not None:
+            return _record(
+                session,
+                facts,
+                CycleOutcome(
+                    stage=CycleStage.SIZING,
+                    refusal=exit_refusal.value,
+                    detail=exit_evidence.detail,
+                    decision_id=decision.decision_id,
+                    decision=decision,
+                    admission=admission,
+                    alerts_raised=alert_kinds,
+                    position_evidence=exit_evidence,
+                ),
+                posture=posture,
+            )
+
     # --- sizing ------------------------------------------------------------
     sizing = size_order(
         mandate=mandate,
@@ -798,7 +923,7 @@ def run_cycle(
         asset_class=decision.asset_class,
         reference_price=reference_price,
         multiplier=multiplier,
-        evidence=facts.account,
+        evidence=sizing_evidence,
         requested_quantity=decision.requested_quantity,
     )
     if sizing.quantity is None:
@@ -807,13 +932,14 @@ def run_cycle(
             facts,
             CycleOutcome(
                 stage=CycleStage.SIZING,
-                refusal="NO_EXECUTABLE_SIZE",
+                refusal=sizing.refusal_code or "NO_EXECUTABLE_SIZE",
                 detail=sizing.refusal,
                 decision_id=decision.decision_id,
                 decision=decision,
                 admission=admission,
                 selection_receipt=selection_receipt,
                 sizing=sizing,
+                position_evidence=exit_evidence,
                 alerts_raised=alert_kinds,
             ),
             posture=posture,
@@ -841,6 +967,7 @@ def run_cycle(
                 admission=admission,
                 selection_receipt=selection_receipt,
                 sizing=sizing,
+                position_evidence=exit_evidence,
                 compilation=compilation,
                 alerts_raised=alert_kinds,
             ),
@@ -876,6 +1003,7 @@ def run_cycle(
                     admission=admission,
                     selection_receipt=selection_receipt,
                     sizing=sizing,
+                    position_evidence=exit_evidence,
                     compilation=compilation,
                     alerts_raised=alert_kinds,
                 ),
@@ -898,6 +1026,7 @@ def run_cycle(
                 admission=admission,
                 selection_receipt=selection_receipt,
                 sizing=sizing,
+                position_evidence=exit_evidence,
                 compilation=compilation,
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
@@ -929,6 +1058,7 @@ def run_cycle(
                 admission=admission,
                 selection_receipt=selection_receipt,
                 sizing=sizing,
+                position_evidence=exit_evidence,
                 compilation=compilation,
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
@@ -964,6 +1094,7 @@ def run_cycle(
                     admission=admission,
                     selection_receipt=selection_receipt,
                     sizing=sizing,
+                    position_evidence=exit_evidence,
                     compilation=compilation,
                     intent=compilation.intent,
                     alerts_raised=alert_kinds,
@@ -994,6 +1125,7 @@ def run_cycle(
                         admission=admission,
                         selection_receipt=selection_receipt,
                         sizing=sizing,
+                        position_evidence=exit_evidence,
                         compilation=compilation,
                         intent=compilation.intent,
                         alerts_raised=alert_kinds,
@@ -1021,6 +1153,7 @@ def run_cycle(
                         admission=admission,
                         selection_receipt=selection_receipt,
                         sizing=sizing,
+                        position_evidence=exit_evidence,
                         compilation=compilation,
                         intent=compilation.intent,
                         alerts_raised=alert_kinds,
@@ -1076,6 +1209,7 @@ def run_cycle(
                 admission=admission,
                 selection_receipt=selection_receipt,
                 sizing=sizing,
+                position_evidence=exit_evidence,
                 compilation=compilation,
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
@@ -1137,6 +1271,7 @@ def run_cycle(
             admission=admission,
             selection_receipt=selection_receipt,
             sizing=sizing,
+            position_evidence=exit_evidence,
             compilation=compilation,
             intent=compilation.intent,
             handoff=result,
@@ -1713,6 +1848,7 @@ def _record(
                 "limit_price": str(outcome.intent.limit_price) if outcome.intent else None,
                 **_handoff_of(outcome.handoff_result),
                 **_narrative_of(outcome.decision),
+                **_position_of(outcome.position_evidence),
             },
             recorded_at=facts.now,
         )
@@ -1734,6 +1870,46 @@ def _handoff_of(result: HandoffResult | None) -> dict[str, Any]:
         "handoff_counted_attempt": result.counts_activity_attempt,
         "order_plane_code": result.order_plane_code,
     }
+
+
+def _position_of(evidence: PositionEvidence | None) -> dict[str, Any]:
+    """The position read an exit rested on, for the journal (D-54).
+
+    Absent when the cycle gathered none, so every record that predates D-54 or never
+    reached an exit's gather keeps its bytes.
+    """
+
+    if evidence is None:
+        return {}
+    return {"position_evidence": evidence.as_payload()}
+
+
+def _position_refusal(
+    evidence: PositionEvidence,
+    *,
+    reference_price: Decimal,
+    multiplier: Decimal,
+    net_liquidation: Decimal,
+) -> tuple[PositionEvidenceRefusal | None, str]:
+    """Refuse a usable-looking figure that is flat or implausible (D-54 (q), Q7)."""
+
+    held = evidence.quantity
+    if held is None:
+        return PositionEvidenceRefusal.READ_FAILED, "no position figure was gathered"
+    if held == 0:
+        return PositionEvidenceRefusal.FLAT, (
+            f"the broker reports no position in con_id {evidence.con_id} after a complete, "
+            "agreeing read; there is nothing to close"
+        )
+    worth = abs(held) * reference_price * multiplier
+    ceiling = POSITION_PLAUSIBILITY_MULTIPLE * net_liquidation
+    if worth > ceiling:
+        return PositionEvidenceRefusal.IMPLAUSIBLE, (
+            f"the position read ({held} in con_id {evidence.con_id}) is worth {worth}, more "
+            f"than {POSITION_PLAUSIBILITY_MULTIPLE} x net liquidation {net_liquidation}; "
+            "refused as corrupt evidence rather than clamped to a size that looks legitimate"
+        )
+    return None, ""
 
 
 def _narrative_of(decision: AITradeDecision | None) -> dict[str, Any]:

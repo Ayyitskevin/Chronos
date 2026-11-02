@@ -170,7 +170,13 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # CB-1's official_ibkr.py fingerprint).
     # 48 at the D-43/#329 merge: main's 47 plus D-43's one (CB-1's official_ibkr.py fingerprint,
     # superseded by the quantity quarantine); neither side changes the other's inventory files.
-    assert len(historical_candidates) == 48
+    # 51 at D-54 (exits sized from broker position evidence): the superseded compiler.py,
+    # api/autonomy_wiring.py and official_ibkr.py source-inventory fingerprints (3).
+    # 52 at D54-FIX1 (api/autonomy_wiring.py: the account check supersedes D-54's fingerprint).
+    # 53 at D54-FIX2 (api/autonomy_wiring.py: the blank-account guard supersedes FIX1's).
+    # 54 at D54-FIX4 (api/autonomy_wiring.py: the managed-binding wording supersedes FIX2's).
+    # 55 at D54-FIX5 (api/autonomy_wiring.py: the covered-call residual pointer supersedes FIX4's).
+    assert len(historical_candidates) == 55
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

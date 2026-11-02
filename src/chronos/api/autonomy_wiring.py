@@ -54,12 +54,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from chronos.api.option_selection import AutonomousOptionSelectionService
@@ -73,11 +74,20 @@ from chronos.autonomy import (
 )
 from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
 from chronos.config.settings import Settings
-from chronos.domain.enums import OptionRight, OrderLifecycle
+from chronos.domain.enums import (
+    BrokerAdapter,
+    BrokerMode,
+    OptionRight,
+    OrderLifecycle,
+    ProductFamily,
+    SecurityType,
+)
 from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
+from chronos.persistence.schema import ManagedPositionBindingRow, OrderIntentRow
 from chronos.runtime import AppRuntime
+from chronos.services.reconciliation import _position_signatures
 from chronos.supervisor import (
     alerts,
     delivery,
@@ -87,10 +97,16 @@ from chronos.supervisor import (
     queue,
     revocation,
 )
-from chronos.supervisor.admission import MarketDataEvidence
+from chronos.supervisor.admission import DegradedReason, MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import SUBMIT_RAISED_CODE, HandoffResult
-from chronos.supervisor.loop import CycleFacts, Handoff, InstrumentFacts
+from chronos.supervisor.loop import (
+    CycleFacts,
+    Handoff,
+    InstrumentFacts,
+    PositionEvidence,
+    PositionEvidenceRefusal,
+)
 from chronos.supervisor.option_selection import (
     OptionSelectionPolicy,
     OptionSelectionRequest,
@@ -674,8 +690,25 @@ def _policy_for(
     )
 
 
+#: The decision kinds whose size is bounded by the position held (D-54). HOLD never sizes.
+_EXIT_KINDS = frozenset({DecisionKind.CLOSE, DecisionKind.REDUCE})
+_POSITION_SOURCE = "broker.positions"
+_PRODUCT_FAMILY_OF = {
+    SecurityType.STOCK.value: ProductFamily.STOCK.value,
+    SecurityType.CRYPTO.value: ProductFamily.CRYPTO.value,
+    SecurityType.OPTION.value: ProductFamily.OPTION.value,
+}
+
+
 class BackendGatherers:
-    """Facts from the running backend, per tick and per decision."""
+    """Facts from the running backend, per tick and per decision.
+
+    D-54 keeps per-tick state, reset when ``cycle_facts`` gathers a new tick: the contracts
+    a managed binding ties to this account's FILLED Chronos openings (read once, before the
+    drain opens its session; production writes no binding, so the set is empty there), the
+    contracts an exit has already taken a position read for this tick, and the account the
+    tick's summary named (an exit's rows must belong to it).
+    """
 
     def __init__(
         self,
@@ -690,6 +723,9 @@ class BackendGatherers:
         self._fingerprint = fingerprint
         self._generation = generation
         self._mandate = mandate
+        self._managed_contracts: frozenset[tuple[int, str]] | None = None
+        self._exits_this_tick: set[tuple[int, str]] = set()
+        self._tick_account_id: str | None = None
         self._option_selection = AutonomousOptionSelectionService(
             runtime,
             autonomy_mode=mandate.mode.value,
@@ -704,8 +740,13 @@ class BackendGatherers:
     def cycle_facts(self, mandate: AutonomyMandate) -> FactGatherer:
         def _gather(now: datetime) -> CycleFacts | None:
             runtime = self._runtime
+            self._exits_this_tick = set()
+            self._tick_account_id = None
+            self._managed_contracts = self._read_managed_contracts()
             try:
                 summary = runtime.connection.run(runtime.broker.account_summary())
+                self._tick_account_id = summary.account_id
+                status = runtime.connection.run(runtime.broker.connection_status())
                 probe = self._probe_symbol(mandate)
                 if not probe:
                     return None
@@ -735,10 +776,43 @@ class BackendGatherers:
                 contract=contract,
                 reference_price=_reference_price(quote),
                 multiplier=Decimal(1),
+                degraded_reasons=_position_truth_degradations(status, summary.account_id),
                 market_timezone=runtime.settings.autonomy_market_timezone,
             )
 
         return _gather
+
+    def _read_managed_contracts(self) -> frozenset[tuple[int, str]] | None:
+        """(con_id, product family) a managed binding ties to a FILLED Chronos opening (D-54 Q3).
+
+        Read-only, through the managed-position bindings to the opening intents' persisted
+        ``con_id``. Read once per tick, in ``cycle_facts``, because that runs before the
+        drain opens its own session: a second session opened mid-cycle would share an
+        in-memory database's one connection and roll back the cycle's pending writes when it
+        closed. ``None`` when the bindings cannot be read, which refuses every exit this tick.
+        """
+
+        fingerprint = self._fingerprint
+        try:
+            with self._runtime.database.sessions() as session:
+                rows = session.execute(
+                    select(OrderIntentRow.con_id, OrderIntentRow.product_family)
+                    .join(
+                        ManagedPositionBindingRow,
+                        ManagedPositionBindingRow.opening_order_ref == OrderIntentRow.order_ref,
+                    )
+                    .where(
+                        ManagedPositionBindingRow.account_fingerprint == fingerprint,
+                        OrderIntentRow.account_fingerprint == fingerprint,
+                        OrderIntentRow.status == OrderLifecycle.FILLED.value,
+                        OrderIntentRow.open_close_effect == "OPEN",
+                        OrderIntentRow.con_id.is_not(None),
+                    )
+                ).all()
+        except Exception:
+            _logger.exception("Managed-position bindings could not be read for autonomy exits")
+            return None
+        return frozenset((int(con_id), str(family)) for con_id, family in rows)
 
     def instrument_facts(self, decision: AITradeDecision) -> InstrumentFacts | None:
         """Qualify and quote the decision's own instrument, fresh.
@@ -831,12 +905,202 @@ class BackendGatherers:
         reference = _reference_price(quote)
         if reference <= 0:
             return None
-        return InstrumentFacts(
+        facts = InstrumentFacts(
             contract=contract,
             quote=_quote_evidence(quote),
             reference_price=reference,
             multiplier=Decimal(1),
         )
+        if decision.kind not in _EXIT_KINDS:
+            return facts
+        evidence = self._position_evidence(contract)
+        return replace(
+            facts,
+            position_quantity=evidence.quantity,
+            position_evidence_refusal=evidence.refusal,
+            position_evidence=evidence,
+        )
+
+    def _position_evidence(self, contract: Instrument) -> PositionEvidence:
+        """The signed quantity held in exactly ``contract``, or a typed refusal (D-54).
+
+        Two ``positions()`` reads under one readiness bracket: same session, same generation
+        before the first and after the second (a connection close, a scope change or a
+        reconciliation pass all move the generation), and the two reads agree by the
+        reconciler's own comparator. The latch need not be READY: a held position keeps it at
+        MANUAL_REVIEW by construction (Q4). The slice is cut by ``con_id`` and security type,
+        never by symbol. Never raises: a failure is this decision's refusal, not the tick's.
+        Nothing here subtracts shares covering a short call or reserved for a pending covered
+        call (docs/limitations.md, D54-FIX4 covered-call residual).
+        """
+
+        con_id = contract.con_id
+        security_type = contract.security_type.value
+        key = (con_id, security_type)
+
+        def refuse(
+            code: PositionEvidenceRefusal, detail: str, **bracket: object
+        ) -> PositionEvidence:
+            return PositionEvidence(
+                source=_POSITION_SOURCE,
+                account_fingerprint=self._fingerprint,
+                con_id=con_id,
+                security_type=security_type,
+                quantity=None,
+                refusal=code,
+                detail=detail,
+                **bracket,  # type: ignore[arg-type]
+            )
+
+        runtime = self._runtime
+        try:
+            settings = runtime.settings
+            if (
+                settings.broker_mode is not BrokerMode.DEMO
+                and settings.broker_adapter is BrokerAdapter.IB_ASYNC
+            ):
+                return refuse(
+                    PositionEvidenceRefusal.SOURCE_CACHED,
+                    "the ib_async adapter answers positions() from its client cache, which an "
+                    "assignment or a never-synced order does not update; it is not a broker read",
+                )
+            if key in self._exits_this_tick:
+                return refuse(
+                    PositionEvidenceRefusal.EXIT_ALREADY_SIZED,
+                    "another exit on this contract already took this tick's position read; "
+                    "bounding this one by what remains would need netting, which is not "
+                    "implemented",
+                )
+            managed = self._managed_contracts
+            if managed is None or (con_id, _PRODUCT_FAMILY_OF[security_type]) not in managed:
+                return refuse(
+                    PositionEvidenceRefusal.NOT_MANAGED,
+                    "no managed binding ties this contract to a FILLED Chronos opening of "
+                    "this account"
+                    if managed is not None
+                    else "the managed-position bindings could not be read this tick",
+                )
+            readiness = runtime.reconciliation_readiness
+            before = readiness.snapshot()
+            first = runtime.connection.run(runtime.broker.positions())
+            second = runtime.connection.run(runtime.broker.positions())
+            after = readiness.snapshot()
+            observed_at = utc_now()
+            bracket: dict[str, object] = {
+                "read_session_id": after.session_id,
+                "read_generation": after.generation,
+                "observed_at": observed_at,
+            }
+            if before.session_id != after.session_id:
+                return refuse(
+                    PositionEvidenceRefusal.READINESS_MOVED,
+                    "the readiness session changed between the two position reads",
+                    **bracket,
+                )
+            if before.generation != after.generation:
+                return refuse(
+                    PositionEvidenceRefusal.READINESS_MOVED,
+                    f"the readiness generation moved from {before.generation} to "
+                    f"{after.generation} across the two position reads",
+                    **bracket,
+                )
+            rows = [
+                row for read in (first, second) for row in read if row.contract.con_id == con_id
+            ]
+            if not self._tick_account_id:
+                # D54-FIX2 (delta review P3-2): a blank or unread tick account names no identity,
+                # so blank == blank must not pass the comparison below.
+                return refuse(
+                    PositionEvidenceRefusal.ACCOUNT_MISMATCH,
+                    "this tick's account summary named no account to compare position rows with",
+                    **bracket,
+                )
+            if any(row.account_id != self._tick_account_id for row in rows):
+                # D54-FIX1 P2-1: the official adapter already filters to the configured account;
+                # the identity is (account, con_id, security type) here too, not one layer down.
+                # The detail names neither account: the record carries the fingerprint only.
+                return refuse(
+                    PositionEvidenceRefusal.ACCOUNT_MISMATCH,
+                    f"a position row for con_id {con_id} belongs to another account than the one "
+                    "this tick's account summary named",
+                    **bracket,
+                )
+            # Before the comparator, and load-bearing (delta review P3-3, measured with the check
+            # removed): distinct NaN objects in the two reads compare unequal, so the decision
+            # would refuse POSITION_READS_DISAGREE without naming the cause; ONE NaN object shared
+            # by both reads compares equal, passes the comparator, and the loop's Q7 comparison
+            # raises InvalidOperation out of run_cycle, aborting the whole tick with no record for
+            # this decision. Refusing here keeps the tick alive and the record typed.
+            if any(not row.quantity.is_finite() for row in rows):
+                return refuse(
+                    PositionEvidenceRefusal.NOT_FINITE,
+                    f"the broker reported a non-finite quantity for con_id {con_id}",
+                    **bracket,
+                )
+            if _position_signatures(first) != _position_signatures(second):
+                return refuse(
+                    PositionEvidenceRefusal.READS_DISAGREE,
+                    "the two position reads disagree",
+                    **bracket,
+                )
+            matching = [row for row in second if row.contract.con_id == con_id]
+            if len(matching) > 1 or any(
+                row.contract.security_type.value != security_type for row in matching
+            ):
+                return refuse(
+                    PositionEvidenceRefusal.IDENTITY_AMBIGUOUS,
+                    f"con_id {con_id} does not name exactly one {security_type} position",
+                    **bracket,
+                )
+        except Exception as error:
+            _logger.exception("Position evidence gathering failed for con_id %s", con_id)
+            return refuse(
+                PositionEvidenceRefusal.READ_FAILED,
+                f"the position read raised {type(error).__name__}",
+            )
+        self._exits_this_tick.add(key)
+        # A complete, agreeing read with no row for this contract is flat, not unknown.
+        held = matching[0].quantity if matching else Decimal(0)
+        return PositionEvidence(
+            source=_POSITION_SOURCE,
+            account_fingerprint=self._fingerprint,
+            con_id=con_id,
+            security_type=security_type,
+            quantity=held,
+            reads_agree=True,
+            **bracket,  # type: ignore[arg-type]
+        )
+
+
+def _position_truth_degradations(status: object, account_id: str) -> tuple[DegradedReason, ...]:
+    """Tick-wide conditions that leave position truth unknown (D-54 Q4).
+
+    A closed connection, or a configured account the broker no longer manages, is true of
+    every decision in the tick, so it blocks the tick at admission, exits included
+    (``blocks_risk_reduction=True``). Anything that happens mid-tick is caught by the
+    per-decision bracket instead.
+    """
+
+    if not getattr(status, "connected", False):
+        return (
+            DegradedReason(
+                subsystem="broker connection",
+                detail="the broker connection is closed, so position truth is unknown",
+                blocks_risk_reduction=True,
+            ),
+        )
+    if getattr(status, "account_id", None) != account_id:
+        return (
+            DegradedReason(
+                subsystem="managed-account scope",
+                detail=(
+                    "the configured account is outside the broker's managed accounts, so "
+                    "position truth is unknown"
+                ),
+                blocks_risk_reduction=True,
+            ),
+        )
+    return ()
 
 
 def _quote_evidence(quote: MarketQuote) -> QuoteEvidence | None:

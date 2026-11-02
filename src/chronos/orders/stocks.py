@@ -90,6 +90,8 @@ def _stock_sell_holding_check(
     intent: WheelOrderIntent,
     evidence: RiskEvidence,
 ) -> OrderRiskCheck:
+    # Compares to settled_long_shares only: shares covering a short call or reserved for a pending
+    # covered call are not subtracted (docs/limitations.md, D54-FIX4 covered-call residual).
     if Decimal(intent.quantity) <= evidence.settled_long_shares:
         return _passed(
             "stock_no_short",

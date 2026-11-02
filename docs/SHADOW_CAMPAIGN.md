@@ -369,6 +369,20 @@ The last two sections changed with D-17 (ii) (2026-10-28, D-52). Those four limi
 inert-and-accepted. A mandate that sets one is BLOCKING (`MANDATE_INERT_LIMIT_SET`), and the line
 then ends `<- set in this mandate`.
 
+Exits in this campaign (D-54): a SHADOW-mode mandate refuses every decision at admission
+(`MODE_CANNOT_SUBMIT`), exits included, before any position is read, so in this campaign an
+autonomous exit never reaches sizing. Under a PAPER or LIVE mandate in production, a CLOSE or REDUCE
+is refused `POSITION_NOT_MANAGED` at sizing (on the ib_async adapter `POSITION_SOURCE_CACHED` is
+refused first), because no managed-position binding is ever written (ADR-0036's admission is not
+wired and needs READY, which never returns while the position is held). Only where a binding exists
+(the tests' `bind_managed`) is an equity or crypto exit sized from two broker position reads,
+journaled with that evidence, and then refused by the order plane at `reconciled_proven_state` while
+the position is held. A refused exit records a typed code in the cycle record: a `POSITION_*` code
+for the position evidence or its sign, `REDUCE_QUANTITY_REQUIRED` for a REDUCE that names no
+quantity, and `INSTRUMENT_FACTS_UNAVAILABLE` for an autonomous option exit, which is not priced and
+stays operator-managed. None of this makes an exit executable in PAPER or LIVE
+(`docs/limitations.md`, the risk-reducing sizing item).
+
 This is the load-bearing check: a `BLOCKING` finding means the mandate and the posture have
 drifted apart, which is the failure this campaign is most likely to hit — see §1 on credential
 expiry.
