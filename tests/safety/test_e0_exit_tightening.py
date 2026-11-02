@@ -631,3 +631,39 @@ def test_manual_review_republished_in_a_new_generation_is_not_bracketed() -> Non
         assert evidence.reconciliation_session_id is None
     finally:
         connection.close()
+
+
+def test_consumed_reconciliation_during_positions_read_is_not_bracketed() -> None:
+    readiness = ReconciliationReadiness()
+    broker = FakeBroker()
+    connection = BrokerConnectionManager(broker, readiness=readiness)
+    connection.start()
+    try:
+        generation = readiness.begin_reconciliation("publish test readiness")
+        assert readiness.complete(
+            expected_generation=generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason="full broker/local parity proven",
+            reconciled_at=FIXED_NOW,
+            published_at=FIXED_NOW,
+        )
+        original_positions = broker.positions
+
+        async def positions_after_consuming_readiness() -> tuple[BrokerPosition, ...]:
+            with readiness.submission_guard(expected_generation=generation) as acquired:
+                assert acquired
+                return await original_positions()
+
+        broker.positions = positions_after_consuming_readiness  # type: ignore[method-assign]
+        evidence = BrokerRiskEvidenceProvider(
+            connection=connection,
+            settings=paper_settings(),
+            reconciliation_readiness=readiness,
+        ).gather(_stock_close(), now=FIXED_NOW)
+
+        assert evidence.reconciliation_status is ReconciliationStatus.PENDING
+        assert evidence.reconciliation_generation is None
+        assert evidence.reconciliation_session_id is None
+        _reconciled_proven_state_detail(evidence)
+    finally:
+        connection.close()
