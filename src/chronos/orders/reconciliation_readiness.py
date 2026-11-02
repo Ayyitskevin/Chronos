@@ -14,9 +14,27 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from threading import Condition, Lock
 
 from chronos.domain.enums import ReconciliationStatus
+
+
+class ReadinessBlocker(StrEnum):
+    """Typed reasons a reconciliation pass cannot establish safe readiness."""
+
+    ALLOWLIST_BREACH = "ALLOWLIST_BREACH"
+    LOCAL_EVIDENCE_UNRESOLVED = "LOCAL_EVIDENCE_UNRESOLVED"
+    HELD_POSITION_UNPROVEN = "HELD_POSITION_UNPROVEN"
+    EXECUTIONS_UNALLOCATED = "EXECUTIONS_UNALLOCATED"
+    OPEN_ORDER_NOT_EXACT_PUT = "OPEN_ORDER_NOT_EXACT_PUT"
+    OWNERSHIP_ABSENT = "OWNERSHIP_ABSENT"
+    SCOPE_CHANGED = "SCOPE_CHANGED"
+    PASS_INCOMPLETE = "PASS_INCOMPLETE"
+    OPEN_ORDERS = "OPEN_ORDERS"
+    RESTART_BROKER_EVIDENCE_INCOMPLETE = "RESTART_BROKER_EVIDENCE_INCOMPLETE"
+    RESTART_SENT_ACTIVE = "RESTART_SENT_ACTIVE"
+    BLOCKERS_UNDETERMINED = "BLOCKERS_UNDETERMINED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +46,8 @@ class ReconciliationReadinessSnapshot:
     generation: int
     reason: str
     reconciled_at: datetime | None = None
+    published_at: datetime | None = None
+    blockers: frozenset[ReadinessBlocker] = frozenset()
 
     @property
     def ready(self) -> bool:
@@ -84,6 +104,8 @@ class ReconciliationReadiness:
         self._uncertainty_epoch = 0
         self._reason = "startup reconciliation has not completed"
         self._reconciled_at: datetime | None = None
+        self._published_at: datetime | None = None
+        self._blockers: frozenset[ReadinessBlocker] = frozenset()
 
     def snapshot(self) -> ReconciliationReadinessSnapshot:
         with self._lock:
@@ -184,6 +206,8 @@ class ReconciliationReadiness:
         self._status = ReconciliationStatus.PENDING
         self._reason = reason
         self._reconciled_at = None
+        self._published_at = None
+        self._blockers = frozenset()
 
     def complete(
         self,
@@ -192,6 +216,8 @@ class ReconciliationReadiness:
         status: ReconciliationStatus,
         reason: str,
         reconciled_at: datetime | None = None,
+        published_at: datetime | None = None,
+        blockers: frozenset[ReadinessBlocker] = frozenset(),
     ) -> bool:
         """Publish a result only if no lifecycle event raced the observation.
 
@@ -200,6 +226,10 @@ class ReconciliationReadiness:
         """
 
         normalized = reason.strip() or "reconciliation did not provide a reason"
+        if published_at is not None and (
+            published_at.tzinfo is None or published_at.utcoffset() is None
+        ):
+            raise ValueError("readiness publication requires an aware publication time")
         if status is ReconciliationStatus.RECONCILED:
             if reconciled_at is None or reconciled_at.tzinfo is None:
                 raise ValueError("reconciled readiness requires an aware completion time")
@@ -212,6 +242,8 @@ class ReconciliationReadiness:
             self._status = status
             self._reason = normalized
             self._reconciled_at = reconciled_at
+            self._published_at = published_at
+            self._blockers = frozenset(blockers)
             return True
 
     @contextmanager
@@ -283,4 +315,6 @@ class ReconciliationReadiness:
             session_id=self._session_id,
             reason=self._reason,
             reconciled_at=self._reconciled_at,
+            published_at=self._published_at,
+            blockers=self._blockers,
         )

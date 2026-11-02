@@ -22,7 +22,13 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
-from chronos.domain.enums import OptionRight, OrderSide, ProductFamily, ReconciliationStatus
+from chronos.domain.enums import (
+    OptionRight,
+    OrderIntent,
+    OrderSide,
+    ProductFamily,
+    ReconciliationStatus,
+)
 from chronos.domain.models import (
     BrokerOrder,
     BrokerPosition,
@@ -80,10 +86,8 @@ class BrokerRiskEvidenceProvider:
         # READY proof was taken before it, so this evidence cannot claim it, whatever the adapter's
         # readiness hook did (absent, raising or working)
         book_is_readable = all(order.quantity_quarantine is None for order in open_orders)
-        evidence_provenance_is_current = (
-            readiness_before.ready
-            and readiness_after.ready
-            and readiness_before.session_id == readiness_after.session_id
+        bracket_is_consistent = (
+            readiness_before.session_id == readiness_after.session_id
             and readiness_before.generation == readiness_after.generation
             and book_is_readable
         )
@@ -93,12 +97,36 @@ class BrokerRiskEvidenceProvider:
         existing_short_put_obligation = _short_put_obligation(positions)
         pending_open_put_obligation = _pending_put_obligation(open_orders)
         active_short_option_contracts = _short_option_contracts(positions)
-        settled_long_shares = _long_shares(positions, intent.symbol)
-        shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
-        held_short_option_contracts = _held_short_for_symbol(positions, intent)
+        if intent.intent is OrderIntent.CLOSE_LONG_STOCK and isinstance(
+            intent.contract, UnderlyingContract
+        ):
+            settled_long_shares = _long_shares_for_contract(positions, intent.contract)
+            (
+                shares_covering_short_calls,
+                shares_reserved_for_pending_calls,
+                stock_close_call_evidence_issues,
+            ) = _stock_close_call_reservations(positions, open_orders, intent.contract)
+        else:
+            settled_long_shares = _long_shares(positions, intent.symbol)
+            shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
+            shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
+            stock_close_call_evidence_issues = ()
+        (
+            held_short_option_contracts,
+            held_short_option_non_integral,
+        ) = _held_short_for_symbol(positions, intent)
         # Resting (unfilled) covered-call orders commit shares too; without this
         # two calls could both be approved against the same shares -> naked call.
-        shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
+        stock_sell_reserved_shares = (
+            _stock_sell_reserved(open_orders, intent.contract.con_id)
+            if isinstance(intent.contract, UnderlyingContract)
+            else Decimal("0")
+        )
+        option_buy_reserved_contracts, option_buy_reservation_non_integral = (
+            _option_buy_reserved(open_orders, intent.contract.con_id)
+            if isinstance(intent.contract, OptionContract)
+            else (Decimal("0"), False)
+        )
         # Concentration baseline: existing gross wheel exposure, per symbol and
         # across the account, so the check caps AGGREGATE exposure, not just the
         # single new order.
@@ -118,18 +146,21 @@ class BrokerRiskEvidenceProvider:
             now=now,
             broker_confirms_open=self._broker_confirms_open(intent, now),
         )
+        reconciliation_status = (
+            readiness_after.status if bracket_is_consistent else ReconciliationStatus.PENDING
+        )
         return RiskEvidence(
             account=account,
-            reconciliation_status=(
-                ReconciliationStatus.RECONCILED
-                if evidence_provenance_is_current
-                else ReconciliationStatus.PENDING
-            ),
+            reconciliation_status=reconciliation_status,
             reconciliation_generation=(
-                readiness_after.generation if evidence_provenance_is_current else None
+                readiness_after.generation
+                if reconciliation_status is ReconciliationStatus.RECONCILED
+                else None
             ),
             reconciliation_session_id=(
-                readiness_after.session_id if evidence_provenance_is_current else None
+                readiness_after.session_id
+                if reconciliation_status is ReconciliationStatus.RECONCILED
+                else None
             ),
             session=session,
             opening_orders_today=opening_today,
@@ -139,7 +170,12 @@ class BrokerRiskEvidenceProvider:
             settled_long_shares=settled_long_shares,
             shares_covering_short_calls=shares_covering_short_calls,
             shares_reserved_for_pending_calls=shares_reserved_for_pending_calls,
+            stock_close_call_evidence_issues=stock_close_call_evidence_issues,
+            stock_sell_reserved_shares=stock_sell_reserved_shares,
             held_short_option_contracts=held_short_option_contracts,
+            held_short_option_non_integral=held_short_option_non_integral,
+            option_buy_reserved_contracts=option_buy_reserved_contracts,
+            option_buy_reservation_non_integral=option_buy_reservation_non_integral,
             current_symbol_allocation=current_symbol_allocation,
             current_total_wheel_allocation=current_total_wheel_allocation,
             held_crypto_quantity=held_crypto_quantity,
@@ -262,6 +298,91 @@ def _long_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
     return total
 
 
+def _long_shares_for_contract(
+    positions: tuple[BrokerPosition, ...], contract: UnderlyingContract
+) -> Decimal:
+    """Long shares held for the exact stock contract and currency."""
+
+    total = Decimal("0")
+    for position in positions:
+        held_contract = position.contract
+        if (
+            isinstance(held_contract, UnderlyingContract)
+            and held_contract.con_id == contract.con_id
+            and held_contract.currency == contract.currency
+            and position.quantity > 0
+        ):
+            total += position.quantity
+    return total
+
+
+def _stock_close_call_reservations(
+    positions: tuple[BrokerPosition, ...],
+    open_orders: tuple[BrokerOrder, ...],
+    underlying: UnderlyingContract,
+) -> tuple[Decimal, Decimal, tuple[str, ...]]:
+    """Return verified call encumbrances for one exact stock close."""
+
+    covering_shares = Decimal("0")
+    pending_shares = Decimal("0")
+    unverified: set[str] = set()
+
+    for position in positions:
+        contract = position.contract
+        if (
+            not isinstance(contract, OptionContract)
+            or contract.right is not OptionRight.CALL
+            or position.quantity >= 0
+            or not _may_encumber_stock_close(contract, underlying)
+        ):
+            continue
+        deliverable = _verified_stock_close_call_deliverable(contract, underlying)
+        if deliverable is None:
+            unverified.add(_stock_close_call_label(contract))
+        else:
+            covering_shares += abs(position.quantity) * deliverable
+
+    for order in open_orders:
+        contract = order.contract
+        if (
+            not isinstance(contract, OptionContract)
+            or contract.right is not OptionRight.CALL
+            or order.side is not OrderSide.SELL
+            or not _may_encumber_stock_close(contract, underlying)
+        ):
+            continue
+        deliverable = _verified_stock_close_call_deliverable(contract, underlying)
+        if deliverable is None:
+            unverified.add(_stock_close_call_label(contract))
+        else:
+            pending_shares += order.remaining_quantity * deliverable
+
+    return covering_shares, pending_shares, tuple(sorted(unverified))
+
+
+def _may_encumber_stock_close(contract: OptionContract, underlying: UnderlyingContract) -> bool:
+    """Find calls that could encumber this ticker, then require exact evidence."""
+
+    return contract.underlying_con_id == underlying.con_id or contract.symbol == underlying.symbol
+
+
+def _verified_stock_close_call_deliverable(
+    contract: OptionContract, underlying: UnderlyingContract
+) -> Decimal | None:
+    if (
+        contract.deliverable_verified
+        and contract.underlying_con_id == underlying.con_id
+        and contract.currency == underlying.currency
+        and contract.deliverable_shares is not None
+    ):
+        return contract.deliverable_shares
+    return None
+
+
+def _stock_close_call_label(contract: OptionContract) -> str:
+    return f"{contract.symbol} {contract.expiration.isoformat()} CALL {contract.strike}"
+
+
 def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
     total = Decimal("0")
     for position in positions:
@@ -277,11 +398,14 @@ def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> De
     return total
 
 
-def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelOrderIntent) -> int:
+def _held_short_for_symbol(
+    positions: tuple[BrokerPosition, ...], intent: WheelOrderIntent
+) -> tuple[Decimal, bool]:
     if intent.product_family is not ProductFamily.OPTION:
-        return 0
+        return Decimal("0"), False
     con_id = getattr(intent.contract, "con_id", None)
-    total = 0
+    total = Decimal("0")
+    has_non_integral_quantity = False
     for position in positions:
         contract = position.contract
         if (
@@ -289,8 +413,10 @@ def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelO
             and contract.con_id == con_id
             and position.quantity < 0
         ):
-            total += int(abs(position.quantity))
-    return total
+            quantity = abs(position.quantity)
+            total += quantity
+            has_non_integral_quantity |= quantity != quantity.to_integral_value()
+    return total, has_non_integral_quantity
 
 
 def _pending_call_shares(open_orders: tuple[BrokerOrder, ...], symbol: str) -> Decimal:
@@ -343,6 +469,40 @@ def _crypto_sell_reserved(open_orders: tuple[BrokerOrder, ...], symbol: str) -> 
         ):
             total += order.remaining_quantity
     return total
+
+
+def _stock_sell_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> Decimal:
+    """Stock shares committed to resting SELL orders for the exact contract."""
+
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, UnderlyingContract)
+            and contract.con_id == con_id
+            and order.side is OrderSide.SELL
+        ):
+            total += order.remaining_quantity
+    return total
+
+
+def _option_buy_reserved(open_orders: tuple[BrokerOrder, ...], con_id: int) -> tuple[Decimal, bool]:
+    """Contracts committed to resting BUY orders for the exact option."""
+
+    total = Decimal("0")
+    has_non_integral_quantity = False
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.con_id == con_id
+            and order.side is OrderSide.BUY
+        ):
+            total += order.remaining_quantity
+            has_non_integral_quantity |= (
+                order.remaining_quantity != order.remaining_quantity.to_integral_value()
+            )
+    return total, has_non_integral_quantity
 
 
 def _crypto_allocation(positions: tuple[BrokerPosition, ...]) -> tuple[Decimal, bool]:

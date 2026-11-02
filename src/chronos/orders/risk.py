@@ -209,8 +209,13 @@ class RiskEvidence(ChronosModel):
     settled_long_shares: Decimal = Field(default=Decimal("0"), ge=0)
     shares_covering_short_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
+    stock_close_call_evidence_issues: tuple[str, ...] = ()
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
-    held_short_option_contracts: int = Field(default=0, ge=0)
+    stock_sell_reserved_shares: Decimal = Field(default=Decimal("0"), ge=0)
+    held_short_option_contracts: Decimal = Field(default=Decimal("0"), ge=0)
+    held_short_option_non_integral: bool = False
+    option_buy_reserved_contracts: Decimal = Field(default=Decimal("0"), ge=0)
+    option_buy_reservation_non_integral: bool = False
     # Crypto evidence (ADR-0010 §4), kept SEPARATE from the wheel aggregates so a
     # crypto holding never distorts stock concentration or cash math.
     held_crypto_quantity: Decimal = Field(default=Decimal("0"), ge=0)
@@ -522,14 +527,40 @@ class OrderRiskEngine:
     def _check_close_holds_short(
         self, intent: WheelOrderIntent, evidence: RiskEvidence
     ) -> OrderRiskCheck:
-        if intent.quantity <= evidence.held_short_option_contracts:
+        held = evidence.held_short_option_contracts
+        resting_buys = evidence.option_buy_reserved_contracts
+        if evidence.held_short_option_non_integral or held != held.to_integral_value():
+            return _failed(
+                "held_position_sufficiency",
+                "held short option position is non-integral; "
+                f"held={held}, resting_buys={resting_buys}, bound=0",
+            )
+        if resting_buys < 0:
+            return _failed(
+                "held_position_sufficiency",
+                f"resting option BUY reservation is invalid; held={held}, "
+                f"resting_buys={resting_buys}, bound=0",
+            )
+        if (
+            evidence.option_buy_reservation_non_integral
+            or resting_buys != resting_buys.to_integral_value()
+        ):
+            return _failed(
+                "held_position_sufficiency",
+                "resting option BUY reservation is non-integral; "
+                f"held={held}, resting_buys={resting_buys}, bound=0",
+            )
+        bound = max(Decimal("0"), held - resting_buys)
+        if intent.quantity <= bound:
             return _passed(
                 "held_position_sufficiency",
-                f"closing {intent.quantity} <= {evidence.held_short_option_contracts} held short",
+                f"closing {intent.quantity} <= bound={bound} "
+                f"(held={held}, resting_buys={resting_buys})",
             )
         return _failed(
             "held_position_sufficiency",
-            f"closing {intent.quantity} exceeds {evidence.held_short_option_contracts} held short",
+            f"closing {intent.quantity} exceeds bound={bound} "
+            f"(held={held}, resting_buys={resting_buys})",
         )
 
     def _stock_checks(

@@ -1017,3 +1017,96 @@ def test_non_exact_open_order_conditions_require_manual_review(
     assert result.snapshot is not None
     assert result.symbols[0].stage is WheelStage.MANUAL_REVIEW
     assert result.symbols[0].opening_actions_locked is True
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code", "expected_reason"),
+    (
+        (
+            "allowlist",
+            "ALLOWLIST_BREACH",
+            "Broker or local evidence exists outside the configured allowlist.",
+        ),
+        (
+            "local-unresolved",
+            "LOCAL_EVIDENCE_UNRESOLVED",
+            "Local strategy evidence for this symbol is not fully resolved.",
+        ),
+        (
+            "held-position",
+            "HELD_POSITION_UNPROVEN",
+            "A nonzero broker position lacks complete cycle and fill-allocation provenance.",
+        ),
+        (
+            "execution",
+            "EXECUTIONS_UNALLOCATED",
+            "Broker executions require complete local fill allocation before reconciliation.",
+        ),
+        (
+            "open-order",
+            "OPEN_ORDER_NOT_EXACT_PUT",
+            "Open-order evidence is not one exact, zero-fill, owned short-put submission.",
+        ),
+        (
+            "ownership-absent",
+            "OWNERSHIP_ABSENT",
+            "Local active-order ownership is absent from the broker snapshot.",
+        ),
+    ),
+)
+def test_real_reconciler_emits_codes_beside_the_six_provenance_reasons(
+    case: str,
+    expected_code: str,
+    expected_reason: str,
+) -> None:
+    broker = _ScriptedBroker()
+    evidence = LocalReconciliationEvidence(complete=True)
+    allowlisted_symbols = ("AAPL",)
+    if case == "allowlist":
+        broker = _ScriptedBroker(positions=((_stock(quantity="0"),), (_stock(quantity="0"),)))
+        allowlisted_symbols = ("MSFT",)
+    elif case == "local-unresolved":
+        evidence = LocalReconciliationEvidence(
+            unresolved_symbols=frozenset({"AAPL"}),
+            complete=True,
+        )
+    elif case == "held-position":
+        positions = (_stock(),)
+        broker = _ScriptedBroker(positions=(positions, positions))
+    elif case == "execution":
+        executions = (_execution(),)
+        broker = _ScriptedBroker(executions=(executions, executions))
+    elif case == "open-order":
+        order = _put_order(right=OptionRight.CALL)
+        orders = (order,)
+        broker = _ScriptedBroker(orders=(orders, orders))
+        evidence = LocalReconciliationEvidence(
+            active_order_identities=frozenset({order.identity}),
+            complete=True,
+        )
+    elif case == "ownership-absent":
+        order = _put_order()
+        evidence = LocalReconciliationEvidence(
+            active_order_identities=frozenset({order.identity}),
+            complete=True,
+        )
+
+    coordinator, _, _ = _coordinator(
+        broker,
+        evidence,
+        allowlisted_symbols=allowlisted_symbols,
+    )
+    result = coordinator.reconcile()
+    symbol = next(symbol for symbol in result.symbols if symbol.symbol == "AAPL")
+
+    assert expected_reason in symbol.reasons
+    assert getattr(symbol, "blocker_codes", None) == (expected_code,)
+
+
+def test_real_reconciler_adds_no_symbol_code_for_a_clean_flat_pass() -> None:
+    coordinator, _, _ = _coordinator(_ScriptedBroker())
+
+    result = coordinator.reconcile()
+
+    assert result.status is ReconciliationStatus.RECONCILED
+    assert getattr(result.symbols[0], "blocker_codes", None) == ()

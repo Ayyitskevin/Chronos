@@ -131,6 +131,8 @@ runbooks.
   invalidates readiness — like connection loss, it never runs a pass or re-arms — so
   order/fill-event-driven reconciliation is absent. What IBKR streams to which
   client id is unverified until the M4 read-only session (K4).
+- A completed readiness pass also carries typed in-memory blocker codes. They do not change
+  the published status or reason and are not persisted or served.
 - The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
   basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
@@ -657,11 +659,9 @@ found the code contradicting its own published claims on both:
   (the tests' `bind_managed`) is the exit sized and journaled with its position evidence, and then
   the order plane's `reconciled_proven_state` check refuses it while the position is held (the wheel
   reconciler's MANUAL_REVIEW rule, unchanged), so autonomous exits are not executable. *Residual
-  (covered-call encumbrance, D54-FIX4): neither `_position_evidence` (`api/autonomy_wiring.py`) nor
-  the order plane's `_stock_sell_holding_check` (`orders/stocks.py`) subtracts shares that cover a
-  short call or are reserved for a pending covered call, so a stock exit could leave an uncovered
-  short call. Fail-closed today, because no exit reaches the plane; it must be closed before any
-  exit path opens.* The sized-then-HANDOFF result ("nothing sent") exists only in the loop's
+  (covered-call encumbrance, D54-FIX4): E-0 closes this gap in the order plane; the sizing-side
+  mirror in `_position_evidence` (`api/autonomy_wiring.py`) remains for E-1.* The sized-then-HANDOFF
+  result ("nothing sent") exists only in the loop's
   headless shape, a submitting-mode mandate run with no submit callable, which production never
   runs. Autonomous option exits are not priced; operator-managed (`instrument_facts` has no option
   exit gather).

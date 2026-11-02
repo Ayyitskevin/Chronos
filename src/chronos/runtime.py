@@ -54,6 +54,7 @@ from chronos.orders.mutations import OrderCancellationService, OrderModification
 from chronos.orders.ownership import PersistedOrderOwnershipLedger
 from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_readiness import (
+    ReadinessBlocker,
     ReconciliationReadiness,
     ReconciliationReadinessSnapshot,
 )
@@ -93,6 +94,8 @@ from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
 from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 from chronos.utils.logging import configure_logging
 from chronos.utils.time import utc_now
+
+_LOGGER = logging.getLogger("chronos.runtime")
 
 
 class _CallbackSource(Protocol):
@@ -136,6 +139,35 @@ class SubmissionReconciliationReport:
     restart: OrderRestartReconciliationReport
     portfolio: ReconciliationResult
     readiness: ReconciliationReadinessSnapshot
+
+
+def _readiness_blockers(
+    restart: OrderRestartReconciliationReport,
+    portfolio: ReconciliationResult,
+    *,
+    scope_is_current: bool,
+) -> frozenset[ReadinessBlocker]:
+    blockers: set[ReadinessBlocker] = set()
+    if not scope_is_current:
+        blockers.add(ReadinessBlocker.SCOPE_CHANGED)
+
+    snapshot = portfolio.snapshot
+    pass_incomplete = snapshot is None or portfolio.status not in (
+        ReconciliationStatus.RECONCILED,
+        ReconciliationStatus.MANUAL_REVIEW,
+    )
+    if pass_incomplete:
+        blockers.add(ReadinessBlocker.PASS_INCOMPLETE)
+    elif snapshot is not None and snapshot.open_orders:
+        blockers.add(ReadinessBlocker.OPEN_ORDERS)
+
+    if not restart.broker_evidence_complete:
+        blockers.add(ReadinessBlocker.RESTART_BROKER_EVIDENCE_INCOMPLETE)
+    if restart.remaining_active:
+        blockers.add(ReadinessBlocker.RESTART_SENT_ACTIVE)
+    for symbol in portfolio.symbols:
+        blockers.update(ReadinessBlocker(code) for code in symbol.blocker_codes)
+    return frozenset(blockers)
 
 
 @dataclass(slots=True)
@@ -277,11 +309,26 @@ class AppRuntime:
             status = ReconciliationStatus.RECONCILED
             reason = "full broker/local parity proven with no sent-active order intents"
 
+        try:
+            blockers = _readiness_blockers(
+                restart,
+                portfolio,
+                scope_is_current=scope_is_current,
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Readiness blocker union failed; blockers remain undetermined",
+                extra={"event": "readiness_blockers_undetermined"},
+            )
+            blockers = frozenset({ReadinessBlocker.BLOCKERS_UNDETERMINED})
+
         self.reconciliation_readiness.complete(
             expected_generation=generation,
             status=status,
             reason=reason,
             reconciled_at=moment if status is ReconciliationStatus.RECONCILED else None,
+            published_at=moment,
+            blockers=blockers,
         )
         report = SubmissionReconciliationReport(
             restart=restart,

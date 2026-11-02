@@ -176,7 +176,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 53 at D54-FIX2 (api/autonomy_wiring.py: the blank-account guard supersedes FIX1's).
     # 54 at D54-FIX4 (api/autonomy_wiring.py: the managed-binding wording supersedes FIX2's).
     # 55 at D54-FIX5 (api/autonomy_wiring.py: the covered-call residual pointer supersedes FIX4's).
-    assert len(historical_candidates) == 55
+    # 56 at E-0 (runtime.py: the typed readiness blocker union supersedes its source fingerprint).
+    # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
+    assert len(historical_candidates) == 57
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
