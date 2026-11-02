@@ -46,6 +46,7 @@ class ReconciliationReadinessSnapshot:
     generation: int
     reason: str
     reconciled_at: datetime | None = None
+    published_at: datetime | None = None
 
     @property
     def ready(self) -> bool:
@@ -102,6 +103,7 @@ class ReconciliationReadiness:
         self._uncertainty_epoch = 0
         self._reason = "startup reconciliation has not completed"
         self._reconciled_at: datetime | None = None
+        self._published_at: datetime | None = None
 
     def snapshot(self) -> ReconciliationReadinessSnapshot:
         with self._lock:
@@ -202,6 +204,7 @@ class ReconciliationReadiness:
         self._status = ReconciliationStatus.PENDING
         self._reason = reason
         self._reconciled_at = None
+        self._published_at = None
 
     def complete(
         self,
@@ -210,6 +213,7 @@ class ReconciliationReadiness:
         status: ReconciliationStatus,
         reason: str,
         reconciled_at: datetime | None = None,
+        published_at: datetime | None = None,
     ) -> bool:
         """Publish a result only if no lifecycle event raced the observation.
 
@@ -218,6 +222,10 @@ class ReconciliationReadiness:
         """
 
         normalized = reason.strip() or "reconciliation did not provide a reason"
+        if published_at is not None and (
+            published_at.tzinfo is None or published_at.utcoffset() is None
+        ):
+            raise ValueError("readiness publication requires an aware publication time")
         if status is ReconciliationStatus.RECONCILED:
             if reconciled_at is None or reconciled_at.tzinfo is None:
                 raise ValueError("reconciled readiness requires an aware completion time")
@@ -230,6 +238,7 @@ class ReconciliationReadiness:
             self._status = status
             self._reason = normalized
             self._reconciled_at = reconciled_at
+            self._published_at = published_at
             return True
 
     @contextmanager
@@ -301,4 +310,5 @@ class ReconciliationReadiness:
             session_id=self._session_id,
             reason=self._reason,
             reconciled_at=self._reconciled_at,
+            published_at=self._published_at,
         )
