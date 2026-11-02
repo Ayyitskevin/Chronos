@@ -222,6 +222,19 @@ def test_manual_review_without_snapshot_is_pass_incomplete_not_open_orders() -> 
     assert ReadinessBlocker.OPEN_ORDERS not in report.readiness.blockers
 
 
+def test_reconciled_without_snapshot_is_pass_incomplete() -> None:
+    runtime = _runtime_for(
+        _restart_report(),
+        _portfolio_result(status=ReconciliationStatus.RECONCILED, snapshot=None),
+    )
+
+    report = runtime.reconcile_submission_readiness(now=FIXED_NOW)
+
+    assert report.readiness.status is ReconciliationStatus.PENDING
+    assert report.readiness.reason == "portfolio reconciliation did not produce complete evidence"
+    assert report.readiness.blockers == frozenset({ReadinessBlocker.PASS_INCOMPLETE})
+
+
 def test_scope_change_is_a_typed_blocker() -> None:
     portfolio = _portfolio_result(
         status=ReconciliationStatus.RECONCILED,
