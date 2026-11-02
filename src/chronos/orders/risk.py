@@ -524,14 +524,25 @@ class OrderRiskEngine:
     def _check_close_holds_short(
         self, intent: WheelOrderIntent, evidence: RiskEvidence
     ) -> OrderRiskCheck:
-        if intent.quantity <= evidence.held_short_option_contracts:
+        held = evidence.held_short_option_contracts
+        resting_buys = evidence.option_buy_reserved_contracts
+        if resting_buys < 0:
+            return _failed(
+                "held_position_sufficiency",
+                f"resting option BUY reservation is invalid; held={held}, "
+                f"resting_buys={resting_buys}, bound=0",
+            )
+        bound = max(0, held - resting_buys)
+        if intent.quantity <= bound:
             return _passed(
                 "held_position_sufficiency",
-                f"closing {intent.quantity} <= {evidence.held_short_option_contracts} held short",
+                f"closing {intent.quantity} <= bound={bound} "
+                f"(held={held}, resting_buys={resting_buys})",
             )
         return _failed(
             "held_position_sufficiency",
-            f"closing {intent.quantity} exceeds {evidence.held_short_option_contracts} held short",
+            f"closing {intent.quantity} exceeds bound={bound} "
+            f"(held={held}, resting_buys={resting_buys})",
         )
 
     def _stock_checks(
