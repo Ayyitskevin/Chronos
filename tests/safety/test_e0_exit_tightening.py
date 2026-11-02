@@ -41,6 +41,16 @@ def _stock_close(quantity: int = 1):
     )
 
 
+def _option_close(quantity: int, *, con_id: int = 222):
+    return build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.CLOSE_SHORT_OPTION,
+        contract=option_contract(con_id=con_id),
+        quantity=quantity,
+        limit_price=Decimal("0.50"),
+    )
+
+
 def _manual_review(readiness: ReconciliationReadiness) -> None:
     snapshot = readiness.snapshot()
     assert readiness.complete(
@@ -302,6 +312,117 @@ def test_stock_close_model_constructed_negative_reservation_fails_without_raisin
 
     check = _risk_check(decision, "stock_no_short")
     assert check.status is RiskCheckStatus.FAIL
+
+
+def _option_case(
+    case: str,
+) -> tuple[
+    tuple[BrokerPosition, ...],
+    tuple[BrokerOrder, ...],
+    int,
+    RiskCheckStatus,
+    int,
+]:
+    put_222 = option_contract(con_id=222)
+    put_223 = option_contract(con_id=223)
+    if case == "B3":
+        return (
+            (_position(put_222, "-1"),),
+            (_resting_order(put_222, OrderSide.BUY, "1"),),
+            1,
+            RiskCheckStatus.FAIL,
+            1,
+        )
+    if case == "G7":
+        return (
+            (_position(put_222, "-2"),),
+            (_resting_order(put_222, OrderSide.BUY, "1"),),
+            2,
+            RiskCheckStatus.FAIL,
+            1,
+        )
+    if case == "G8":
+        return (
+            (_position(put_222, "-2"),),
+            (
+                _resting_order(put_222, OrderSide.BUY, "2", broker_order_id=7001),
+                _resting_order(
+                    put_222, OrderSide.BUY, "1", account_id="OTHER", broker_order_id=7002
+                ),
+            ),
+            1,
+            RiskCheckStatus.FAIL,
+            3,
+        )
+    if case == "G8-foreign":
+        return (
+            (_position(put_222, "-2"),),
+            (
+                _resting_order(put_222, OrderSide.BUY, "1", broker_order_id=7001),
+                _resting_order(
+                    put_222, OrderSide.BUY, "1", account_id="OTHER", broker_order_id=7002
+                ),
+            ),
+            1,
+            RiskCheckStatus.FAIL,
+            2,
+        )
+    if case == "G7-pass-control":
+        return (
+            (_position(put_222, "-2"),),
+            (_resting_order(put_222, OrderSide.BUY, "1"),),
+            1,
+            RiskCheckStatus.PASS,
+            1,
+        )
+    if case == "G9-other-conid":
+        return (
+            (_position(put_222, "-1"),),
+            (_resting_order(put_223, OrderSide.BUY, "1"),),
+            1,
+            RiskCheckStatus.PASS,
+            0,
+        )
+    if case == "G9-resting-sell":
+        return (
+            (_position(put_222, "-1"),),
+            (_resting_order(put_222, OrderSide.SELL, "1"),),
+            1,
+            RiskCheckStatus.PASS,
+            0,
+        )
+    if case == "G10":
+        return (_position(put_222, "-1"),), (), 1, RiskCheckStatus.PASS, 0
+    raise AssertionError(f"unknown option case: {case}")
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "B3",
+        "G7",
+        "G8",
+        "G8-foreign",
+        "G7-pass-control",
+        "G9-other-conid",
+        "G9-resting-sell",
+        "G10",
+    ),
+)
+def test_option_close_reserves_all_resting_buys_for_exact_contract(case: str) -> None:
+    positions, open_orders, quantity, expected, expected_reserved = _option_case(case)
+    evidence, decision = _evaluate(
+        _option_close(quantity), positions=positions, open_orders=open_orders
+    )
+    check = _risk_check(decision, "held_position_sufficiency")
+
+    assert check.status is expected
+    assert evidence.option_buy_reserved_contracts == expected_reserved
+    if expected is RiskCheckStatus.FAIL:
+        assert "held=" in check.detail
+        assert "resting_buys=" in check.detail
+        assert "bound=" in check.detail
+        assert PAPER_ACCOUNT not in check.detail
 
 
 def _opening_scenario(case: str):
