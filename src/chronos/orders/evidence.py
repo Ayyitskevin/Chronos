@@ -22,7 +22,13 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
-from chronos.domain.enums import OptionRight, OrderSide, ProductFamily, ReconciliationStatus
+from chronos.domain.enums import (
+    OptionRight,
+    OrderIntent,
+    OrderSide,
+    ProductFamily,
+    ReconciliationStatus,
+)
 from chronos.domain.models import (
     BrokerOrder,
     BrokerPosition,
@@ -91,12 +97,23 @@ class BrokerRiskEvidenceProvider:
         existing_short_put_obligation = _short_put_obligation(positions)
         pending_open_put_obligation = _pending_put_obligation(open_orders)
         active_short_option_contracts = _short_option_contracts(positions)
-        settled_long_shares = _long_shares(positions, intent.symbol)
-        shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
+        if intent.intent is OrderIntent.CLOSE_LONG_STOCK and isinstance(
+            intent.contract, UnderlyingContract
+        ):
+            settled_long_shares = _long_shares_for_contract(positions, intent.contract)
+            (
+                shares_covering_short_calls,
+                shares_reserved_for_pending_calls,
+                stock_close_call_evidence_issues,
+            ) = _stock_close_call_reservations(positions, open_orders, intent.contract)
+        else:
+            settled_long_shares = _long_shares(positions, intent.symbol)
+            shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
+            shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
+            stock_close_call_evidence_issues = ()
         held_short_option_contracts = _held_short_for_symbol(positions, intent)
         # Resting (unfilled) covered-call orders commit shares too; without this
         # two calls could both be approved against the same shares -> naked call.
-        shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
         stock_sell_reserved_shares = (
             _stock_sell_reserved(open_orders, intent.contract.con_id)
             if isinstance(intent.contract, UnderlyingContract)
@@ -150,6 +167,7 @@ class BrokerRiskEvidenceProvider:
             settled_long_shares=settled_long_shares,
             shares_covering_short_calls=shares_covering_short_calls,
             shares_reserved_for_pending_calls=shares_reserved_for_pending_calls,
+            stock_close_call_evidence_issues=stock_close_call_evidence_issues,
             stock_sell_reserved_shares=stock_sell_reserved_shares,
             held_short_option_contracts=held_short_option_contracts,
             option_buy_reserved_contracts=option_buy_reserved_contracts,
@@ -273,6 +291,96 @@ def _long_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
         ):
             total += position.quantity
     return total
+
+
+def _long_shares_for_contract(
+    positions: tuple[BrokerPosition, ...], contract: UnderlyingContract
+) -> Decimal:
+    """Long shares held for the exact stock contract and currency."""
+
+    total = Decimal("0")
+    for position in positions:
+        held_contract = position.contract
+        if (
+            isinstance(held_contract, UnderlyingContract)
+            and held_contract.con_id == contract.con_id
+            and held_contract.currency == contract.currency
+            and position.quantity > 0
+        ):
+            total += position.quantity
+    return total
+
+
+def _stock_close_call_reservations(
+    positions: tuple[BrokerPosition, ...],
+    open_orders: tuple[BrokerOrder, ...],
+    underlying: UnderlyingContract,
+) -> tuple[Decimal, Decimal, tuple[str, ...]]:
+    """Return verified call encumbrances for one exact stock close."""
+
+    covering_shares = Decimal("0")
+    pending_shares = Decimal("0")
+    unverified: set[str] = set()
+
+    for position in positions:
+        contract = position.contract
+        if (
+            not isinstance(contract, OptionContract)
+            or contract.right is not OptionRight.CALL
+            or position.quantity >= 0
+            or not _may_encumber_stock_close(contract, underlying)
+        ):
+            continue
+        deliverable = _verified_stock_close_call_deliverable(contract, underlying)
+        if deliverable is None:
+            unverified.add(_stock_close_call_label(contract))
+        else:
+            covering_shares += abs(position.quantity) * deliverable
+
+    for order in open_orders:
+        contract = order.contract
+        if (
+            not isinstance(contract, OptionContract)
+            or contract.right is not OptionRight.CALL
+            or order.side is not OrderSide.SELL
+            or not _may_encumber_stock_close(contract, underlying)
+        ):
+            continue
+        deliverable = _verified_stock_close_call_deliverable(contract, underlying)
+        if deliverable is None:
+            unverified.add(_stock_close_call_label(contract))
+        else:
+            pending_shares += order.remaining_quantity * deliverable
+
+    return covering_shares, pending_shares, tuple(sorted(unverified))
+
+
+def _may_encumber_stock_close(
+    contract: OptionContract, underlying: UnderlyingContract
+) -> bool:
+    """Find calls that could encumber this ticker, then require exact evidence."""
+
+    return contract.underlying_con_id == underlying.con_id or contract.symbol == underlying.symbol
+
+
+def _verified_stock_close_call_deliverable(
+    contract: OptionContract, underlying: UnderlyingContract
+) -> Decimal | None:
+    if (
+        contract.deliverable_verified
+        and contract.underlying_con_id == underlying.con_id
+        and contract.currency == underlying.currency
+        and contract.deliverable_shares is not None
+    ):
+        return contract.deliverable_shares
+    return None
+
+
+def _stock_close_call_label(contract: OptionContract) -> str:
+    return (
+        f"{contract.symbol} {contract.expiration.isoformat()} "
+        f"CALL {contract.strike}"
+    )
 
 
 def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:

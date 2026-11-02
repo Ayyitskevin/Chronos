@@ -209,6 +209,7 @@ class RiskEvidence(ChronosModel):
     settled_long_shares: Decimal = Field(default=Decimal("0"), ge=0)
     shares_covering_short_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
+    stock_close_call_evidence_issues: tuple[str, ...] = ()
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
     stock_sell_reserved_shares: Decimal = Field(default=Decimal("0"), ge=0)
     held_short_option_contracts: int = Field(default=0, ge=0)

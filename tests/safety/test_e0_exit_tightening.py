@@ -353,6 +353,68 @@ def test_stock_close_refuses_unverified_call_deliverable() -> None:
     assert evidence.shares_covering_short_calls == Decimal("0")
 
 
+def test_stock_close_refuses_unverified_pending_call_deliverable() -> None:
+    stock = stock_contract(con_id=999)
+    unverified_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
+        update={"deliverable_verified": False, "deliverable_shares": None}
+    )
+    evidence, decision = _evaluate(
+        _stock_close(50),
+        positions=(_position(stock, "150"),),
+        open_orders=(_resting_order(unverified_call, OrderSide.SELL, "1"),),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert check.status is RiskCheckStatus.FAIL
+    assert unverified_call.symbol in check.detail
+    assert unverified_call.expiration.isoformat() in check.detail
+    assert str(unverified_call.strike) in check.detail
+    assert PAPER_ACCOUNT not in check.detail
+    assert "222" not in check.detail
+    assert "999" not in check.detail
+
+    assert evidence.shares_reserved_for_pending_calls == Decimal("0")
+
+
+def test_stock_close_requires_call_currency_to_match_exactly() -> None:
+    stock = stock_contract(con_id=999)
+    eur_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
+        update={
+            "currency": "EUR",
+            "deliverable_verified": False,
+            "deliverable_shares": None,
+        }
+    )
+    _, decision = _evaluate(
+        _stock_close(50),
+        positions=(_position(stock, "150"), _position(eur_call, "-1")),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert check.status is RiskCheckStatus.FAIL
+    assert eur_call.symbol in check.detail
+    assert eur_call.expiration.isoformat() in check.detail
+    assert str(eur_call.strike) in check.detail
+    assert "222" not in check.detail
+    assert "999" not in check.detail
+
+
+def test_stock_close_uses_verified_adjusted_call_share_deliverable() -> None:
+    stock = stock_contract(con_id=999)
+    adjusted_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
+        update={"deliverable_shares": Decimal("150")}
+    )
+    evidence, decision = _evaluate(
+        _stock_close(51),
+        positions=(_position(stock, "200"), _position(adjusted_call, "-1")),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert evidence.shares_covering_short_calls == Decimal("150")
+    assert check.status is RiskCheckStatus.FAIL
+    assert "bound=50" in check.detail
+
+
 def _option_case(
     case: str,
 ) -> tuple[

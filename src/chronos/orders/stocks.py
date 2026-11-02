@@ -110,6 +110,14 @@ def _stock_sell_holding_check(
             f"{error}; {_stock_close_figures(evidence, bound=Decimal('0'))}",
         )
 
+    if evidence.stock_close_call_evidence_issues:
+        contracts = ", ".join(evidence.stock_close_call_evidence_issues)
+        return _failed(
+            "stock_no_short",
+            "stock close refused because call deliverable evidence is unverified or not exact for "
+            f"{contracts}; {_stock_close_figures(evidence, bound=Decimal('0'))}",
+        )
+
     bound = max(
         Decimal("0"),
         max(share_summary.unencumbered_shares, Decimal("0")) - evidence.stock_sell_reserved_shares,
