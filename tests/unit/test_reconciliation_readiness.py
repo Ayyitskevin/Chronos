@@ -72,6 +72,106 @@ def test_manual_review_is_explicitly_blocked() -> None:
     assert snapshot.ready is False
 
 
+@pytest.mark.parametrize(
+    "status",
+    (
+        ReconciliationStatus.RECONCILED,
+        ReconciliationStatus.MANUAL_REVIEW,
+        ReconciliationStatus.PENDING,
+    ),
+)
+def test_every_completion_records_its_aware_publication_time(
+    status: ReconciliationStatus,
+) -> None:
+    readiness = ReconciliationReadiness()
+    generation = readiness.begin_reconciliation("startup observation")
+
+    assert readiness.complete(
+        expected_generation=generation,
+        status=status,
+        reason="completion result",
+        reconciled_at=NOW if status is ReconciliationStatus.RECONCILED else None,
+        published_at=NOW,
+    )
+
+    snapshot = readiness.snapshot()
+    assert snapshot.status is status
+    assert snapshot.published_at == NOW
+
+
+def test_publication_time_is_cleared_by_invalidation_and_new_observation() -> None:
+    readiness = ReconciliationReadiness()
+    generation = readiness.begin_reconciliation("startup observation")
+    assert readiness.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.MANUAL_REVIEW,
+        reason="manual review",
+        published_at=NOW,
+    )
+
+    invalidated = readiness.invalidate("broker changed")
+    assert invalidated.published_at is None
+
+    next_generation = readiness.begin_reconciliation("next observation")
+    assert next_generation == invalidated.generation + 1
+    assert readiness.snapshot().published_at is None
+
+
+def test_naive_publication_time_is_refused() -> None:
+    readiness = ReconciliationReadiness()
+    generation = readiness.begin_reconciliation("startup observation")
+
+    with pytest.raises(ValueError, match="aware publication time"):
+        readiness.complete(
+            expected_generation=generation,
+            status=ReconciliationStatus.MANUAL_REVIEW,
+            reason="manual review",
+            published_at=NOW.replace(tzinfo=None),
+        )
+
+
+def test_stale_completion_cannot_replace_current_publication_time() -> None:
+    readiness = ReconciliationReadiness()
+    stale_generation = readiness.begin_reconciliation("old observation")
+    current_generation = readiness.begin_reconciliation("current observation")
+    assert readiness.complete(
+        expected_generation=current_generation,
+        status=ReconciliationStatus.PENDING,
+        reason="current result",
+        published_at=NOW,
+    )
+
+    assert not readiness.complete(
+        expected_generation=stale_generation,
+        status=ReconciliationStatus.MANUAL_REVIEW,
+        reason="stale result",
+        published_at=NOW + timedelta(seconds=1),
+    )
+    snapshot = readiness.snapshot()
+    assert snapshot.generation == current_generation
+    assert snapshot.status is ReconciliationStatus.PENDING
+    assert snapshot.reason == "current result"
+    assert snapshot.published_at == NOW
+
+
+def test_manual_review_publication_time_does_not_change_expiry_policy() -> None:
+    now = [NOW]
+    readiness = _aged_latch(now)
+    generation = readiness.begin_reconciliation("startup observation")
+    assert readiness.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.MANUAL_REVIEW,
+        reason="manual review remains explicit",
+        published_at=NOW,
+    )
+
+    now[0] = NOW + timedelta(days=30)
+    snapshot = readiness.snapshot()
+    assert snapshot.status is ReconciliationStatus.MANUAL_REVIEW
+    assert snapshot.reason == "manual review remains explicit"
+    assert snapshot.published_at == NOW
+
+
 def test_reconciled_completion_requires_aware_time() -> None:
     readiness = ReconciliationReadiness()
     generation = readiness.begin_reconciliation("startup observation")
