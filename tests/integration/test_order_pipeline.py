@@ -20,6 +20,7 @@ from tests.support.order_fakes import (
     FakeBroker,
     option_contract,
     paper_settings,
+    stock_contract,
 )
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
@@ -28,18 +29,22 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     IBEnvironment,
+    OptionRight,
     OrderIntent,
     OrderLifecycle,
     ProductFamily,
     ReconciliationStatus,
+    RiskCheckStatus,
 )
 from chronos.domain.models import (
     BrokerExecution,
     BrokerOrder,
+    BrokerPosition,
     OrderRequest,
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent, build_stock_intent
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
@@ -313,6 +318,66 @@ def test_propose_persists_typed_qqq_management_risk_for_post_fill_admission() ->
             "marked_strategy_nav_usd": "3000",
             "unit_exposure_cvar_loss_fraction": "0.05",
         }
+    finally:
+        h.close()
+
+
+def test_human_proposal_persists_both_manual_review_and_stock_holding_refusals() -> None:
+    stock = stock_contract()
+    call = option_contract(right=OptionRight.CALL)
+    broker = FakeBroker(
+        positions=(
+            BrokerPosition(
+                account_id=PAPER_ACCOUNT,
+                contract=stock,
+                quantity=Decimal("100"),
+                average_cost=Decimal("100"),
+                market_price=Decimal("100"),
+            ),
+            BrokerPosition(
+                account_id=PAPER_ACCOUNT,
+                contract=call,
+                quantity=Decimal("-1"),
+                average_cost=Decimal("100"),
+                market_price=Decimal("100"),
+            ),
+        )
+    )
+    h = _Harness(broker, paper_settings())
+    try:
+        evidence_provider = BrokerRiskEvidenceProvider(
+            connection=h.connection,
+            settings=h.settings,
+            reconciliation_readiness=h.readiness,
+        )
+        h.service._evidence = evidence_provider
+        snapshot = h.readiness.snapshot()
+        assert h.readiness.complete(
+            expected_generation=snapshot.generation,
+            status=ReconciliationStatus.MANUAL_REVIEW,
+            reason="portfolio reconciliation requires manual review",
+        )
+        intent = build_stock_intent(
+            account_id=PAPER_ACCOUNT,
+            intent=OrderIntent.CLOSE_LONG_STOCK,
+            contract=stock,
+            quantity=100,
+            limit_price=Decimal("100"),
+            correlation_id="CHR-ORD-" + "E" * 32,
+            intent_id="e0-human-b5-close",
+        )
+
+        proposed = h.service.propose(intent, now=FIXED_NOW)
+        stored = h.risk_decisions.get(
+            proposed.risk.decision_id,
+            current_account_id=PAPER_ACCOUNT,
+        )
+
+        assert stored is not None
+        persisted = {check.check_name: check.status for check in stored.checks}
+        assert persisted["reconciled_proven_state"] is RiskCheckStatus.FAIL
+        assert persisted["stock_no_short"] is RiskCheckStatus.FAIL
+        assert h.broker.submit_calls == []
     finally:
         h.close()
 
