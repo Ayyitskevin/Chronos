@@ -5,7 +5,7 @@ from time import monotonic, sleep
 import pytest
 
 from chronos.domain.enums import ReconciliationStatus
-from chronos.orders.reconciliation_readiness import ReconciliationReadiness
+from chronos.orders.reconciliation_readiness import ReadinessBlocker, ReconciliationReadiness
 
 NOW = datetime(2026, 7, 21, 14, 0, tzinfo=UTC)
 
@@ -170,6 +170,51 @@ def test_manual_review_publication_time_does_not_change_expiry_policy() -> None:
     assert snapshot.status is ReconciliationStatus.MANUAL_REVIEW
     assert snapshot.reason == "manual review remains explicit"
     assert snapshot.published_at == NOW
+
+
+def test_blockers_are_empty_by_default_and_clear_on_invalidation_and_new_pass() -> None:
+    readiness = ReconciliationReadiness()
+    assert readiness.snapshot().blockers == frozenset()
+    generation = readiness.begin_reconciliation("startup observation")
+    blockers = frozenset({ReadinessBlocker.HELD_POSITION_UNPROVEN})
+    assert readiness.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.MANUAL_REVIEW,
+        reason="manual review",
+        published_at=NOW,
+        blockers=blockers,
+    )
+    assert readiness.snapshot().blockers == blockers
+
+    invalidated = readiness.invalidate("broker changed")
+    assert invalidated.blockers == frozenset()
+    next_generation = readiness.begin_reconciliation("next observation")
+    assert readiness.snapshot().blockers == frozenset()
+    assert next_generation == invalidated.generation + 1
+
+
+def test_stale_blocker_publication_cannot_replace_current_generation() -> None:
+    readiness = ReconciliationReadiness()
+    stale_generation = readiness.begin_reconciliation("old observation")
+    readiness.invalidate("broker changed")
+    current_generation = readiness.begin_reconciliation("current observation")
+    current_blockers = frozenset({ReadinessBlocker.SCOPE_CHANGED})
+    assert readiness.complete(
+        expected_generation=current_generation,
+        status=ReconciliationStatus.PENDING,
+        reason="current result",
+        published_at=NOW,
+        blockers=current_blockers,
+    )
+
+    assert not readiness.complete(
+        expected_generation=stale_generation,
+        status=ReconciliationStatus.MANUAL_REVIEW,
+        reason="stale result",
+        published_at=NOW + timedelta(seconds=1),
+        blockers=frozenset({ReadinessBlocker.HELD_POSITION_UNPROVEN}),
+    )
+    assert readiness.snapshot().blockers == current_blockers
 
 
 def test_reconciled_completion_requires_aware_time() -> None:
