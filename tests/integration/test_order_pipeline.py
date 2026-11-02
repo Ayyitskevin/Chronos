@@ -20,7 +20,6 @@ from tests.support.order_fakes import (
     FakeBroker,
     option_contract,
     paper_settings,
-    stock_contract,
 )
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
@@ -29,22 +28,18 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     IBEnvironment,
-    OptionRight,
     OrderIntent,
     OrderLifecycle,
     ProductFamily,
     ReconciliationStatus,
-    RiskCheckStatus,
 )
 from chronos.domain.models import (
     BrokerExecution,
     BrokerOrder,
-    BrokerPosition,
     OrderRequest,
     OrderSubmission,
     UnderlyingContract,
 )
-from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent, build_stock_intent
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
@@ -323,6 +318,12 @@ def test_propose_persists_typed_qqq_management_risk_for_post_fill_admission() ->
 
 
 def test_human_proposal_persists_both_manual_review_and_stock_holding_refusals() -> None:
+    from tests.support.order_fakes import stock_contract
+
+    from chronos.domain.enums import OptionRight, RiskCheckStatus
+    from chronos.domain.models import BrokerPosition
+    from chronos.orders.evidence import BrokerRiskEvidenceProvider
+
     stock = stock_contract()
     call = option_contract(right=OptionRight.CALL)
     broker = FakeBroker(
