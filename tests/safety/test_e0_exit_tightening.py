@@ -589,6 +589,22 @@ def test_option_close_refuses_two_non_integral_buys_with_integral_sum() -> None:
     assert "bound=0" in check.detail
 
 
+def test_option_close_refuses_non_integral_held_position() -> None:
+    put = option_contract(con_id=222)
+    evidence, decision = _evaluate(
+        _option_close(1),
+        positions=(_position(put, "-1.5"),),
+    )
+
+    check = _risk_check(decision, "held_position_sufficiency")
+    assert check.status is RiskCheckStatus.FAIL
+    assert evidence.held_short_option_contracts == Decimal("1.5")
+    assert evidence.held_short_option_non_integral
+    assert "non-integral" in check.detail
+    assert "held=1.5" in check.detail
+    assert "bound=0" in check.detail
+
+
 def _opening_scenario(case: str):
     stock = stock_contract()
     call = option_contract(right=OptionRight.CALL, con_id=333)
