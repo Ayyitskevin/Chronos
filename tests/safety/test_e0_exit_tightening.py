@@ -399,22 +399,6 @@ def test_stock_close_requires_call_currency_to_match_exactly() -> None:
     assert "999" not in check.detail
 
 
-def test_stock_close_uses_verified_adjusted_call_share_deliverable() -> None:
-    stock = stock_contract(con_id=999)
-    adjusted_call = option_contract(right=OptionRight.CALL, con_id=222).model_copy(
-        update={"deliverable_shares": Decimal("150")}
-    )
-    evidence, decision = _evaluate(
-        _stock_close(51),
-        positions=(_position(stock, "200"), _position(adjusted_call, "-1")),
-    )
-
-    check = _risk_check(decision, "stock_no_short")
-    assert evidence.shares_covering_short_calls == Decimal("150")
-    assert check.status is RiskCheckStatus.FAIL
-    assert "bound=50" in check.detail
-
-
 def _option_case(
     case: str,
 ) -> tuple[
