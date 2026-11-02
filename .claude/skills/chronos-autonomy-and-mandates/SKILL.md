@@ -107,20 +107,20 @@ points): `references/contract-tables.md`. The essentials:
 | Order-capable? | **Structurally no.** No account/broker/order-id/client-id/routing/exchange/transmit/order-type field anywhere in the tree, and no mandate-naming field — the supervisor binds authority (decision.py:9-26). Pinned by `tests/safety/test_autonomy_contracts.py::test_decision_has_no_order_capable_field_anywhere` (:453; forbidden-name set :87-110) | same (it inherits) |
 | Frozen | `AutonomyModel` base: frozen, `extra="forbid"`, `model_copy(update=...)` re-validates (base.py:31-41) | same |
 
-**Four DEAD economic fields** — `exit_plan`, `protective_order_required`,
-`max_acceptable_loss_usd`, `requested_risk_budget_usd` — affect ONLY the dedup
-fingerprint; no supervisor or orders module reads them (grep-verified
-2026-08-02). *Update 2026-10-28 (D-17 (iii), D-52): `exit_plan` and
-`protective_order_required` are now REFUSED. Admission refuses a set value with
-`PROTECTION_NOT_AVAILABLE`, building ADR-0021 Group B as "forbid". The two
-monetary caps are still dead.* AGENTS.md:29-30 and Phase-1 item 7
+**Two DEAD monetary fields and two REFUSED protection fields** —
+`max_acceptable_loss_usd` and `requested_risk_budget_usd` remain dead;
+`exit_plan` and `protective_order_required` are REFUSED. Admission refuses a set
+value with `PROTECTION_NOT_AVAILABLE` (D-17 (iii), D-52), building ADR-0021
+Group B as "forbid". The four fields remain in the dedup fingerprint.
+AGENTS.md:29-30 and Phase-1 item 7
 (docs/VISION_COMPLETION_PLAN.md:160-162) require every economic-looking field to
 become enforced, explicitly advisory, or forbidden. **Status: OPEN.** Route any
 resolution through `chronos-change-control`; do not quietly wire or delete them.
 
-Contrast: the MANDATE's fields DO carry a pinned ENFORCED/INERT classification
-(`tests/safety/test_supervisor_gateway.py:634-751`). No equivalent pin exists
-yet for the decision contract's fields — that asymmetry IS Phase-1 item 7.
+Mandate fields carry a pinned ENFORCED/INERT/REFUSED classification
+(`tests/safety/test_supervisor_gateway.py`); decision fields are classified in
+`chronos.autonomy.decision_enforcement` and pinned by
+`tests/safety/test_decision_fields_disclosed.py`.
 
 ## 3. The judgment pipeline, in order
 

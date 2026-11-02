@@ -659,7 +659,7 @@ _INERT = INERT
 _LIMIT_ENFORCEMENT = LIMIT_ENFORCEMENT
 
 
-def test_every_mandate_limit_is_classified_enforced_or_inert() -> None:
+def test_every_mandate_limit_is_classified() -> None:
     """A mandate field cannot just appear — it must be declared one way or the other.
 
     This is the guard the M2 review asked for: adding a limit to any of these
@@ -675,7 +675,7 @@ def test_every_mandate_limit_is_classified_enforced_or_inert() -> None:
         declared = set(classified)
         assert actual == declared, (
             f"{model_name} fields changed: {sorted(actual ^ declared)}. Every mandate "
-            "limit must be classified ENFORCED or INERT in _LIMIT_ENFORCEMENT, and the "
+            "limit must be classified ENFORCED, INERT, or REFUSED in _LIMIT_ENFORCEMENT, and the "
             "inert ones disclosed in admission.py's docstring."
         )
 
@@ -715,7 +715,7 @@ def test_the_classification_matches_what_the_kernel_actually_reads() -> None:
                 )
             else:
                 assert mentioned, (
-                    f"{model_name}.{field} is classified ENFORCED but no kernel module mentions it"
+                    f"{model_name}.{field} is classified {status} but no kernel module mentions it"
                 )
 
 

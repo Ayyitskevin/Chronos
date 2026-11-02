@@ -34,19 +34,15 @@ authors THIS type only; `AITradeDecision` (decision.py:417-438) is a
 | `evidence` | ≤64 `EvidenceCitation` (64-hex digest + id) | ENFORCED (presence) | exposure-creating kinds must cite ≥1 decision.py:355-364; bundle id+digest matched at admission.py:580-613. Presence check, not support check (ADR-0016:205-220) |
 | `reassess_at` | AwareDatetime \| None | narrative | recorded only |
 
-**The four DEAD economic fields** — `exit_plan`, `protective_order_required`,
-`max_acceptable_loss_usd`, `requested_risk_budget_usd` — verified 2026-08-02: a
-grep across `src/chronos` finds no reader outside `autonomy/decision.py` and the
-fingerprint in `supervisor/queue.py`. A model can request a protective stop and
-the system will neither place one nor refuse the decision for asking. This
-violates AGENTS.md:29-30 ("Every economic-looking field must be mechanically
-enforced, explicitly advisory, or forbidden. Inert authority, risk, exit, or
-protection fields are release blockers") and is exactly
-VISION_COMPLETION_PLAN.md:160-162 (Phase 1 item 7). Status: OPEN. Resolving it
-(enforce / label advisory / forbid each field) routes through
-`chronos-change-control`, not a session judgment call. Note that because they
-feed the fingerprint, changing any of them mints a NEW decision_id — a fresh
-retry budget — so even "dead" fields are not free to reshape.
+**Two DEAD monetary fields and two REFUSED protection fields** —
+`max_acceptable_loss_usd` and `requested_risk_budget_usd` remain inert.
+`exit_plan` and `protective_order_required` are REFUSED: admission rejects any
+exit plan or a true protection flag with `PROTECTION_NOT_AVAILABLE` because no
+position-management lifecycle can keep the requested protection (D-17 (iii),
+D-52). The unresolved monetary fields remain open under Phase 1 item 7; route
+any resolution through `chronos-change-control`. The fingerprint includes the
+monetary fields, protection flag, and exit price triggers, so changing those
+inputs can produce a new decision_id and retry budget.
 
 ## 2. Writer-owned fields (a model may never author)
 

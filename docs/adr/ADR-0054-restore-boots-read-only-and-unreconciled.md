@@ -139,7 +139,7 @@ asked to be interrogated about.
 .venv/bin/python -m pytest -q tests/safety/test_restore_recovery_hold.py
 ```
 
-Twenty-three tests: the six-row detection matrix and the witness binding as pure
+The suite covers the six-row detection matrix and the witness binding as pure
 functions, then the three consequences, the lease that is deliberately kept, the
 acknowledgement's note requirement, reachability, pair binding, next-start effect, and
 its independence from the kill switch — each over the real app and its real lifespan,

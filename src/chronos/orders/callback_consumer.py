@@ -35,10 +35,12 @@ memory when the process dies is lost; the startup reconciliation must pass befor
 RECONCILED again. Exactly once is claimed for JOURNALING per identity only.
 
 Shutdown (CB1-FIX5 P3-2): the production lifespan (``api/main.py``) releases the writer lease
-BEFORE ``runtime.close()`` stops the consumer, so the stop's drain journals nothing. Every write
-fails its lease check; the worker halts (ERROR ``callback_consumer_halted``, even on a clean,
-idle shutdown); every queued or held event counts as lost and demotes readiness; and no
-``stopped`` health row is written. The startup reconciliation covers them, as after a crash.
+BEFORE ``runtime.close()`` stops the consumer, so the stop's drain journals nothing. A worker
+that finds the lease lost at a loop-head check or on a write attempt halts with ERROR
+``callback_consumer_halted``; an idle worker may instead return on the stop marker. Queued or held
+events left unjournaled count as lost and demote readiness; no ``stopped`` health row is written
+after the lease is released.
+Startup reconciliation covers the losses, as after a crash.
 ``stop()`` is synchronous and can block its caller for up to about 3 x ``timeout`` + 0.1 s (the
 stop marker's put on a full queue, the join, then the health row's lock wait): about 6 s at the
 default.

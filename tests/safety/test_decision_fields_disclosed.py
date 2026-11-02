@@ -96,7 +96,8 @@ def test_t3_every_field_is_classified_exactly_once() -> None:
         actual = _fields(model)
         assert classified | exempt == actual, (
             f"{name} fields changed: {sorted(actual ^ (classified | exempt))}. Classify "
-            "each in chronos.autonomy.decision_enforcement: ENFORCED, INERT, or NOT_A_LIMIT."
+            "each in chronos.autonomy.decision_enforcement: ENFORCED, INERT, REFUSED, "
+            "or NOT_A_LIMIT."
         )
         # D-17 (iii), D-52: REFUSED is the third label (a set value is refused).
         assert set(DECISION_FIELD_ENFORCEMENT[name].values()) <= {ENFORCED, INERT, "REFUSED"}
