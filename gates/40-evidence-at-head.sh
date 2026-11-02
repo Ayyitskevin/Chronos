@@ -50,7 +50,7 @@ sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-h
 # A. TRUSTED steps (network allowed; candidate bytes only as DATA): validate the locks, pre-fetch the wheel
 #    cache, audit the runtime lock — every tool from the trusted tools venv, never candidate code.
 LOCKS="bootstrap build runtime sbom"
-why="$(python3 - "$snap" $LOCKS <<'PY' 2>&1
+why="$(python3 -I -B - "$snap" $LOCKS <<'PY' 2>&1
 import re, sys
 snap, names = sys.argv[1], sys.argv[2:]
 ok = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+|\s+--hash=sha256:[0-9a-f]{64})(?: \\)?|\s*(?:#.*)?")
@@ -62,13 +62,13 @@ PY
 )" || fail "$(tail -n 1 <<< "$why"); the trusted steps read the locks only as pinned data"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/chronos-gates/wheels"; mkdir -p "$cache" && chmod 0700 "$cache" || fail "could not create the wheel cache"
 for l in $LOCKS; do
-  "$tools/bin/python" -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
+  "$tools/bin/python" -I -B -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
     -r "$snap/requirements-$l.lock" -d "$cache" > "$work/download-$l.log" 2>&1 \
     || fail "could not pre-fetch requirements-$l.lock as hash-pinned wheels (an sdist-only or yanked pin fails closed); see pip download"
 done
-"$tools/bin/python" -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
+"$tools/bin/python" -I -B -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
 acode=$?
-audit="$(python3 - "$work/audit.json" "$acode" <<'PY' 2>&1
+audit="$(python3 -I -B - "$work/audit.json" "$acode" <<'PY' 2>&1
 import json, re, sys
 try:
     deps = json.load(open(sys.argv[1]))["dependencies"]
@@ -100,27 +100,16 @@ done
 SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache $work/trusted" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate \
   sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
-SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" - <<'PY'
-# the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
-import importlib.util, os, subprocess, sys
-from importlib import metadata
-from pathlib import Path
-root, copy = Path.cwd(), Path(os.environ["GATE_IO"]) / ".secrets.baseline"
-spec = importlib.util.spec_from_file_location("release_security", root / "scripts/verify_release_security.py")
-gate = sys.modules[spec.name] = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
-gate._require_exact_tool_versions(metadata.version)
-tracked = tuple(p for p in gate._tracked_files(root) if p != ".secrets.baseline")
-for command in gate.build_scan_commands(python=Path(sys.executable), baseline=copy, tracked_files=tracked):
-    if command.name != "runtime dependency audit":
-        subprocess.run(command.argv, cwd=root, check=True)
-gate.verify_git_history_secrets(root, copy)
-PY
+lib="$(cd "$(dirname "$0")/lib" && pwd)"
+# G70-FIX r2: the security driver is a trusted FILE run by the non-editable tools venv (-I -B, no candidate on sys.path, and its
+# scanner children get -I -B too); the lane venv (editable .pth, candidate sitecustomize) never starts trusted code.
+SANDBOX_OVERLAY="$SEC" SANDBOX_RO="$tools $lib" target security-offline sandbox_run "$work" "$tools/bin/python" -I -B "$lib/security_offline.py"
 if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name resolution|Network is unreachable|NameResolutionError|NewConnectionError'; then
   fail "the $first target needs outbound network, which the sandbox denies (the split moved pip-audit and the wheel downloads to trusted steps); FAILing closed"
 fi
 cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
 lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
-out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
+out="$(python3 -I -B - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 targets = dict(line.split() for line in open(sys.argv[6]))
@@ -162,7 +151,7 @@ print(bad or ("the lane tree changed during make gates" if lane_dirty else "ok")
 PY
 )" || fail "could not verify the snapshot or write the receipt ($(tail -n 1 <<< "$out"))"
 [ "$out" = ok ] || fail "$out; the evidence does not name PR_HEAD_SHA's bytes — re-run on an untouched head"
-read -r rsha rexit nsum counts < <(python3 -c 'import json,os,sys; r=json.load(os.fdopen(os.open(sys.argv[1], os.O_RDONLY|os.O_NOFOLLOW))); p=r["pytest"]
+read -r rsha rexit nsum counts < <(python3 -I -B -c 'import json,os,sys; r=json.load(os.fdopen(os.open(sys.argv[1], os.O_RDONLY|os.O_NOFOLLOW))); p=r["pytest"]
 print(r["sha"], r["exit"], r["summaries"], "none" if p is None else "%d/%d/%d/%d" % (p["passed"], p["failed"], p["skipped"], p["errors"]))' .gates/40-evidence-at-head.json) \
   || fail "could not read back the receipt .gates/40-evidence-at-head.json"
 [ "$rexit" = 0 ] || fail "make gates exited $rexit at $rsha (target $first); re-run 'make $first' by hand at that head, fix, then re-run"

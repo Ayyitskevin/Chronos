@@ -201,6 +201,8 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
             name="runtime dependency audit",
             argv=(
                 "/venv/bin/python",
+                "-I",
+                "-B",
                 "-m",
                 "pip_audit",
                 "--require-hashes",
@@ -215,6 +217,8 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
             name="Python static analysis",
             argv=(
                 "/venv/bin/python",
+                "-I",
+                "-B",
                 "-m",
                 "bandit",
                 "-r",
@@ -232,6 +236,8 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
             name="tracked-file secret scan",
             argv=(
                 "/venv/bin/python",
+                "-I",
+                "-B",
                 "-m",
                 "detect_secrets.pre_commit_hook",
                 "--baseline",
@@ -341,7 +347,7 @@ def test_gate_refuses_a_stale_baseline_instead_of_mutating_the_checkout(
 
     def mutate_copy(command: ScanCommand, _root: Path) -> None:
         if command.name == "tracked-file secret scan":
-            copied_baseline = Path(command.argv[4])
+            copied_baseline = Path(command.argv[command.argv.index("--baseline") + 1])
             copied_baseline.write_text('{"version": "changed"}\n', encoding="utf-8")
 
     with pytest.raises(SecurityGateError, match="baseline is stale"):
@@ -831,3 +837,26 @@ def test_history_walk_reads_commit_objects(
     assert "AWS Access Key" in message
     assert "config.py" in message
     assert fake_access_key not in message
+
+
+def test_scan_children_run_isolated_so_a_cwd_module_cannot_stand_in_for_a_scanner(
+    tmp_path: Path,
+) -> None:
+    """G70-FIX r2: `python -m bandit` from the repository root resolves `bandit` cwd-first, so a
+    tracked root bandit.py would run instead of the scanner (and exit 0). Interpreter flags are not
+    inherited by a child, so every scanner command carries -I -B itself."""
+    marker = tmp_path / "shadow-ran"
+    (tmp_path / "bandit.py").write_text(
+        f"import os, sys\nopen({str(marker)!r}, 'w').write('ran')\nsys.exit(0)\n",
+        encoding="utf-8",
+    )
+    commands = build_scan_commands(
+        python=Path(sys.executable),
+        baseline=tmp_path / "baseline.json",
+        tracked_files=("a.py",),
+    )
+    bandit = next(command for command in commands if command.name == "Python static analysis")
+
+    subprocess.run(bandit.argv, cwd=tmp_path, check=False, capture_output=True)
+
+    assert not marker.exists(), "the cwd bandit.py ran in place of the scanner"

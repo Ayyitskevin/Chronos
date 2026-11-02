@@ -41,7 +41,31 @@ The gates are executable acceptance authority: whoever runs them holds repositor
 - **Trusted and unsandboxed (metadata and data only):** 05, 20, 30 (`gh pr view` / `gh repo view` /
   GraphQL reads, `git fetch`), 50 (system `python3` hashing fixture data), the `git clone` that builds
   each snapshot, and the verdict parsing of 10/40/60/70 (receipts, the junit report, the scan result).
-  They run no candidate code.
+  They run no candidate code. That is only true because every trusted Python call is **isolated**: the
+  gates `cd` into the candidate tree, and plain `python3 -`, `-c` and `-m` put the cwd first on
+  `sys.path`, so a candidate-tracked `json.py`, `hashlib.py`, `re.py`, `subprocess.py`, `pip/`, … would be
+  imported instead of the real module, outside the sandbox, with the runner's credentials (and the
+  network at gate 40's trusted steps). Every trusted interpreter call in `gates/` and `gates/lib/`
+  therefore runs `python3 -I -B` (isolated: no cwd or script dir on `sys.path`, `PYTHON*` env ignored, no
+  user site; `-B` keeps the `PYTHONDONTWRITEBYTECODE=1` that `-I` would otherwise drop). That covers the
+  heredoc/`-c` programs of 10/40/50/60/70 (gate 40's security-offline driver is the file `gates/lib/security_offline.py`, run by the tools venv), the trusted tools venv's `-m pip download`/`-m pip_audit`,
+  `gates/lib/tools-venv.sh`'s `-m venv`/`-m pip install`, and gate 60's sandboxed `-m detect_secrets`
+  (the trusted scanner must be the one that runs, not a tracked package of the same name). A new
+  trusted Python call must do the same; `-I` ignores `PYTHONPATH`, so it takes any trusted path
+  explicitly. The harnesses plant shadow modules in synthetic candidate trees and fail on any marker: that proves
+  the cwd-import half of the rule behaviourally. The rest of it (`-B`, and the `PYTHON*`-env and user-site halves of `-I`)
+  has no candidate-reachable behaviour to plant, so `tests/gates/test_gates_40_70.sh` (`iso:3`) pins it by spelling: it
+  greps `gates/*.sh` and `gates/lib/*.sh` for a call written `python3 -…`, `…/bin/python -…` or tools-venv.sh's
+  `"$base" -…` and requires `-I -B` on each. It does NOT see another spelling (`python3 script.py` with no leading flag,
+  `python`, `python3.12`, an absolute `/usr/bin/python3`, or an interpreter held in a variable), so a trusted call written
+  any other way must be read by hand in review. Sandboxed candidate-venv `"$py"` calls are not matched, by design.
+  **Runner assumption:** `-I` governs what the interpreter imports, not which `python3` runs. The interpreter is resolved
+  through the trusted runner's `PATH`, exactly as `git`, `bwrap`, `make` and `gh` are, so the runner's `PATH` must contain
+  no relative element (no `.`, no empty entry) and no directory the candidate can write to; otherwise a tracked
+  executable named `python3` in the candidate tree would be selected before any flag applies. The lane controls the
+  runner's environment, the candidate does not.
+  Not covered by this rule, by design: the sandboxed calls of the CANDIDATE's own venv (`make`'s
+  targets, gate 70's pytest, gate 40's security scans), which are candidate code and need `PYTHONPATH`.
 - **Candidate code, sandboxed:** 10 (the current-state generator's `--check`), 40 (the network-free
   `make` targets and the offline security scans) and 70 (the doc-contract tests) run ONLY through the
   one trusted launcher `gates/lib/sandbox.sh` (sourced from the trusted set; `run-all.sh` never runs
@@ -80,7 +104,7 @@ The gates are executable acceptance authority: whoever runs them holds repositor
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming
-  `<snapshot>/src`, so `python -I` imports the snapshot (and the identity assert checks `-I` too); a
+  `<snapshot>/src`, so `python -I` imports the snapshot (and the identity assert checks `-I` too: its binding half runs through the `-S` bootstrap below); a
   `GATES_SANDBOX_RO` entry that is a FILE is bound at its real path with its directory on PATH. The lane
   runner declares exactly the binaries the suite needs: `~/.local/bin/age`, `~/.local/bin/age-keygen`,
   `~/.nvm/versions/node/v24.16.0/bin/node` — only those files are visible under `/home`. Without them the
@@ -89,13 +113,24 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   `origin/main:requirements-dev.lock` of the repository the TRUSTED gates dir belongs to — never the
   candidate's lock, never the lane venv — into `${XDG_CACHE_HOME:-~/.cache}/chronos-gates/tools-<lock
   digest>` (0700), binary-only and hash-pinned; it provides pip, pip-audit and detect-secrets.
-- **Gate 60 runs no candidate code:** the trusted detect-secrets scans the snapshot as data (in the
+- **Gate 60 runs no candidate code:** the trusted detect-secrets (`python -I -B -m detect_secrets…`, so a
+  tracked `detect_secrets/` package cannot stand in for it) scans the snapshot as data (in the
   sandbox) with the trusted base's scanner configuration (`plugins_used`, `filters_used` from its
   `.secrets.baseline`); the candidate baseline contributes only its reviewed `results`, and its own
   configuration must equal the trusted one (an emptied or altered plugin set FAILs). The scanner's
   stdout goes straight to the trusted judge.
+- **Trusted Python starts before any candidate startup hook (G70-FIX r2):** a normal interpreter start runs `site`, which
+  processes the lane venv's `.pth` files (the sandbox points the editable one at `<snapshot>/src`) and imports
+  `sitecustomize`/`usercustomize` from `sys.path`, so a tracked `src/sitecustomize.py` would run before any trusted code
+  under `-P` and `-I` alike. Trusted code that must run in the sandbox therefore never starts that way: gate 70's pytest and
+  `sandbox_identity`'s binding check run `<lane python> -I -S -B gates/lib/boot.py …` (no `site`: no `.pth`, no startup hook;
+  `boot.py` builds `sys.path` as stdlib, the trusted dir, the venv's site-packages, `<snapshot>/src` last), and gate 40's
+  security-offline driver is `gates/lib/security_offline.py` run by the NON-editable tools venv with `-I -B`, whose scanner
+  children get `-I -B` too (flags are not inherited). The lane venv's normal start remains where candidate code (make targets,
+  gate 10's checker) runs; the second half of `sandbox_identity` still checks it, as a guard against a misconfigured venv,
+  never as evidence. Pinned by `tests/gates/test_gates_trusted_start.sh` (real python, pytest, bandit, detect-secrets).
 - **Gate 70 strips candidate pytest authority:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, a trusted empty ini
-  (`-c`), `--noconftest`, `-p no:cacheprovider`, and the trusted reporter `gates/lib/gates_nodes.py`; the
+  (`-c`), `--noconftest`, `-p no:cacheprovider`, the trusted reporter `gates/lib/gates_nodes.py` (loaded from the bound trusted dir by the bootstrap; a run that exits 0 without a pytest summary is refused); the
   judge requires every test function a trusted AST parse expects to have a passing report. Two tests are
   kept out by name — `test_limitations_autonomy_counters_contract.py::test_3b_the_injection_tests_exist_as_collected_pytest_items`
   and `::test_4c_the_release_is_guarded_by_not_counts_activity_attempt` — because each spawns a nested
@@ -115,8 +150,8 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   independent of the code under test. Closing it needs a human (review of the tests themselves) or an
   execution observer outside the tested process, which this design does not have. Owner residual.
 - **Gate 40's other in-sandbox results:** `lint`/`type`/`release-gate` exits and the history scan come from
-  candidate-run tools and scripts (the tools are the lane venv's; the history scan is the candidate's
-  `scripts/verify_release_security.py`) — same class as above.
+  candidate-run tools and scripts (the tools are the lane venv's) — same class as above. The security-offline scans
+  are the TRUSTED base's `scripts/verify_release_security.py`, run by the tools venv over the snapshot as data.
 - **The advisory feed is a network trust:** the trusted pip-audit is only as good as its advisory service
   at run time; the same head can pass today and fail tomorrow.
 - **Tool provenance:** the sandboxed targets use the lane venv (dependencies a PR adds must be installable

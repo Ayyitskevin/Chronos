@@ -5,7 +5,7 @@
 # release security script) plus one read-only run each on this repo. Numbered by the GATES-2 contract
 # (1-4), GATES-1r1 (`r1:<item> <finding>`) and GATES-2r1 (`r2:<item> <finding>`).
 set -u
-ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=$ROOT/gates; pass=0; fail=0
+ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=${GATES_DIR_UNDER_TEST:-$ROOT/gates}; pass=0; fail=0
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 ok() { pass=$((pass+1)); echo "ok       $1"; }; bad() { fail=$((fail+1)); echo "FAIL     $1"; }
@@ -18,7 +18,7 @@ failed() { rc 1 && one "$T/err" "^FAIL: $1 — $2" && [ ! -s "$T/out" ]; }
 commit() { git -C "$1" add -A && git -C "$1" -c user.email=t@t -c user.name=t commit -qm "${2:-c}"; }
 newrepo() { rm -rf "$1"; mkdir -p "$1"; git -C "$1" init -q; }
 export BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1
-PY=$ROOT/.venv/bin/python
+PY=$(readlink -f "$ROOT/.venv")/bin/python   # the venv's real path: the sandbox binds it there, not through a symlinked .venv
 
 check "1 every gates/NN-*.sh for 40-70 exists and is executable" "[ -x $G/40-evidence-at-head.sh ] && [ -x $G/50-fixture-integrity.sh ] && [ -x $G/60-secrets-baseline.sh ] && [ -x $G/70-docs-claims-pinned.sh ]"
 
@@ -41,7 +41,7 @@ ALLOW = {"ALLOW_LIVE_TRADING", "ALLOW_ORDER_TRANSMIT", "BROKER_MODE", "GATE_IO",
 def leaks(lane=None, extra=()):
     found = []
     if set(os.environ) - {"PWD", "SHLVL", "_", "OLDPWD"} != ALLOW | set(extra) or os.environ.get("BROKER_MODE") != "demo": found.append("env")
-    if not os.environ.get("PYTHONPATH", "").split(":")[0].endswith("/snap/src") or os.environ.get("HOME") == "$HOME": found.append("env")
+    if not any(e.endswith("/snap/src") for e in os.environ.get("PYTHONPATH", "").split(":")) or os.environ.get("HOME") == "$HOME": found.append("env")
     if any(os.path.exists(p) for p in ("$HOME/.ssh", "$HOME/.config/gh")): found.append("creds")
     try: open("$T/planted").read(); found.append("file")
     except OSError: pass
@@ -97,6 +97,12 @@ mkdir -p "$T/tools/bin" "$T/xdg"; cat > "$T/tools/bin/python" <<STUB
 import json, os, sys
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 a = sys.argv[1:]
+if a[:2] == ["-I", "-B"] and a[2:3] and a[2].endswith("/security_offline.py"):   # G70-FIX r2: the trusted driver file, run inside the sandbox for real
+    os.execv("/usr/bin/python3", ["python3", *a])
+iso = a[:2] == ["-I", "-B"]                                                                    # GATESISO: the trusted tools python is only ever called isolated
+open("$T/pyiso.log", "a").write(("iso " if iso else "RAW ") + " ".join(a[2:4] if iso else a[:2]) + "\\n")
+if not iso: sys.exit(98)
+a = a[2:]
 if a[:3] == ["-m", "pip", "download"]:
     open("$T/dl.log", "a").write(a[a.index("-r") + 1] + "\\n")
     open(os.path.join(a[a.index("-d") + 1], "stub-1.0-py3-none-any.whl"), "w").write("x")
@@ -192,6 +198,18 @@ ctl rctarget type; ctl rc 1; g40; ctl rc; ctl rctarget
 check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 2 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
 ctl histfail 1; g40; ctl histfail
 check "r4:2 P3 40 FAIL: with the candidate's GUTTED security script in the tree, the TRUSTED base's script still runs, so a failing history scan still FAILs (Daybreak's probe)" "failed evidence-at-head '.*target security-offline'"
+# --- G70-FIX r1 (begin): the trusted stdin script of gate 40's security-offline step keeps the snapshot cwd off sys.path ---
+# That script `import`s subprocess (not a frozen module). A candidate-tracked subprocess.py at the snapshot root used to be imported
+# instead: this one exits 0 at import, so the step "passed" without running a scan. With the history scan forced to fail (histfail),
+# the gate must still FAIL on the security-offline target.
+# Two positions: the snapshot root (cwd-first for `python -`) and src/ (PYTHONPATH=<snap>/src); only -I (no cwd, no PYTHONPATH) closes both.
+for pos in subprocess.py src/subprocess.py; do
+  mkdir -p "$(dirname "$R40/$pos")"; printf 'raise SystemExit(0)\n' > "$R40/$pos"; commit "$R40"; H_SHADOW=$(git -C "$R40" rev-parse HEAD)
+  ctl histfail 1; g40 "$H_SHADOW"; ctl histfail
+  check "g70fix:r1 40 a tracked $pos does NOT replace the stdlib module in the trusted security-offline script: the failing history scan still FAILs the gate" "failed evidence-at-head '.*target security-offline'"
+  git -C "$R40" reset -q --hard "$H"
+done
+# --- G70-FIX r1 (end) ---
 echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
 check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
 # r5: GNU Make is pinned to the trusted makefile — candidate makefile names, MAKEFILES and MAKEFLAGS cannot override it.
@@ -361,14 +379,16 @@ cat > "$T/bin/fakepy" <<STUB
 import json, os, re, sys; sys.path.insert(0, "$T/bin"); import probe_lib
 if len(sys.argv) > 1 and sys.argv[1] == "-c" and not sys.argv[2].startswith("/"):
     os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
+if sys.argv[1:4] == ["-I", "-S", "-B"] and sys.argv[4].endswith("/boot.py") and sys.argv[5:6] == ["identity"]:   # G70-FIX r2: the trusted identity check, for real
+    os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 found = probe_lib.leaks(lane="$T/r70", extra=("PYTEST_DISABLE_PLUGIN_AUTOLOAD",))
-if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1" or not os.environ.get("PYTHONPATH", "").endswith("/gates/lib"): found.append("autoload")
-argv = re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:]))
+if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1": found.append("autoload")
+argv = re.sub(r"\S*/gates/lib/boot\.py", "BOOT", re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:])))
 if ctl("argv") is not None and argv != ctl("argv"): found.append("argv")
 if found: print("LEAK " + " ".join(found)); sys.exit(8)
 print(ctl("pysum", "5 passed in 0.10s"))
-files = [a for a in sys.argv[1:] if a.endswith(".py")]; mode = ctl("nodes", "pass")
+files = [a for a in sys.argv[1:] if a.endswith(".py") and not a.endswith("/boot.py")]; mode = ctl("nodes", "pass")
 rows = {"pass": [(f"{f}::{t}", "passed") for f in files for t in ("test_a", "test_b")],
         "skipped": [(f"{f}::{t}", "skipped") for f in files for t in ("test_a", "test_b")],
         "onefile": [(f"{files[0]}::{t}", "passed") for t in ("test_a", "test_b")],
@@ -390,7 +410,7 @@ mk70; g70
 check "1 70 PASS: the named doc-contract set passes → one PASS line, exit 0" "passed docs-claims-pinned"
 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g70
 check "r2:1 P1-1 70 with credential variables in the runner's env, the sandboxed tests see no credential variable, runner HOME, planted file or network → PASS" "passed docs-claims-pinned"
-ctl argv "-m pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
+ctl argv "-I -S -B BOOT pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
 check "1 70 adopts the existing tests: the sandboxed pytest ran over exactly the glob + the three named files, with plugin autoload OFF, a trusted empty ini, --noconftest and the trusted reporter (the stub refuses any other argv/env)" "passed docs-claims-pinned"
 ctl pyrc 1; ctl pysum '1 failed, 4 passed in 0.10s'; g70
 check "1 70 FAIL: a failing doc-contract test → one FAIL line with the pytest summary, exit 1" "failed docs-claims-pinned 'pytest exited 1 \\(1 failed, 4 passed'"
@@ -400,6 +420,8 @@ ctl pysum '5 skipped in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: Daybreak's all-skipped summary with exit 0 → FAIL" "failed docs-claims-pinned \"pytest reported '5 skipped in 0.10s'\""
 ctl pysum '4 passed, 1 deselected in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: a deselected test in the summary → FAIL" "failed docs-claims-pinned \"pytest reported '4 passed, 1 deselected\""
+ctl pysum ''; g70; ctl pysum
+check "g70fix:r2 70 FAIL: pytest exits 0 and writes valid node reports but prints NO summary line (a run that never reported, e.g. a startup hook that exited early) → FAIL, never a PASS" "failed docs-claims-pinned 'pytest exited 0 but printed no summary line'"
 ctl nodes skipped; g70; ctl nodes
 check "r3:1 P6 70 FAIL: a clean summary but node reports showing skipped outcomes → FAIL naming the node" "failed docs-claims-pinned 'tests/unit/test_limitations_a_contract.py::test_a reported skipped'"
 ctl nodes none; g70; ctl nodes
@@ -424,6 +446,108 @@ check "1 70 FAIL: the limitations contract glob matches nothing → FAIL" "faile
 check "1 70 the README lists the named set it runs" "grep -qF 'test_limitations_*_contract.py' $G/README.md && for f in $NAMED; do grep -qF \"\${f#tests/unit/}\" $G/README.md || exit 1; done"
 (cd "$ROOT" && run bash "$G70")
 check "1 70 PASS on this repo (the real doc-contract tests, real pytest)" "passed docs-claims-pinned"
+
+# --- G70-FIX: gate 70's trusted reporter plugin cannot be shadowed by a candidate-tracked gates_nodes.py (real python + real pytest) ---
+# The sandboxed pytest loads `-p gates_nodes`; a tracked gates_nodes.py at the snapshot root (cwd-first sys.path) or under src/ (PYTHONPATH
+# ahead of the trusted dir) used to be imported in its place. The shadow here raises at import and names its position: if it loads,
+# pytest dies with the marker and the gate FAILs; if the trusted reporter loads, the gate PASSes and the marker never appears.
+g70real() { (cd "$R70" && CHRONOS_PY="$PY" run bash "$G70"); }
+shadow70() {  # $1 = path inside the repo for the planted candidate gates_nodes.py
+  mk70; mkdir -p "$(dirname "$R70/$1")"; printf 'raise SystemExit("CANDIDATE-PLUGIN-IMPORTED-FROM-%s")\n' "$1" > "$R70/$1"; commit "$R70"; g70real
+}
+mk70; g70real
+check "g70fix:0 control: real python + real pytest, no shadow → PASS (the trusted reporter loads and its node reports satisfy the judge)" "passed docs-claims-pinned"
+shadow70 gates_nodes.py
+check "g70fix:1 a tracked gates_nodes.py at the repo root does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
+shadow70 src/gates_nodes.py
+check "g70fix:2 a tracked src/gates_nodes.py does NOT replace the trusted reporter → PASS, the shadow never ran" "passed docs-claims-pinned && ! grep -q CANDIDATE-PLUGIN \"$T/out\" \"$T/err\""
+cand70() {  # $1 = the value the tracked test expects of the candidate's src/chronos/claim.py (which says 1)
+  mk70; printf 'VALUE = 1\n' > "$R70/src/chronos/claim.py"
+  printf 'from chronos import claim\n\n\ndef test_a():\n    assert claim.VALUE == %s\n\n\ndef test_b():\n    pass\n' "$1" > "$R70/tests/unit/test_adr_point_in_time_claims.py"; commit "$R70"; g70real
+}
+cand70 1
+check "g70fix:3 -P / trusted-dir-first do not change what the doc-contract tests import: a test of the candidate's own src/chronos module PASSes" "passed docs-claims-pinned"
+cand70 2
+check "g70fix:4 ...and it really is the candidate's code under test: the same test expecting a different value FAILs the gate" "failed docs-claims-pinned 'pytest exited 1'"
+
+# --- GATESISO (D-51): the trusted gates run Python isolated (-I -B), so a candidate-tracked module cannot shadow an import ---
+# Each shadow writes a marker on the HOST (a sandboxed run cannot reach it), then transparently re-exports the real module, so a
+# gate that is NOT isolated still reports its normal verdict: only the marker proves the candidate's code ran in the trusted gate.
+MK=$T/mk
+shadow_src() {
+  cat <<PYS
+import os as _o, sys as _s
+try:
+    open("$MK/$1", "a").write("ran\n")
+except OSError:
+    pass
+_cwd = _o.getcwd()
+_drop = [p for p in _s.path if p in ("", ".", _cwd)]
+_s.modules.pop(__name__, None)
+_s.path[:] = [p for p in _s.path if p not in _drop]
+try:
+    import importlib as _i
+    _real = _i.import_module(__name__)
+finally:
+    _s.path[:0] = _drop
+_s.modules[__name__] = _real
+globals().update(vars(_real))
+PYS
+}
+SHADOWS="json hashlib re subprocess os stat ast pathlib"   # os and stat are loaded at startup: inert controls
+plant() { local m; for m in $SHADOWS; do shadow_src "$m" > "$1/$m.py"; git -C "$1" add -- "$m.py"; done; git -C "$1" -c user.email=t@t -c user.name=t commit -qm shadows; }
+markers() { ls "$MK" 2>/dev/null | sort | tr '\n' ' '; }
+fresh_markers() { rm -rf "$MK"; mkdir "$MK"; }
+norm() { sed -E 's/[0-9a-f]{40}/SHA/g; s/[0-9]+ tracked files/N tracked files/' "$1"; }
+same() { [ "$(norm "$T/out")" = "$(norm "$1")" ]; }   # the shadowed run's PASS line equals the clean run's, modulo shas and the tracked-file count
+fresh_markers; newrepo "$T/pc"; (cd "$T/pc" && plant . 2>/dev/null; touch x; cd "$T/pc" && python3 -c 'import subprocess, re, json, hashlib, ast, pathlib')
+check "iso:0 positive control: the planted shadows DO run under a plain python3 -c in the candidate tree (so every 'no marker' below can fail)" "[ \"\$(markers)\" = 'ast hashlib json pathlib re subprocess ' ]"
+
+# gate 40: the heredoc sites (lock validator, audit parser, receipt writer + read-back) and, via the spy stub, the two -m sites
+git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates; : > "$T/pyiso.log"; g40; cp "$T/out" "$T/iso40.clean"
+check "iso:0 40 the clean run passes (the reference line for the shadowed run)" "passed evidence-at-head"
+check "iso:2 40 the trusted pip download (one per lock) and pip_audit both ran isolated: every call of the tools python was -I -B (the stub refuses any other)" "! grep -q '^RAW' $T/pyiso.log && [ \"\$(grep -c '^iso -m pip\$' $T/pyiso.log)\" = 4 ] && [ \"\$(grep -c '^iso -m pip_audit\$' $T/pyiso.log)\" = 1 ]"
+plant "$R40"; H2=$(git -C "$R40" rev-parse HEAD); fresh_markers; g40 "$H2"
+check "iso:1 40 with the eight shadows tracked in the candidate, gate 40's verdict is unchanged" "passed evidence-at-head && same $T/iso40.clean"
+check "iso:1 40 ...and NONE of the candidate's modules ran in the trusted gate (lock validator, audit parser, receipt writer, read-back; no marker)" "[ -z \"\$(markers)\" ]"
+git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates
+
+# gate 50
+mk50; g50; cp "$T/out" "$T/iso50.clean"; plant "$B50"; fresh_markers; g50
+check "iso:1 50 with the shadows tracked in the candidate, gate 50's verdict is unchanged" "passed fixture-integrity && same $T/iso50.clean"
+check "iso:1 50 ...and NONE of the candidate's modules ran in the trusted gate (hashlib/json/re/subprocess/pathlib; no marker)" "[ -z \"\$(markers)\" ]"
+
+# gate 60: the host sites (inputs, baseline merge, judge) ...
+mk60; g60; cp "$T/out" "$T/iso60.clean"; plant "$R60"; fresh_markers; g60
+check "iso:1 60 with the shadows tracked in the candidate, gate 60's verdict is unchanged" "passed secrets-baseline && same $T/iso60.clean"
+check "iso:1 60 ...and NONE of the candidate's modules ran in the trusted gate (inputs, baseline merge, judge; no marker)" "[ -z \"\$(markers)\" ]"
+# ... and the SANDBOXED trusted scanner (python -m detect_secrets...): a tracked detect_secrets package whose hook prints nothing and
+# exits 0 must not stand in for the scanner and forge "no finding" over a tracked secret (a marker cannot leave the sandbox: the verdict is the evidence)
+for where in detect_secrets src/detect_secrets; do
+  mk60; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; mkdir -p "$R60/$where"; : > "$R60/$where/__init__.py"; printf 'raise SystemExit(0)\n' > "$R60/$where/pre_commit_hook.py"; commit "$R60"; g60
+  check "iso:1 60 a tracked $where/ forging a silent exit-0 scanner does NOT hide the tracked secret → the real scanner ran and FAILed" "failed secrets-baseline '1 new finding\\(s\\) vs .secrets.baseline: leak.py:2 AWS Access Key'"
+done
+
+# gate 70
+mk70; g70; cp "$T/out" "$T/iso70.clean"; plant "$R70"; fresh_markers; g70
+check "iso:1 70 with the shadows tracked in the candidate, gate 70's verdict is unchanged" "passed docs-claims-pinned && same $T/iso70.clean"
+check "iso:1 70 ...and NONE of the candidate's modules ran in the trusted gate (AST derivation, node-report verdict; no marker)" "[ -z \"\$(markers)\" ]"
+
+# gates/lib/tools-venv.sh: the venv build and the hash-pinned install run with the candidate tree as cwd
+newrepo "$T/tvtrusted"; printf '# comment-only lock: pip accepts it offline\n' > "$T/tvtrusted/requirements-dev.lock"; commit "$T/tvtrusted"
+tv() { (cd "$1" && XDG_CACHE_HOME="$T/tvxdg-$2" GATES_TRUSTED_REPO="$T/tvtrusted" GATES_TRUSTED_REF=HEAD GATES_TOOLS_VENV= bash -c '. "$1"; tools_venv' _ "$G/lib/tools-venv.sh" > "$T/out" 2> "$T/err"; echo $? > "$T/rc"); }
+for pkg in venv pip; do
+  newrepo "$T/tvc-$pkg"; mkdir "$T/tvc-$pkg/$pkg"; printf 'open("%s/%s", "a").write("ran\\n")\nraise SystemExit(0)\n' "$MK" "$pkg" > "$T/tvc-$pkg/$pkg/__main__.py"; : > "$T/tvc-$pkg/$pkg/__init__.py"; commit "$T/tvc-$pkg"
+  fresh_markers; (cd "$T/tvc-$pkg" && python3 -m "$pkg" > /dev/null 2>&1)
+  check "iso:0 tools-venv positive control: the planted $pkg/ package runs under a plain python3 -m $pkg in the candidate tree" "[ -e $MK/$pkg ]"
+  fresh_markers; rm -rf "$T/tvxdg-$pkg"; tv "$T/tvc-$pkg" "$pkg"
+  check "iso:1 tools-venv: with a tracked $pkg/ package in the candidate tree the trusted tools venv still builds (path printed, marker file written) ..." "rc 0 && [ -f \"\$(cat $T/out)/.gates-lock-sha256\" ] && [ ! -s $T/err ]"
+  check "iso:1 tools-venv: ...and the candidate's $pkg/ never ran (the venv build and the pip install are isolated; no marker)" "[ -z \"\$(markers)\" ]"
+done
+
+# a static guard so a NEW trusted Python call cannot slip in unisolated (gates/ and gates/lib/; sandboxed candidate-venv "$py" calls are not matched)
+check "iso:3 every trusted python invocation in gates/ and gates/lib/ (python3 -…, the tools venv's python -…, tools-venv.sh's \"\$base\" -…) is -I -B: found $(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l) calls, none without it" "[ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | grep -vc -- '-I -B')\" = 0 ] && [ \"\$(grep -hE '(^|[^[:alnum:]_/.-])python3 +-|bin/python\"? +-|\"\\\$base\" +-' $G/*.sh $G/lib/*.sh | grep -vE '^\s*#' | wc -l)\" -ge 16 ]"
+check "iso:3 the README states the isolation rule" "grep -qF 'python3 -I -B' $G/README.md"
 
 # --- contract 4: the harness never edits existing tests or source ------------------------------
 check "4 this repo's tracked tree is unchanged by the harness (git status empty)" "[ -z \"\$(git -C $ROOT status --porcelain --untracked-files=no)\" ]"

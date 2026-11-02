@@ -5,7 +5,7 @@
 # gate 30 runs in a throwaway git repo whose `origin` is a local bare repo (no network); gate 10 runs
 # in this repo and the trap restores docs/ whatever happens. Numbered by the GATES-1 contract.
 set -u
-ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=$ROOT/gates; pass=0; fail=0
+ROOT=$(cd "$(dirname "$0")/../.." && pwd); G=${GATES_DIR_UNDER_TEST:-$ROOT/gates}; pass=0; fail=0
 T=$(mktemp -d)
 trap 'git -C "$ROOT" checkout -q -- docs 2>/dev/null; rm -rf "$T"' EXIT
 ok() { pass=$((pass+1)); echo "ok       $1"; }; bad() { fail=$((fail+1)); echo "FAIL     $1"; }
@@ -173,7 +173,17 @@ PR_NUMBER=7 PR_HEAD_SHA=abc123 g05; check "r1:2 P1-1 05 FAIL: PR_HEAD_SHA not a 
 
 # --- 10 current-state-fresh (sandboxed --check over an exact-head snapshot; throwaway clones of HEAD) --
 export BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1
-G10="$G/10-current-state-fresh.sh"; RPY="$ROOT/.venv/bin/python"; export GATES_SANDBOX_RO="$T/bin"
+# Prerequisites of the gate-10 section (stated, not assumed): the sandbox binds the lane venv at its REAL path, so the probe
+# interpreters below must exec that path, not the textual $ROOT/.venv (a symlink would not exist inside the sandbox); and
+# the venv must hold a working interpreter and the editable .pth naming $ROOT/src (the checks below assert both).
+VENV=$(readlink -f "$ROOT/.venv"); RPY="$VENV/bin/python"
+if [ ! -x "$RPY" ] || ! "$RPY" -I -c 'import sys' 2>/dev/null; then
+  echo "HARNESS PREREQUISITE: $ROOT/.venv has no working interpreter (pyvenv.cfg 'home' must name a real Python); build the lane venv from the CI-hashed locks" >&2; exit 2
+fi
+if ! grep -qsx "$ROOT/src" "$VENV"/lib/python*/site-packages/__editable__*.pth; then
+  echo "HARNESS PREREQUISITE: $ROOT/.venv has no editable .pth naming $ROOT/src (it was built for another checkout); repoint it or build a venv for this checkout" >&2; exit 2
+fi
+G10="$G/10-current-state-fresh.sh"; export GATES_SANDBOX_RO="$T/bin"
 clone10() { rm -rf "$1"; git clone -q "$ROOT" "$1" && ln -s "$ROOT/.venv" "$1/.venv"; }  # .venv = ANOTHER checkout's venv
 cmt() { git -C "$1" -c user.email=t@t -c user.name=t commit -qam "${2:-c}"; }
 C10="$T/c10"; g10c() { (cd "$C10" && run bash "$G10"); }
@@ -290,6 +300,42 @@ rm "$T/ra/30-c.sh"; mkdir "$T/empty"; cp "$T/ra/run-all.sh" "$T/empty/"; ra "$RA
 check "r1:2 run-all: an empty trusted gate set is never a pass" "rc 1 && grep -q '^FAIL: run-all — no gates found' $T/out && grep -qx 'GATES FAILED' $T/err"
 check "1 every gates/NN-*.sh is executable (run-all runs them directly)" "for g in $G/[0-9][0-9]-*.sh; do [ -x \"\$g\" ] || exit 1; done"
 check "r1:3 no .github change on this branch (working tree vs origin/main)" "git -C $ROOT diff --quiet origin/main -- .github"
+
+# --- GATESISO (D-51): the trusted gates run Python isolated (-I), so a candidate-tracked module cannot shadow an import ---
+# Each shadow writes a marker on the HOST (a sandboxed run cannot reach it), then transparently re-exports the real module, so a
+# gate that is NOT isolated still reports its normal verdict: only the marker proves the candidate's code ran in the trusted gate.
+MK=$T/mk
+shadow_src() {
+  cat <<PYS
+import os as _o, sys as _s
+try:
+    open("$MK/$1", "a").write("ran\n")
+except OSError:
+    pass
+_cwd = _o.getcwd()
+_drop = [p for p in _s.path if p in ("", ".", _cwd)]
+_s.modules.pop(__name__, None)
+_s.path[:] = [p for p in _s.path if p not in _drop]
+try:
+    import importlib as _i
+    _real = _i.import_module(__name__)
+finally:
+    _s.path[:0] = _drop
+_s.modules[__name__] = _real
+globals().update(vars(_real))
+PYS
+}
+SHADOWS="json hashlib re subprocess os stat ast pathlib"   # os and stat are loaded at startup: inert controls
+plant() { local m; for m in $SHADOWS; do shadow_src "$m" > "$1/$m.py"; git -C "$1" add -- "$m.py"; done; git -C "$1" -c user.email=t@t -c user.name=t commit -qm shadows; }
+markers() { ls "$MK" 2>/dev/null | sort | tr '\n' ' '; }
+fresh_markers() { rm -rf "$MK"; mkdir "$MK"; }
+clone10 "$C10"; g10c; cp "$T/out" "$T/iso10.clean"
+check "iso:0 10 the clean run passes (the reference line for the shadowed run)" "passed current-state-fresh"
+plant "$C10"; fresh_markers; (cd "$C10" && python3 -c 'import subprocess, re, json')
+check "iso:0 10 positive control: the planted shadows DO run under a plain python3 -c in the candidate tree (so 'no marker' below can fail)" "[ \"\$(markers)\" = 'json re subprocess ' ]"
+fresh_markers; g10c
+check "iso:1 10 with top-level json/hashlib/re/subprocess/os/stat/ast/pathlib shadows tracked in the candidate, the verdict is unchanged" "passed current-state-fresh && cmp -s $T/out $T/iso10.clean"
+check "iso:1 10 ...and NONE of the candidate's modules ran in the trusted gate (contained() is isolated; no marker)" "[ -z \"\$(markers)\" ]"
 
 kill "$LPID" 2>/dev/null
 echo "test_gates_10_30: $pass ok, $fail failed"; [ "$fail" = 0 ]

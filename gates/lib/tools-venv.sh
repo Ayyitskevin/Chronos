@@ -24,12 +24,22 @@ tools_venv() {  # prints the tools venv path; non-zero (with a reason on stderr)
   trusted_show requirements-dev.lock > "$lock" || { rm -f "$lock"; echo "cannot read the trusted base's requirements-dev.lock" >&2; return 1; }
   digest="$(sha256sum < "$lock" | cut -c1-64)"; dir="$cache/tools-${digest:0:16}"
   if [ "$(cat "$dir/.gates-lock-sha256" 2>/dev/null)" != "$digest" ]; then
-    base="$(sed -n 's/^home = //p' "$repo/.venv/pyvenv.cfg" 2>/dev/null)/python3"
-    [ -x "$base" ] || base="$(command -v python3)"
-    rm -rf "$dir" && "$base" -m venv "$dir" >/dev/null 2>&1 \
-      && "$dir/bin/python" -m pip install -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r "$lock" >/dev/null 2>&1 \
-      && printf '%s\n' "$digest" > "$dir/.gates-lock-sha256" && chmod 0700 "$dir" \
-      || { rm -rf "$dir" "$lock"; echo "could not build the trusted tools venv from origin/main's requirements-dev.lock" >&2; return 1; }
+    # G70-FIX r2: a digest-scoped flock serialises cold builds; the build happens in a private sibling and is verified before one
+    # atomic rename publishes it, so no builder ever deletes or consumes a directory another process is building or executing from.
+    # (The venv is built at its private path and renamed: it is used through `python -m` only, never through generated scripts.)
+    local tmp; exec 9>"$cache/.build-${digest:0:16}.lock" && flock 9 || { rm -f "$lock"; echo "cannot lock the tools venv build" >&2; return 1; }
+    if [ "$(cat "$dir/.gates-lock-sha256" 2>/dev/null)" != "$digest" ]; then  # re-check: another builder may have published meanwhile
+      base="$(sed -n 's/^home = //p' "$repo/.venv/pyvenv.cfg" 2>/dev/null)/python3"
+      [ -x "$base" ] || base="$(command -v python3)"
+      tmp="$(mktemp -d "$cache/.build-${digest:0:16}.XXXXXX")" || { rm -f "$lock"; return 1; }
+      "$base" -I -B -m venv "$tmp" >/dev/null 2>&1 \
+        && "$tmp/bin/python" -I -B -m pip install -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r "$lock" >/dev/null 2>&1 \
+        && [ -x "$tmp/bin/python" ] && printf '%s\n' "$digest" > "$tmp/.gates-lock-sha256" && chmod 0700 "$tmp" \
+        || { rm -rf "$tmp" "$lock"; echo "could not build the trusted tools venv from origin/main's requirements-dev.lock" >&2; return 1; }
+      [ ! -e "$dir" ] || mv "$dir" "$cache/.stale-${digest:0:16}.$$.$RANDOM" || { rm -rf "$tmp" "$lock"; return 1; }  # an invalid dir is renamed aside, never deleted
+      mv -T "$tmp" "$dir" || { rm -rf "$tmp" "$lock"; echo "could not publish the trusted tools venv" >&2; return 1; }
+    fi
+    exec 9>&-
   fi
   rm -f "$lock"; printf '%s\n' "$dir"
 }
