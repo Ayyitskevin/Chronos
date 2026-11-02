@@ -544,6 +544,27 @@ def test_option_close_refuses_non_integral_resting_buy_quantity() -> None:
     assert PAPER_ACCOUNT not in check.detail
 
 
+def test_option_close_refuses_two_non_integral_buys_with_integral_sum() -> None:
+    put = option_contract(con_id=222)
+    evidence, decision = _evaluate(
+        _option_close(1),
+        positions=(_position(put, "-2"),),
+        open_orders=(
+            _resting_order(put, OrderSide.BUY, "0.5", broker_order_id=7001),
+            _resting_order(put, OrderSide.BUY, "0.5", broker_order_id=7002),
+        ),
+    )
+
+    check = _risk_check(decision, "held_position_sufficiency")
+    assert evidence.option_buy_reserved_contracts == Decimal("1.0")
+    assert evidence.option_buy_reservation_non_integral
+    assert check.status is RiskCheckStatus.FAIL
+    assert "non-integral" in check.detail
+    assert "held=2" in check.detail
+    assert "resting_buys=1.0" in check.detail
+    assert "bound=0" in check.detail
+
+
 def _opening_scenario(case: str):
     stock = stock_contract()
     call = option_contract(right=OptionRight.CALL, con_id=333)
