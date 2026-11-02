@@ -543,7 +543,7 @@ class OrderRiskEngine:
                 "resting option BUY reservation is non-integral; "
                 f"held={held}, resting_buys={resting_buys}, bound=0",
             )
-        bound = max(0, held - resting_buys)
+        bound = max(Decimal("0"), Decimal(held) - resting_buys)
         if intent.quantity <= bound:
             return _passed(
                 "held_position_sufficiency",
