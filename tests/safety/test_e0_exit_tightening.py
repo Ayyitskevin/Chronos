@@ -314,6 +314,23 @@ def test_stock_close_model_constructed_negative_reservation_fails_without_raisin
     assert check.status is RiskCheckStatus.FAIL
 
 
+def test_stock_close_holding_bound_uses_exact_underlying_and_currency() -> None:
+    target_stock = stock_contract(con_id=999)
+    same_symbol_eur_stock = stock_contract(con_id=1000).model_copy(update={"currency": "EUR"})
+    evidence, decision = _evaluate(
+        _stock_close(150),
+        positions=(
+            _position(target_stock, "100"),
+            _position(same_symbol_eur_stock, "100"),
+        ),
+    )
+
+    check = _risk_check(decision, "stock_no_short")
+    assert evidence.settled_long_shares == Decimal("100")
+    assert check.status is RiskCheckStatus.FAIL
+    assert "bound=100" in check.detail
+
+
 def _option_case(
     case: str,
 ) -> tuple[
