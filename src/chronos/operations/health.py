@@ -70,6 +70,7 @@ class WriterRole(StrEnum):
 
 
 class StartupFaultCode(StrEnum):
+    AUTONOMY_MAINTENANCE = "autonomy_maintenance"
     PROPOSER_REGISTRY_INVALID = "proposer_registry_invalid"
     EVIDENCE_POSTURE_INVALID = "evidence_posture_invalid"
     AUTONOMY_POSTURE_UNAUTHENTICATED = "autonomy_posture_unauthenticated"

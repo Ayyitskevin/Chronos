@@ -98,11 +98,15 @@ def _if_not_recovery_held_calls_build(tree: ast.AST) -> bool:
         if not isinstance(node, ast.If):
             continue
         test = node.test
-        guards_hold = (
-            isinstance(test, ast.UnaryOp)
-            and isinstance(test.op, ast.Not)
-            and isinstance(test.operand, ast.Name)
-            and test.operand.id == "recovery_held"
+        terms = (
+            test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+        )
+        guards_hold = any(
+            isinstance(term, ast.UnaryOp)
+            and isinstance(term.op, ast.Not)
+            and isinstance(term.operand, ast.Name)
+            and term.operand.id == "recovery_held"
+            for term in terms
         )
         if not guards_hold:
             continue

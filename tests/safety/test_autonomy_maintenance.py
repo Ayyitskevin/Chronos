@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select
 
-from chronos.api import main
+from chronos.api import main, maintenance
 from chronos.persistence.schema import AutonomyMandateActivationRow, HashChainRow
 from tests.safety.test_proposal_route_autonomy_admission import _World
 
@@ -42,7 +42,9 @@ def rows(app: Any) -> tuple[int, int]:
     with app.state.backend.runtime.database.sessions() as session:
         activations = session.scalar(select(func.count()).select_from(AutonomyMandateActivationRow))
         records = session.scalar(
-            select(func.count()).select_from(HashChainRow).where(HashChainRow.stream.like("autonomy.%"))
+            select(func.count())
+            .select_from(HashChainRow)
+            .where(HashChainRow.stream.like("autonomy.%"))
         )
         return int(activations or 0), int(records or 0)
 
@@ -59,9 +61,12 @@ def assert_inhibited(client: Any, app: Any, ticked: threading.Event) -> None:
     assert tasks["reconciliation"] != "NOT_EXPECTED"
     assert client.get("/health/live").status_code == 200
     assert client.get("/health/ready").status_code == 503
-    assert client.get(
-        "/terminal/commands", headers={"X-Chronos-Token": app.state.api_token}
-    ).status_code == 200
+    assert (
+        client.get(
+            "/terminal/commands", headers={"X-Chronos-Token": app.state.api_token}
+        ).status_code
+        == 200
+    )
 
 
 def test_explicit_off_retains_real_activation_and_first_tick(
@@ -74,7 +79,10 @@ def test_explicit_off_retains_real_activation_and_first_tick(
         assert getattr(app.state, "autonomy", None) is not None
         assert rows(app)[0] == 1
         assert rows(app)[1] >= 1
-        assert "autonomy_maintenance" not in client.get("/health").json()["observations"]["startup_faults"]
+        assert (
+            "autonomy_maintenance"
+            not in client.get("/health").json()["observations"]["startup_faults"]
+        )
 
 
 @pytest.mark.parametrize("value", ["on", None, "", "not-a-mode"])
@@ -122,5 +130,19 @@ def test_startup_cannot_auto_lift_a_latched_inhibit(
         return runtime
 
     monkeypatch.setattr(main, "build_runtime", build_and_change_environment)
+    with rig.boot() as (client, app):
+        assert_inhibited(client, app, ticked)
+
+
+def test_unreadable_switch_state_inhibits_instead_of_aborting_backend(
+    world: tuple[_World, threading.Event], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig, ticked = world
+
+    class UnreadableEnvironment:
+        def get(self, *_args: object) -> str:
+            raise OSError("synthetic environment read failure")
+
+    monkeypatch.setattr(maintenance, "environ", UnreadableEnvironment())
     with rig.boot() as (client, app):
         assert_inhibited(client, app, ticked)
