@@ -8,7 +8,7 @@ reach a venue.
 Registered implementations
 --------------------------
 * ``demo``  — :class:`chronos.broker.demo.DemoBroker` (display-only; refuses orders).
-* ``fake``  — :class:`tests.support.order_fakes.FakeBroker` (the pipeline tests' double).
+* ``fake``  — :class:`ContractFakeBroker` (isolated subclass of the pipeline double).
 * ``sim``   — U2's ``SimBroker``. **Hook:** when ``tests/support/sim_broker.py`` exists
   and exposes ``contract_harness() -> BrokerHarness`` (named ``"sim"``), it is
   registered automatically and every case below runs against it. Until then
@@ -58,9 +58,9 @@ from typing import Any, Protocol
 
 import pytest
 
-from chronos.broker.base import BrokerSendGuard
+from chronos.broker.base import BrokerRefusedBeforeSend, BrokerSendGuard
 from chronos.broker.demo import DEMO_ACCOUNT_ID, DemoBroker
-from chronos.domain.enums import OrderIntent, OrderLifecycle, OrderSide
+from chronos.domain.enums import ConnectionState, OrderIntent, OrderLifecycle, OrderSide
 from chronos.domain.models import (
     AccountSummary,
     BrokerExecution,
@@ -217,7 +217,173 @@ _FAKE_OWNED_ID = 7001
 _FAKE_FOREIGN_ID = 7002
 
 
-def _build_fake() -> FakeBroker:
+class ContractFakeBroker(FakeBroker):
+    """Stateful, venue-free contract harness; the shared pipeline fake stays canned.
+
+    Fills are explicit test events at the fixed clock and limit price, with zero
+    commission. This is not a market simulator or proof of real venue behavior.
+    """
+
+    _connected = False
+    _cash_delta = Decimal("0")
+
+    def _require_connected(self) -> None:
+        if not self._connected:
+            raise BrokerRefusedBeforeSend("contract fake is disconnected")
+
+    def _require_account(self, account_id: str) -> None:
+        self._require_connected()
+        if account_id != self.account_id:
+            raise BrokerRefusedBeforeSend("foreign account")
+
+    async def connect(self) -> None:
+        self._connected = True
+
+    async def disconnect(self) -> None:
+        self._connected = False
+
+    async def connection_status(self) -> ConnectionStatus:
+        status = await super().connection_status()
+        return status.model_copy(
+            update={
+                "connected": self._connected,
+                "state": ConnectionState.CONNECTED
+                if self._connected
+                else ConnectionState.DISCONNECTED,
+            }
+        )
+
+    async def server_time(self) -> datetime:
+        self._require_connected()
+        return await super().server_time()
+
+    async def account_summary(self) -> AccountSummary:
+        self._require_connected()
+        summary = await super().account_summary()
+        return summary.model_copy(update={"total_cash": summary.total_cash + self._cash_delta})
+
+    async def positions(self) -> tuple[BrokerPosition, ...]:
+        self._require_connected()
+        return self._positions
+
+    async def executions(self, since: datetime | None = None) -> tuple[BrokerExecution, ...]:
+        self._require_connected()
+        return tuple(e for e in self._executions if since is None or e.timestamp >= since)
+
+    async def open_orders(self) -> tuple[BrokerOrder, ...]:
+        self._require_connected()
+        return self._open_orders
+
+    async def preview_order(self, request: OrderRequest) -> OrderPreview:
+        self._require_account(request.account_id)
+        if request.transmit:
+            raise BrokerRefusedBeforeSend("preview cannot transmit")
+        return await super().preview_order(request)
+
+    async def submit_order(
+        self, request: OrderRequest, *, send_guard: BrokerSendGuard | None = None
+    ) -> OrderSubmission:
+        self._require_account(request.account_id)
+        if not request.transmit:
+            raise BrokerRefusedBeforeSend("submit requires transmit authority")
+        submission = await super().submit_order(request, send_guard=send_guard)
+        self._open_orders += (
+            BrokerOrder(
+                broker_order_id=submission.broker_order_id,
+                permanent_id=submission.permanent_id,
+                client_id=submission.client_id,
+                account_id=request.account_id,
+                order_ref=request.order_ref,
+                contract=request.contract,
+                side=request.side,
+                quantity=request.quantity,
+                filled_quantity=Decimal("0"),
+                remaining_quantity=request.quantity,
+                limit_price=request.limit_price,
+                lifecycle=submission.lifecycle,
+            ),
+        )
+        return submission
+
+    async def modify_order(self, request: OrderModification) -> OrderSubmission:
+        raise BrokerRefusedBeforeSend("cancel and resubmit; modify is unsupported")
+
+    async def cancel_order(self, broker_order_id: int) -> CancellationResult:
+        self._require_connected()
+        order = next((o for o in self._open_orders if o.broker_order_id == broker_order_id), None)
+        if order is None:
+            raise BrokerRefusedBeforeSend("unknown working order")
+        self._require_account(order.account_id)
+        if order.client_id != 17 or not order.order_ref.startswith("CHR-"):
+            raise BrokerRefusedBeforeSend("foreign order ownership")
+        result = await super().cancel_order(broker_order_id)
+        self._open_orders = tuple(
+            o for o in self._open_orders if o.broker_order_id != broker_order_id
+        )
+        return result
+
+    async def fill(self, broker_order_id: int, quantity: Decimal) -> None:
+        """Apply one bounded execution to a working order, position and cash."""
+        self._require_connected()
+        order = next(o for o in self._open_orders if o.broker_order_id == broker_order_id)
+        if not quantity.is_finite() or not Decimal("0") < quantity <= order.remaining_quantity:
+            raise ValueError("fill quantity must be positive and no larger than the remainder")
+        price = order.limit_price
+        assert price is not None
+        signed = quantity if order.side is OrderSide.BUY else -quantity
+        multiplier = getattr(order.contract, "multiplier", Decimal("1"))
+        self._cash_delta -= signed * price * multiplier
+        old = next((p for p in self._positions if p.contract == order.contract), None)
+        new_quantity = (old.quantity if old else Decimal("0")) + signed
+        position = BrokerPosition(
+            account_id=order.account_id,
+            contract=order.contract,
+            quantity=new_quantity,
+            average_cost=price,
+            market_price=price,
+        )
+        self._positions = tuple(p for p in self._positions if p.contract != order.contract)
+        if new_quantity:
+            self._positions += (position,)
+        self._executions += (
+            BrokerExecution(
+                execution_id=f"CONTRACT-FILL-{len(self._executions) + 1}",
+                account_id=order.account_id,
+                broker_order_id=broker_order_id,
+                permanent_id=order.permanent_id,
+                client_id=order.client_id,
+                order_ref=order.order_ref,
+                contract=order.contract,
+                side=order.side,
+                quantity=quantity,
+                price=price,
+                timestamp=_FAKE_NOW,
+                commission=Decimal("0"),
+                commission_currency="USD",
+            ),
+        )
+        remaining = order.remaining_quantity - quantity
+        self._open_orders = tuple(
+            o for o in self._open_orders if o.broker_order_id != broker_order_id
+        )
+        if remaining:
+            self._open_orders += (
+                order.model_copy(
+                    update={
+                        "filled_quantity": order.filled_quantity + quantity,
+                        "remaining_quantity": remaining,
+                        "lifecycle": OrderLifecycle.PARTIALLY_FILLED,
+                    }
+                ),
+            )
+
+
+async def _fill_fake(broker: OrderPlaneBroker, order_id: int, quantity: Decimal) -> None:
+    assert isinstance(broker, ContractFakeBroker)
+    await broker.fill(order_id, quantity)
+
+
+def _build_fake() -> ContractFakeBroker:
     """A FakeBroker seeded with the same shape of evidence the demo broker carries."""
 
     contract = option_contract()
@@ -271,7 +437,7 @@ def _build_fake() -> FakeBroker:
         average_cost=Decimal("150.00"),
         market_price=Decimal("151.00"),
     )
-    return FakeBroker(
+    return ContractFakeBroker(
         positions=(position,),
         open_orders=(owned, foreign),
         executions=(execution,),
@@ -288,6 +454,7 @@ def _fake_harness() -> BrokerHarness:
         accepts_orders=True,
         implements_full_protocol=False,
         foreign_order_id=_FAKE_FOREIGN_ID,
+        cause_fill=_fill_fake,
     )
 
 
@@ -353,17 +520,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {
     ("demo", "test_submit_with_an_unauthorized_guard_is_refused_before_send"): "U1-F2",
     ("demo", "test_submit_for_a_foreign_account_is_refused_before_send"): "U1-F2",
     ("demo", "test_modify_is_refused_before_send_and_changes_nothing"): "U1-F2",
-    ("fake", "test_reads_fail_closed_when_disconnected"): "U1-F4",
-    ("fake", "test_executions_since_is_an_inclusive_lower_bound"): "U1-F3",
-    ("fake", "test_preview_for_a_foreign_account_is_not_accepted"): "U1-F4",
-    ("fake", "test_submit_without_transmit_authority_is_refused_before_send"): "U1-F4",
-    ("fake", "test_submit_for_a_foreign_account_is_refused_before_send"): "U1-F4",
-    ("fake", "test_modify_is_refused_before_send_and_changes_nothing"): "U1-F4",
-    ("fake", "test_a_working_submission_appears_in_open_orders"): "U1-F3",
-    ("fake", "test_a_fill_moves_positions_executions_and_cash_consistently"): "U1-F3",
-    ("fake", "test_cancel_removes_a_cancelled_order_from_open_orders"): "U1-F3",
-    ("fake", "test_cancel_of_an_unknown_order_never_reports_cancelled"): "U1-F3",
-    ("fake", "test_cancel_refuses_to_touch_a_foreign_order"): "U1-F4",
 }
 
 
