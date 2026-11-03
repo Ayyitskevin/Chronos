@@ -970,8 +970,10 @@ async def test_missing_quote_values_are_preserved_without_fabrication() -> None:
     broker = FakeMarketDataBroker(clock)
     broker.missing_values = True
     manager = make_manager(broker)
+    contract = make_contract(901)
 
-    managed = (await manager.option_quotes((make_contract(901),)))[0]
+    managed = (await manager.option_quotes((contract,)))[0]
+    cached = (await manager.option_quotes((contract,)))[0]
 
     assert managed.quote.bid is None
     assert managed.quote.ask is None
@@ -981,6 +983,9 @@ async def test_missing_quote_values_are_preserved_without_fabrication() -> None:
     assert managed.quote.open_interest is None
     assert managed.fresh is True
     assert managed.transmission_eligible is False
+    assert managed.from_cache is False
+    assert cached.from_cache is True
+    assert broker.option_quote_calls == [(901,)]
 
 
 @pytest.mark.asyncio
