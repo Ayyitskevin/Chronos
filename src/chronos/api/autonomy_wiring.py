@@ -76,6 +76,7 @@ from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
 from chronos.broker.demo import demo_now
 from chronos.config.settings import Settings
 from chronos.domain.account_freshness import (
+    account_summary_check_time,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import (
@@ -793,6 +794,16 @@ class BackendGatherers:
                     net_liquidation_usd=summary.net_liquidation,
                     total_cash_usd=summary.total_cash,
                     buying_power_usd=summary.buying_power,
+                    as_of=getattr(summary, "as_of", None),
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                    clock=self._clock
+                    or (
+                        lambda: account_summary_check_time(
+                            broker_mode=runtime.settings.broker_mode, demo_now=now
+                        )
+                    ),
                 ),
                 quote=probe_quote,
                 contract=contract,

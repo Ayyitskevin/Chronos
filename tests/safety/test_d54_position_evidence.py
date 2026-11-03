@@ -228,7 +228,7 @@ def _tick(
     session.commit()
     runtime = pe.runtime(broker, database, **runtime_overrides)
     gatherers = BackendGatherers(
-        runtime, pe.FINGERPRINT, 7, mandate=mandate, mandate_digest="d" * 64
+        runtime, pe.FINGERPRINT, 7, mandate=mandate, mandate_digest="d" * 64, clock=lambda: pe.NOW
     )
     return _Tick(session, gatherers, mandate)
 

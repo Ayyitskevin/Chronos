@@ -156,6 +156,8 @@ def facts(now: datetime) -> CycleFacts:
         evidence_bundle_digest="b" * 64,
         market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         account=AccountEvidence(
+            as_of=NOW,
+            clock=lambda: NOW,
             net_liquidation_usd=Decimal(100_000),
             total_cash_usd=Decimal(60_000),
             buying_power_usd=Decimal(60_000),

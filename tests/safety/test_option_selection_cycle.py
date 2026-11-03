@@ -617,6 +617,8 @@ def test_receipt_is_persisted_even_when_later_sizing_refuses(session: Session) -
     facts = _facts(
         now=_NOW,
         account=AccountEvidence(
+            as_of=_NOW,
+            clock=lambda: _NOW,
             net_liquidation_usd=Decimal("100000"),
             total_cash_usd=mandate.capital.min_cash_floor_usd,
             buying_power_usd=mandate.capital.min_buying_power_usd,

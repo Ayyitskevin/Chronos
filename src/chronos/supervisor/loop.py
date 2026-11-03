@@ -86,6 +86,7 @@ from chronos.config.limits import (
     MAX_OPTION_SELECTION_PAYLOAD_JSON_CHARS,
     MAX_OPTION_SELECTION_RECEIPT_BYTES,
 )
+from chronos.domain.account_freshness import AccountSummaryFreshnessError
 from chronos.domain.models import Instrument
 from chronos.orders.intent import WheelOrderIntent
 from chronos.supervisor import alerts, durable, evidence_bundles, ingress, queue
@@ -887,6 +888,29 @@ def run_cycle(
         quote = QuoteEvidence(bid=selected.quote.bid, ask=selected.quote.ask)
         reference_price = selected.sizing_reference_price
         multiplier = selected.deliverable_shares
+
+    # Per-instrument/selection/position reads can outlive the tick's account
+    # stamp. Refuse before the plausibility check consumes NLV; size_order also
+    # checks at its own balance-use boundary, including direct callers.
+    try:
+        sizing_evidence.require_freshness()
+    except AccountSummaryFreshnessError as error:
+        return _record(
+            session,
+            facts,
+            CycleOutcome(
+                stage=CycleStage.SIZING,
+                refusal=error.reason.value,
+                detail=str(error),
+                decision_id=decision.decision_id,
+                decision=decision,
+                admission=admission,
+                selection_receipt=selection_receipt,
+                position_evidence=exit_evidence,
+                alerts_raised=alert_kinds,
+            ),
+            posture=posture,
+        )
 
     # --- position evidence (D-54) -----------------------------------------
     if exit_evidence is not None:
