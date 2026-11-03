@@ -479,6 +479,40 @@ def _account_summary_reads(source: str) -> list[str]:
             node = parents[node]
             yield node
 
+    def is_freshness_guard_use(node: ast.AST) -> bool:
+        """Exclude the new timestamp-only guard from the economic read-consumer pin."""
+
+        for parent in chain(node):
+            if (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Name)
+                and parent.func.id == "require_account_summary_freshness"
+            ):
+                return True
+            if isinstance(parent, ast.stmt):
+                break
+        return False
+
+    def handler_signature(handler: ast.ExceptHandler) -> str:
+        """Normalize only the freshness refusal added alongside the unchanged broker read."""
+
+        error_type = handler.type
+        if (
+            isinstance(error_type, ast.Tuple)
+            and len(error_type.elts) == 2
+            and all(isinstance(item, ast.Name) for item in error_type.elts)
+            and [item.id for item in error_type.elts if isinstance(item, ast.Name)]
+            == ["BrokerError", "AccountSummaryFreshnessError"]
+        ):
+            error_type = error_type.elts[0]
+        return repr(
+            (
+                ast.dump(error_type) if error_type is not None else None,
+                handler.name,
+                [ast.dump(statement) for statement in handler.body],
+            )
+        )
+
     def _consumer(use: ast.Name) -> list[str]:
         """The complete expression a bound-name use flows through, up to where it lands.
 
@@ -557,7 +591,7 @@ def _account_summary_reads(source: str) -> list[str]:
             if node is function:
                 break
             if isinstance(node, ast.Try):
-                reads.extend(ast.dump(handler) for handler in node.handlers)
+                reads.extend(handler_signature(handler) for handler in node.handlers)
         # D43-FIX4 (reader F2, B1-B3): the read's control path is part of the read. The compound
         # statements between it and its function (header and the branch that holds it), and every
         # exit that can leave the function before the read is reached, with that exit's own path.
@@ -576,7 +610,12 @@ def _account_summary_reads(source: str) -> list[str]:
             if isinstance(target, ast.Name)
         }
         for use in ast.walk(function):
-            if isinstance(use, ast.Name) and use.id in bound and isinstance(use.ctx, ast.Load):
+            if (
+                isinstance(use, ast.Name)
+                and use.id in bound
+                and isinstance(use.ctx, ast.Load)
+                and not is_freshness_guard_use(use)
+            ):
                 reads.extend(_consumer(use))
     return reads
 
@@ -627,7 +666,7 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
         ),
         (  # a broader failure is swallowed around the read
             "src/chronos/orders/submission.py",
-            "except BrokerError as error:\n"
+            "except (BrokerError, AccountSummaryFreshnessError) as error:\n"
             '            return None, f"net liquidation unavailable: {error}"',
             "except Exception as error:\n"
             '            return None, f"net liquidation unavailable: {error}"',
@@ -1099,7 +1138,7 @@ def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_in
     assert set(found) == {
         "src/chronos/api/main.py:330",
         "src/chronos/api/reconciliation_loop.py:102",
-        "src/chronos/api/routes/orders.py:216",
+        "src/chronos/api/routes/orders.py:217",
     }, found
     assert set(found.values()) <= set(TRIGGERS)
 
