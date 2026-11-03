@@ -1016,10 +1016,12 @@ class OfficialIBKRBroker:
         )
         if not connected or not accounts_seen:
             await self.disconnect()
+            notices = tuple(self.bridge.notices)[-3:]
+            detail = f" Recent broker notices: {'; '.join(notices)}" if notices else ""
             raise BrokerConnectionError(
                 "TWS/Gateway did not complete the connection handshake "
                 f"within {_CONNECT_TIMEOUT_S:.0f}s (is the API enabled on "
-                f"{self._settings.ib_host}:{self._settings.ib_port}?)"
+                f"{self._settings.ib_host}:{self._settings.ib_port}?){detail}"
             )
         if self.bridge.next_valid_id is not None:
             self.order_ids.seed(self.bridge.next_valid_id)
@@ -2257,11 +2259,21 @@ class OfficialIBKRBroker:
             raise request_error
         if state is None:
             raise BrokerDataError(f"no quote state for conId {con_id}")
-        return quote_from_state(
+        quote = quote_from_state(
             state,
             contract=instrument,
             timestamp=state.completed_at or datetime.now(tz=UTC),
         )
+        if quote.data_quality is DataQuality.LIVE and all(
+            price is None for price in (quote.bid, quote.ask, quote.last, quote.close)
+        ):
+            raise MarketDataUnavailableError(
+                f"official IBKR returned an empty live quote for conId {con_id}",
+                contract_ids=(con_id,),
+                observed_values=(quote,),
+                observed_at=quote.timestamp,
+            )
+        return quote
 
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None:
         requested = tuple(

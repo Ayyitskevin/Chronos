@@ -277,17 +277,6 @@ def test_a_held_client_id_fails_closed_at_the_handshake(gateway: fake_ibapi.Fake
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "B1R-F1: a code the gateway sends before the handshake (326 client id in use; also "
-        "502/504, ASSUMED-IB) lands only in bridge.notices (callbacks.py:397-399); the handshake "
-        "timeout error (official_ibkr.py:982-987) says 'is the API enabled?' and omits it. The "
-        "operator sees the wrong cause. Diagnostic gap, not a safety bypass; the fix (U-h) is "
-        "src and Kevin's call."
-    ),
-)
 def test_the_handshake_timeout_names_the_code_the_gateway_sent(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
@@ -296,6 +285,27 @@ def test_the_handshake_timeout_names_the_code_the_gateway_sent(
     with pytest.raises(BrokerConnectionError) as raised:
         asyncio.run(broker.connect())
     assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(raised.value)
+
+
+def test_handshake_timeout_includes_at_most_three_recent_notices(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway.held_client_ids = {fake_ibapi.CLIENT_ID}
+    broker = _hooked(_SpyReadiness())
+    reset = broker.bridge.reset_for_reconnect
+
+    def reset_with_notices() -> None:
+        reset()
+        broker.bridge.notices.extend(("older-one", "older-two", "recent-one", "recent-two"))
+
+    monkeypatch.setattr(broker.bridge, "reset_for_reconnect", reset_with_notices)
+    with pytest.raises(BrokerConnectionError) as raised:
+        asyncio.run(broker.connect())
+    message = str(raised.value)
+    assert message.startswith("TWS/Gateway did not complete the connection handshake ")
+    assert "older-one" not in message and "older-two" not in message
+    assert "recent-one" in message and "recent-two" in message
+    assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in message
 
 
 # --- 4. handshake timeouts, wrong account -------------------------------------------------
