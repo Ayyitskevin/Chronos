@@ -919,6 +919,42 @@ async def test_crypto_quote_fetches_and_always_cancels_subscription() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_live_empty_underlying_quote_is_accepted_and_cached() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.missing_values = True
+    broker.data_quality = DataQuality.FROZEN
+    manager = make_manager(broker)
+    contract = UnderlyingContract(con_id=3000, symbol="TEST")
+
+    first = await manager.underlying_quote(contract)
+    second = await manager.underlying_quote(contract)
+
+    assert first.quote.data_quality is DataQuality.FROZEN
+    assert first.from_cache is False
+    assert second.from_cache is True
+    assert broker.cancellation_calls == [(3000,)]
+
+
+@pytest.mark.asyncio
+async def test_empty_live_crypto_quote_is_refused_and_never_cached() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.missing_values = True
+    manager = make_manager(broker)
+    contract = CryptoContract(con_id=3001, symbol="BTC")
+
+    for _ in range(2):
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.crypto_quote(contract)
+        assert raised.value.contract_ids == (3001,)
+        assert raised.value.observed_values == (broker._quote(contract),)
+
+    assert manager.cache_entry_count == 0
+    assert broker.cancellation_calls == [(3001,), (3001,)]
+
+
+@pytest.mark.asyncio
 async def test_missing_quote_values_are_preserved_without_fabrication() -> None:
     clock = MutableClock()
     broker = FakeMarketDataBroker(clock)

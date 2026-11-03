@@ -26,6 +26,7 @@ import pytest
 from tests.support import fake_ibapi
 from tests.support.order_fakes import option_contract
 
+import chronos.broker.official_ibkr as official_module
 from chronos.broker.base import BrokerDataError
 from chronos.broker.market_data import (
     MarketDataManager,
@@ -270,6 +271,29 @@ async def test_a_live_snapshot_with_no_prices_is_not_a_live_quote(
     finally:
         await broker.disconnect()
     assert quote.data_quality is not DataQuality.LIVE
+
+
+@pytest.mark.parametrize("field", ["bid", "ask", "last", "close"])
+async def test_the_adapter_accepts_a_live_quote_with_one_price(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    broker = await _connected()
+    try:
+        underlying = await _aapl(broker)
+        partial = MarketQuote(
+            contract=underlying,
+            timestamp=datetime.now(tz=UTC),
+            data_quality=DataQuality.LIVE,
+            **{field: Decimal("1.00")},
+        )
+
+        def return_partial(*_args: object, **_kwargs: object) -> MarketQuote:
+            return partial
+
+        monkeypatch.setattr(official_module, "quote_from_state", return_partial)
+        assert await broker.request_underlying_quote(underlying) == partial
+    finally:
+        await broker.disconnect()
 
 
 async def test_the_managed_path_neither_accepts_nor_caches_an_empty_live_quote(

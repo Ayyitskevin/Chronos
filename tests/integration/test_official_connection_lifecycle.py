@@ -287,25 +287,24 @@ def test_the_handshake_timeout_names_the_code_the_gateway_sent(
     assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(raised.value)
 
 
-def test_handshake_timeout_includes_at_most_three_recent_notices(
-    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    gateway.held_client_ids = {fake_ibapi.CLIENT_ID}
-    broker = _hooked(_SpyReadiness())
-    reset = broker.bridge.reset_for_reconnect
+def test_handshake_diagnostics_select_only_bounded_current_gateway_codes() -> None:
+    old_notices = (
+        "[999] old-session gateway secret",
+        "[foreign-order] old-session order 77123 ref='PRIVATE-REF'",
+    )
+    current_notices = (
+        "[901] gateway secret 901",
+        "[902] gateway secret 902",
+        "[903] gateway secret 903",
+        "[904] gateway secret 904",
+        "[foreign-order] current adapter notice order 88421 ref='PRIVATE-CURRENT'",
+    )
 
-    def reset_with_notices() -> None:
-        reset()
-        broker.bridge.notices.extend(("older-one", "older-two", "recent-one", "recent-two"))
-
-    monkeypatch.setattr(broker.bridge, "reset_for_reconnect", reset_with_notices)
-    with pytest.raises(BrokerConnectionError) as raised:
-        asyncio.run(broker.connect())
-    message = str(raised.value)
-    assert message.startswith("TWS/Gateway did not complete the connection handshake ")
-    assert "older-one" not in message and "older-two" not in message
-    assert "recent-one" in message and "recent-two" in message
-    assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in message
+    assert official_module._new_gateway_notice_codes(
+        old_notices,
+        old_notices + current_notices,
+        limit=3,
+    ) == (902, 903, 904)
 
 
 # --- 4. handshake timeouts, wrong account -------------------------------------------------
