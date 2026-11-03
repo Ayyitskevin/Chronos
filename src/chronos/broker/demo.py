@@ -514,6 +514,9 @@ class DemoBroker:
             )
         if not (order.order_ref or "").startswith("CHR-"):
             raise BrokerSafetyError("Chronos will not cancel an order it does not own")
+        self._orders = tuple(
+            item for item in self._orders if item.broker_order_id != broker_order_id
+        )
         return CancellationResult(
             broker_order_id=broker_order_id,
             requested=True,
