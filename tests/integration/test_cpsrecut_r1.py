@@ -32,6 +32,7 @@ def test_identity_event_during_completed_read_cannot_settle() -> None:
 
         assert rig.status() is CP, (rig.status(), rig.trail(), issues(report))
         assert report.unresolved
+        assert any("identity history advanced" in reason for reason in issues(report))
     finally:
         rig.close()
 
@@ -75,6 +76,7 @@ def test_tracker_identity_refinement_during_completed_read_cannot_settle(
 
         assert rig.status() is CP
         assert report.unresolved
+        assert any("identity history advanced" in reason for reason in issues(report))
         assert [event.to_status for event in rig.events()].count(CANCELLED) == 0
     finally:
         rig.close()
