@@ -221,7 +221,15 @@ class ContractFakeBroker(FakeBroker):
     """Stateful, venue-free contract harness; the shared pipeline fake stays canned.
 
     Fills are explicit test events at the fixed clock and limit price, with zero
-    commission. This is not a market simulator or proof of real venue behavior.
+    commission: no price discovery, slippage, liquidity, timing or fee model.
+    Each fill overwrites average_cost and market_price with its price; there is
+    no weighted cost basis or realized/unrealized P&L. Only total_cash moves;
+    net_liquidation and buying_power stay at their canned values (no margin or
+    valuation model). An unknown fill order id raises StopIteration inside the
+    hook (surfaced as RuntimeError by the coroutine), not a typed broker refusal.
+    This is not a market simulator or proof of real venue behavior. Cancellation
+    ownership uses seeded account/client/ref checks, not the adapter's persisted
+    ownership ledger or permanent-id proof.
     """
 
     _connected = False
@@ -312,10 +320,25 @@ class ContractFakeBroker(FakeBroker):
         self._require_connected()
         order = next((o for o in self._open_orders if o.broker_order_id == broker_order_id), None)
         if order is None:
-            raise BrokerRefusedBeforeSend("unknown working order")
-        self._require_account(order.account_id)
-        if order.client_id != 17 or not order.order_ref.startswith("CHR-"):
-            raise BrokerRefusedBeforeSend("foreign order ownership")
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=OrderLifecycle.REJECTED,
+                message="no such open order; no cancel was sent",
+                timestamp=_FAKE_NOW,
+            )
+        if (
+            order.account_id != self.account_id
+            or order.client_id != 17
+            or not order.order_ref.startswith("CHR-")
+        ):
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=OrderLifecycle.REJECTED,
+                message="not a Chronos order; refusing to cancel it; no cancel was sent",
+                timestamp=_FAKE_NOW,
+            )
         result = await super().cancel_order(broker_order_id)
         self._open_orders = tuple(
             o for o in self._open_orders if o.broker_order_id != broker_order_id
