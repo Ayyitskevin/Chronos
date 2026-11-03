@@ -919,13 +919,23 @@ async def test_crypto_quote_fetches_and_always_cancels_subscription() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_live_empty_underlying_quote_is_accepted_and_cached() -> None:
+async def test_non_live_empty_underlying_quote_is_accepted_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = MutableClock()
     broker = FakeMarketDataBroker(clock)
-    broker.missing_values = True
-    broker.data_quality = DataQuality.FROZEN
     manager = make_manager(broker)
     contract = UnderlyingContract(con_id=3000, symbol="TEST")
+    empty = MarketQuote(
+        contract=contract,
+        timestamp=clock(),
+        data_quality=DataQuality.FROZEN,
+    )
+
+    async def return_empty(_contract: UnderlyingContract) -> MarketQuote:
+        return empty
+
+    monkeypatch.setattr(broker, "request_underlying_quote", return_empty)
 
     first = await manager.underlying_quote(contract)
     second = await manager.underlying_quote(contract)

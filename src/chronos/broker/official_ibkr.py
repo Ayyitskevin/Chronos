@@ -25,6 +25,7 @@ import contextlib
 import heapq
 import logging
 import math
+import re
 import sys
 import threading
 from collections.abc import Callable, Sequence
@@ -282,12 +283,40 @@ _LIVE_PORTS = LIVE_API_PORTS
 # validation failures. Ambiguous codes deliberately stay out — those leave the
 # intent SUBMISSION_UNKNOWN for reconciliation (M7 review finding H2).
 _DEFINITIVE_ORDER_REJECT_CODES = frozenset({110, 201, 203, 321, 10268})
+_NOTICE_CODE = re.compile(r"^\[(-?\d+)\]")
 
 _INSTALL_GUIDANCE = (
     "The official IBKR TWS API package (ibapi) is not installed. It is not on "
     "PyPI: download the TWS API from interactivebrokers.github.io, then install "
     "the bundled Python client (see docs/ibkr_setup.md). Demo mode runs without it."
 )
+
+
+def _new_gateway_notice_codes(
+    before: Sequence[str],
+    after: Sequence[str],
+    *,
+    limit: int,
+) -> tuple[int, ...]:
+    """Return bounded gateway codes added after a session marker, never notice text."""
+
+    if limit <= 0:
+        return ()
+    max_overlap = min(len(before), len(after))
+    overlap = next(
+        (
+            count
+            for count in range(max_overlap, 0, -1)
+            if tuple(before[-count:]) == tuple(after[:count])
+        ),
+        0,
+    )
+    codes: list[int] = []
+    for notice in after[overlap:]:
+        match = _NOTICE_CODE.match(notice)
+        if match:
+            codes.append(int(match.group(1)))
+    return tuple(codes[-limit:])
 
 
 def _with_session_evidence[T: (UnderlyingContract, OptionContract)](
@@ -999,6 +1028,7 @@ class OfficialIBKRBroker:
         # Fresh handshake state: stale events must not vouch for a new session
         # (M7 review finding H4).
         self.bridge.reset_for_reconnect()
+        notices_before = tuple(self.bridge.notices)
         app = _make_app(self.bridge)
         app.connect(self._settings.ib_host, self._settings.ib_port, self._settings.ib_client_id)
         thread = threading.Thread(target=app.run, name="chronos-ibapi-reader", daemon=True)
@@ -1016,8 +1046,16 @@ class OfficialIBKRBroker:
         )
         if not connected or not accounts_seen:
             await self.disconnect()
-            notices = tuple(self.bridge.notices)[-3:]
-            detail = f" Recent broker notices: {'; '.join(notices)}" if notices else ""
+            notice_codes = _new_gateway_notice_codes(
+                notices_before,
+                tuple(self.bridge.notices),
+                limit=3,
+            )
+            detail = (
+                f" Recent broker notice codes: {', '.join(str(code) for code in notice_codes)}"
+                if notice_codes
+                else ""
+            )
             raise BrokerConnectionError(
                 "TWS/Gateway did not complete the connection handshake "
                 f"within {_CONNECT_TIMEOUT_S:.0f}s (is the API enabled on "
