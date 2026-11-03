@@ -183,7 +183,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 63 at H1B1-R1 (settings.py, api/autonomy_wiring.py and the ib_async adapter
     # disclosure each rotate their generated source-inventory fingerprint).
     # 64 at H1B1-R2: 1 superseded generated source fingerprints.
-    assert len(historical_candidates) == 64
+    # 69 at ACCTFRESH-C-restacked: 5 superseded generated source fingerprints.
+    assert len(historical_candidates) == 69
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

@@ -220,12 +220,12 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | src/chronos/supervisor/compiler.py | `9ba8931a53d0d8f64962163b5d7599f4ccc0339e2ee78baa49e1894d3e67cfa1` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
 | src/chronos/config/settings.py | `8ee2ef74849a79da2c8d9b3530cfbfb3b58c244e3c953297cda785fbe6a2e961` |
-| src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
+| src/chronos/domain/enums.py | `e8f140199517197ebc6cab5c35f79b9dd51d0235933e4fa2cc85613beb2f1012` |
 | src/chronos/runtime.py | `42e03ed520e3147a77f332572034ab6cd71ed8b0a4a122ccad49fb59afcc97ef` |
-| src/chronos/api/autonomy_wiring.py | `7ad75c63d850a9d5b8329ae17be16cc151c1be73378c52c75c3f06511d50c6b5` |
+| src/chronos/api/autonomy_wiring.py | `4cb598944547ecb5d5bbc985878f5cc0d165350531eee9389ad2f538354a0a20` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
-| src/chronos/broker/demo.py | `5fc99d52d4ce0360349e15c0d6db010e28ecd88e9149cc58a60f61b7cfb72396` |
-| src/chronos/broker/official_ibkr.py | `a8c43cac1553e400ecfa5243576b451787153214c88eaae133ba7409e9828d9a` |
-| src/chronos/broker/ibkr.py | `f5872ccc7be3352f6003304e53caf3e1d35ea83df0e6a6f7cc84d801547683b9` |
+| src/chronos/broker/demo.py | `01cb5d5dd179c5d7a35cb4511e38e3d05c1e44623a10e9a0c5cccf9d3c61376e` |
+| src/chronos/broker/official_ibkr.py | `e1c2aa1edd201e18d7b680000eb27e226805a37fe7bbabbbeeae06d3ce659e20` |
+| src/chronos/broker/ibkr.py | `f58c835a438ef17bf006ca6f37449c57d536b704d2b18d861a49aca30844d080` |
 
 Machine-readable detail: [`capability-matrix.json`](capability-matrix.json).
