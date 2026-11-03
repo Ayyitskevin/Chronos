@@ -43,7 +43,7 @@
     },
     {
       "path": "src/chronos/broker/official_ibkr.py",
-      "sha256": "a8c43cac1553e400ecfa5243576b451787153214c88eaae133ba7409e9828d9a"
+      "sha256": "87d9d7e23c937a748992f732acefeee3ce0de5b7cc41d661dc6c44b2c07ea59f"
     },
     {
       "path": "src/chronos/broker/ibkr.py",

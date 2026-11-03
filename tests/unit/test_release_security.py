@@ -178,7 +178,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 55 at D54-FIX5 (api/autonomy_wiring.py: the covered-call residual pointer supersedes FIX4's).
     # 56 at E-0 (runtime.py: the typed readiness blocker union supersedes its source fingerprint).
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
-    assert len(historical_candidates) == 57
+    # 58 at XFIX-C (official_ibkr.py: empty LIVE quote and handshake notice checks).
+    assert len(historical_candidates) == 58
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
