@@ -278,3 +278,27 @@ def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effect
     assert refused
     assert "without engaging the kill switch" in reason
     assert not breaker.called
+
+
+def test_live_drawdown_rechecks_account_age_at_the_post_io_clock() -> None:
+    boundary = SimpleNamespace(_settings=paper_settings())
+
+    accepted, accepted_error = OrderSubmissionBoundary._recheck_net_liquidation(
+        boundary,
+        nlv=Decimal("100000"),
+        as_of=DEMO_NOW,
+        nlv_error="",
+        now=DEMO_NOW + timedelta(seconds=29),
+    )
+    refused, refused_error = OrderSubmissionBoundary._recheck_net_liquidation(
+        boundary,
+        nlv=Decimal("100000"),
+        as_of=DEMO_NOW,
+        nlv_error="",
+        now=DEMO_NOW + timedelta(seconds=31),
+    )
+
+    assert accepted == Decimal("100000")
+    assert accepted_error == ""
+    assert refused is None
+    assert "account summary freshness refused: stale" in refused_error
