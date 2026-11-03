@@ -319,15 +319,6 @@ FINDINGS: dict[str, str] = {
         "display-only; a fix is a separate one-line src unit for Kevin to rule on "
         "(SURVEY G2)."
     ),
-    "U1-F2": (
-        "DemoBroker refuses submit_order and modify_order with the untyped "
-        "BrokerSafetyError (demo.py:468-481), not BrokerRefusedBeforeSend. The "
-        "submission boundary resolves an intent to REJECTED only on "
-        "BrokerRefusedBeforeSend and leaves SUBMISSION_UNKNOWN on any other BrokerError "
-        "(src/chronos/orders/submission.py:775-792). Unreachable in demo mode (the "
-        "boundary refuses earlier), but the adapter does not make the not-sent proof "
-        "the real adapter makes."
-    ),
     "U1-F3": (
         "FakeBroker has no order book: canned answers that never move. open_orders, "
         "executions and positions are constructor tuples; executions(since) ignores "
@@ -348,11 +339,6 @@ FINDINGS: dict[str, str] = {
 #: (harness name, test function name) -> finding id. Each entry is a STRICT xfail.
 KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {
     ("demo", "test_cancel_removes_a_cancelled_order_from_open_orders"): "U1-F1",
-    ("demo", "test_submit_without_a_send_guard_is_refused_before_send"): "U1-F2",
-    ("demo", "test_submit_without_transmit_authority_is_refused_before_send"): "U1-F2",
-    ("demo", "test_submit_with_an_unauthorized_guard_is_refused_before_send"): "U1-F2",
-    ("demo", "test_submit_for_a_foreign_account_is_refused_before_send"): "U1-F2",
-    ("demo", "test_modify_is_refused_before_send_and_changes_nothing"): "U1-F2",
     ("fake", "test_reads_fail_closed_when_disconnected"): "U1-F4",
     ("fake", "test_executions_since_is_an_inclusive_lower_bound"): "U1-F3",
     ("fake", "test_preview_for_a_foreign_account_is_not_accepted"): "U1-F4",
