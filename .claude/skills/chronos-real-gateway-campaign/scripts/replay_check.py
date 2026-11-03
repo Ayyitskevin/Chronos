@@ -68,7 +68,10 @@ def check_session(directory: Path, *, allow_demo: bool = False) -> list[str]:
         except ValueError:
             failures.append(f"{directory}: capture.json is not valid JSON")
         else:
-            capture_loaded = True
+            if isinstance(capture, dict):
+                capture_loaded = True
+            else:
+                failures.append(f"{directory}: capture.json must be a JSON object")
 
     if capture_path.is_file() and derived_path.is_file():
         if capture_loaded:
