@@ -193,7 +193,7 @@ def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effect
 
         def check(self, _nlv: Decimal, *, now: datetime) -> object:
             self.called = True
-            return None
+            return SimpleNamespace(breached=False, reason="")
 
     breaker = _Breaker()
     boundary = SimpleNamespace(
