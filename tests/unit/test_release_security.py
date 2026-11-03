@@ -179,7 +179,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 56 at E-0 (runtime.py: the typed readiness blocker union supersedes its source fingerprint).
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
     # 58 at XFIX-C (official_ibkr.py: empty LIVE quote and handshake notice checks).
-    assert len(historical_candidates) == 58
+    # 59 at XFIX-C-R1 (official_ibkr.py: bounded current-session handshake notice codes).
+    assert len(historical_candidates) == 59
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
