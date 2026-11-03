@@ -181,15 +181,79 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 
 ## Backend autonomy maintenance — required before every cutover boot
 
-Before the FIRST backend start in this cutover (including the restart after recovery
-acknowledgement), the Kevin-authorized operator must configure the backend **service process
-environment** with `CHRONOS_AUTONOMY_MAINTENANCE=on`. For a systemd user service, use an
-operator-owned service override with `[Service]` and
-`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`, then reload that unit's configuration before
-starting. Do not place this flag in `.env`: the switch deliberately reads only the process
-environment, latched before backend assembly. Missing, invalid or unreadable state also means
-ON; only explicit `off` lifts it. No key/token is part of this setting. This page authorizes no
-agent to edit a unit, reload it, restart a service or lift the inhibit.
+Autonomy maintenance is ON by default. Before the FIRST backend start in this cutover
+(including the restart after recovery acknowledgement), the Kevin-authorized operator must
+install a dedicated `chronos-backend.service.d/90-autonomy-maintenance.conf` drop-in:
+
+```ini
+# MAINT-R1 cutover drop-in
+[Service]
+UnsetEnvironment=CHRONOS_AUTONOMY_MAINTENANCE
+```
+
+Then `systemctl --user daemon-reload` and run the pre-start proof below. **Do not substitute
+`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`: `EnvironmentFile=` overrides `Environment=`.**
+`UnsetEnvironment=` is applied last and removes the variable from every source, including an
+inherited or stale `off` in the private environment file. Absence invokes the backend's safe ON
+default before assembly. A later drop-in can clear that removal; the effective-property check
+below catches it before startup. The repo-root `.env` read by Settings does not set this switch;
+the unit's `chronos-backend.env` does become process environment. No key/token is part of the
+switch. This page authorizes no agent to edit a unit, reload it, restart a service or lift it.
+
+**Repeat this entire proof immediately before EVERY backend start/restart through step 8.**
+Replace `<PRIVATE_ENV_DIR>` with the absolute private directory discovered for this unit, as in
+the one-home check below. The required file list must be exactly the shipped backend source;
+an empty, optional, additional or unexpected source, failed discovery, stale reload or missing
+final removal is a STOP. The ON branch never reads or prints private file contents. Run in Bash:
+
+```bash
+# MAINT-R1 pre-start proof
+(
+set -euo pipefail
+maintenance_expect=on
+backend_unit=chronos-backend.service
+expected_env_file='<PRIVATE_ENV_DIR>/chronos-backend.env'
+stop_maintenance_proof() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
+unit_property() { systemctl --user show "$backend_unit" --property="$1" --value; }
+case "$expected_env_file" in /*) ;; *) stop_maintenance_proof 'replace the private directory';; esac
+load_state=$(unit_property LoadState)
+[ "$load_state" = loaded ] || stop_maintenance_proof 'backend unit is not loaded'
+reload_needed=$(unit_property NeedDaemonReload)
+[ "$reload_needed" = no ] || stop_maintenance_proof 'reload the reviewed unit first'
+environment_files=$(unit_property EnvironmentFiles)
+[ "$environment_files" = "$expected_env_file (ignore_errors=no)" ] ||
+  stop_maintenance_proof 'effective backend environment files differ from the reviewed source'
+final_removals=$(unit_property UnsetEnvironment)
+case "$maintenance_expect" in
+  on)
+    case " $final_removals " in
+      *" CHRONOS_AUTONOMY_MAINTENANCE "*) ;;
+      *) stop_maintenance_proof 'final name-only maintenance removal is missing';;
+    esac
+    ;;
+  off)
+    case "$final_removals" in
+      *CHRONOS_AUTONOMY_MAINTENANCE*) stop_maintenance_proof 'maintenance removal is still effective';;
+    esac
+    counts=$(awk '
+      !/^[[:space:]]*#/ && index($0, "CHRONOS_AUTONOMY_MAINTENANCE") {
+        named++; if ($0 == "CHRONOS_AUTONOMY_MAINTENANCE=off") exact++
+      }
+      END {printf "%d %d", named, exact}
+    ' "$expected_env_file")
+    [ "$counts" = '1 1' ] || stop_maintenance_proof 'require one exact off assignment and no conflicts'
+    ;;
+  *) stop_maintenance_proof 'expected mode must be on or off';;
+esac
+printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
+)
+```
+
+The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
+result. This proves systemd's final environment removal for the reviewed loaded unit, not the
+rest of cutover readiness. Keep the reviewed configuration and environment sources unchanged
+between proof and start; if anything changes, reload and repeat. The existing owner-user trust
+boundary applies: this does not defend against an operator changing the unit after the check.
 
 Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
 activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
@@ -197,8 +261,10 @@ must be NOT_EXPECTED, and the server emits a CRITICAL `autonomy_maintenance` eve
 backend initialization and reconciliation continue. `/health/live` stays 200; `/health/ready`
 is 503 while this intentional startup inhibit is set. A diagnostic `/health` 200 alone is not
 proof. Preserve the existing mandate quarantine as an additional precaution, not a substitute
-for this backend guard. Lift only at step 9, on Kevin's explicit word, by setting `off` in the
-service process environment and restarting. There is no in-process or automatic lift.
+for this backend guard. Lift only at step 9, on Kevin's explicit word, using the single-source
+OFF procedure there. There is no in-process or automatic lift. Even without a configured
+mandate, the default inhibit intentionally reports NOT_READY; do not lift it merely to silence
+a readiness check.
 
 ## Steps
 
@@ -454,7 +520,8 @@ service process environment and restarting. There is no in-process or automatic 
    ```
    Your hand, never the command's: it removes nothing. With the four names absent, the backend's
    startup creates a fresh database at the running schema (18) — `python -m chronos.cli
-   db-preflight` first, then `systemctl --user start chronos-backend` — and refuses to start
+   db-preflight` first, then repeat the ON pre-start proof above immediately before
+   `systemctl --user start chronos-backend` — and refuses to start
    without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
    chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
@@ -550,7 +617,8 @@ service process environment and restarting. There is no in-process or automatic 
    observation and takes effect at the next start, so this process stays held. It does not
    disengage the kill switch, arm, or activate a mandate.
 
-   **Restart, then prove the hold is gone, before step 8.** `systemctl --user restart
+   **Restart, then prove the hold is gone, before step 8.** Repeat the ON pre-start proof
+   above immediately before `systemctl --user restart
    chronos-backend`, then `systemctl --user is-active chronos-backend` → `active`, then the
    `/health` and `/autonomy/alerts` commands above again, but not the `grep`: the log still holds
    the held boot's `recovery_hold_engaged` line, which proves nothing now. They must print:
@@ -659,9 +727,17 @@ service process environment and restarting. There is no in-process or automatic 
    `python -m chronos.cli mandate check --file <mandate> --account-id DU1234567` (the same id)
    must print `STATUS             VALID`, `[NOTE] account-match` and a SUMMARY line that begins
    `0 blocking` — a BLOCKING `account-mismatch` means the old fingerprint is still in the file.
-   Only after all preceding proofs pass and Kevin explicitly authorizes the lift, change the
-   service override to `Environment=CHRONOS_AUTONOMY_MAINTENANCE=off`, reload that unit's
-   configuration and restart the backend. A running process never re-reads the switch. Verify
+   Only after all preceding proofs pass and Kevin explicitly authorizes the lift, remove only
+   the dedicated `90-autonomy-maintenance.conf` drop-in, preserving all other unit controls.
+   In the one required backend EnvironmentFile discovered above, set exactly one uncommented
+   `CHRONOS_AUTONOMY_MAINTENANCE=off` line (one assignment per line, no quoting, `export`,
+   continuation or duplicate for this switch). Do not use an `Environment=` override or the
+   repo-root `.env` as the source. Reload with `systemctl --user daemon-reload`, then repeat
+   the entire pre-start proof with **`maintenance_expect=off`**. It must discover the same
+   required file, no maintenance removal, and one exact off assignment with no conflicts;
+   otherwise STOP before restarting. `maintenance pre-start proof: OFF` permits only this
+   explicitly authorized restart, not a grant or readiness claim. A running process never
+   re-reads the switch. Restart the backend and verify
    that `autonomy_maintenance` is absent from `/health`; any other fault/refusal remains a STOP.
    The normal mandate/posture/recovery gates still decide whether autonomy can start. Only then
    start the worker and enable autonomy per the shadow-campaign runbook.

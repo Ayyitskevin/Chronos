@@ -229,7 +229,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             _logger.critical(
                 "Autonomy maintenance is ON: no autonomy runtime, activation or tick; "
                 "an owner-authorized operator must set CHRONOS_AUTONOMY_MAINTENANCE=off "
-                "and restart to lift it",
+                "and restart to lift it; process environment only, repo-root .env is ignored",
                 extra={"event": "autonomy_maintenance", "passed": False},
             )
         if runtime.settings.clock_health_provider == "chrony":

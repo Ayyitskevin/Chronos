@@ -24,6 +24,13 @@ StartLimitBurst=3
 Type=simple
 WorkingDirectory=%h/<CHRONOS_CHECKOUT>
 EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
+# Autonomy maintenance is ON by default, with typed health and NOT_READY even
+# without a mandate. For an owner-approved normal start, set exactly one
+# CHRONOS_AUTONOMY_MAINTENANCE=off line in this EnvironmentFile and restart;
+# repo-root .env does not set the switch. EnvironmentFile beats Environment.
+# For cutover, the dedicated UnsetEnvironment drop-in in N3-CUTOVER.md wins
+# over every environment source. Verify its effective properties before EVERY
+# start; lift only by the runbook's explicit source/readback procedure.
 # P3-2: ExecStart's scripts/run_backend.py puts <checkout>/src on sys.path itself;
 # `python -m chronos.cli` below has no such shim, so without `pip install -e .` the
 # condition would fail to import, exit 1, and silently skip the start. This gives

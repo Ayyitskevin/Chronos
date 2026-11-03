@@ -580,7 +580,11 @@ and maintenance recovery remain held.
   `CHRONOS_AUTONOMY_MAINTENANCE` once at lifespan entry, before backend assembly. Only
   explicit `off` (case-insensitive, surrounding whitespace ignored) lifts it. Unset, empty,
   invalid, or unreadable state inhibits autonomy. This switch reads the **process environment**,
-  not a `.env` file; configure it in the backend service environment. While inhibited the
+  not the repo-root `.env` file. A systemd EnvironmentFile does become process environment
+  and overrides `Environment=`; the cutover's final `UnsetEnvironment=` removal wins over
+  both. Use the loaded-unit ON/OFF pre-start proof in `docs/ops/N3-CUTOVER.md` before each
+  cutover boot or owner-approved lift, refusing unexpected files, stale reloads and conflicts.
+  While inhibited the
   lifespan never calls the autonomy builder, activates a mandate, writes an activation or
   `mandate_activated` record, or schedules an autonomy tick, even with a valid matching grant
   and no recovery hold. `/health` reports the typed startup fault `autonomy_maintenance` and
