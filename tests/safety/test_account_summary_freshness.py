@@ -15,9 +15,10 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.account_freshness import (
     AccountSummaryFreshnessError,
     AccountSummaryFreshnessReason,
+    account_summary_check_time,
     require_account_summary_freshness,
 )
-from chronos.domain.enums import OrderIntent
+from chronos.domain.enums import BrokerMode, OrderIntent
 from chronos.domain.models import AccountSummary
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent
@@ -140,6 +141,14 @@ def test_demo_account_summary_uses_the_demo_clock_for_freshness() -> None:
     )
     assert decision.decided_at == DEMO_NOW
     assert evidence.account.as_of == DEMO_NOW
+
+
+def test_live_account_summary_clock_uses_wall_time_after_the_read() -> None:
+    before = datetime.now(UTC)
+    checked_at = account_summary_check_time(broker_mode=BrokerMode.IBKR, demo_now=DEMO_NOW)
+    after = datetime.now(UTC)
+
+    assert before <= checked_at <= after
 
 
 def test_account_summary_age_setting_is_positive_and_capped_at_thirty_seconds() -> None:
