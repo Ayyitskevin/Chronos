@@ -319,9 +319,19 @@ class Settings(BaseSettings):
     min_open_interest: Annotated[int, Field(ge=0)] = 100
     max_relative_spread: Annotated[Decimal, Field(gt=0)] = Decimal("0.20")
     max_quote_age_seconds: PositiveInt = 5
-    # Account balances may influence sizing and risk only while this fresh; the
-    # domain guard independently caps it at 30 seconds.
-    account_summary_max_age_seconds: Annotated[int, Field(ge=1, le=30)] = 30
+    # Age since the adapter completed its local read; this is not broker-side
+    # valuation age. The domain guard independently caps it at 30 seconds.
+    account_summary_max_age_seconds: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=30,
+            description=(
+                "Maximum age since the adapter completed its local account-summary read; "
+                "not the broker valuation age."
+            ),
+        ),
+    ] = 30
     market_timezone: str = "America/New_York"
     max_contracts_per_order: PositiveInt = 1
     max_symbol_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.25")

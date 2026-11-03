@@ -615,7 +615,7 @@ async def test_account_summary_requires_every_authoritative_value() -> None:
 
 
 @pytest.mark.asyncio
-async def test_account_summary_timestamp_is_local_read_time_even_for_unchanged_cached_rows() -> None:
+async def test_account_summary_timestamp_is_local_read_time_for_cached_rows() -> None:
     client = FakeIB()
     local_time = [FIXED_NOW]
     broker = make_broker(client, clock=lambda: local_time[0])

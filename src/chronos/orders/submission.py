@@ -446,10 +446,20 @@ class OrderSubmissionBoundary:
             OrderLifecycle.SUBMISSION_UNKNOWN, current_account_id=account_id
         )
         quote = self._read_quote(intent)
-        nlv, nlv_error = self._read_net_liquidation()
+        nlv, nlv_as_of, nlv_error = self._read_net_liquidation()
 
         # 6. Fresh clock AFTER the slow I/O: TTL gates must not pass on stale time.
         fresh_now = self._clock()
+        if nlv is not None:
+            try:
+                require_account_summary_freshness(
+                    nlv_as_of,
+                    now=fresh_now,
+                    max_age_seconds=self._settings.account_summary_max_age_seconds,
+                )
+            except AccountSummaryFreshnessError as error:
+                nlv = None
+                nlv_error = f"net liquidation unavailable: {error}"
 
         drawdown_breached, drawdown_reason = self._drawdown_evidence(
             nlv=nlv, nlv_error=nlv_error, now=fresh_now
@@ -589,7 +599,7 @@ class OrderSubmissionBoundary:
         except Exception:
             return None
 
-    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:
+    def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:
         try:
             account = self._connection.run(self._connection.broker.account_summary())
             require_account_summary_freshness(
@@ -600,8 +610,8 @@ class OrderSubmissionBoundary:
                 max_age_seconds=self._settings.account_summary_max_age_seconds,
             )
         except (BrokerError, AccountSummaryFreshnessError) as error:
-            return None, f"net liquidation unavailable: {error}"
-        return account.net_liquidation, ""
+            return None, None, f"net liquidation unavailable: {error}"
+        return account.net_liquidation, getattr(account, "as_of", None), ""
 
     def _drawdown_evidence(
         self, *, nlv: Decimal | None, nlv_error: str, now: datetime

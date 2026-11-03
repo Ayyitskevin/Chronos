@@ -63,6 +63,12 @@ runbooks.
   `ApiPending`, `ValidationError`, `ApiUpdate` and `PendingCancel` as working. The official
   adapter types each of these per row instead (`SUBMISSION_UNKNOWN`, `CANCEL_PENDING` for
   `PendingCancel`); D-43 changed only the official path.
+- **Account-summary `as_of` is local-read time, not broker valuation time.** Every adapter stamps
+  when its local read completes. In particular, the non-default `ib_async` adapter may return
+  already-populated `accountSummaryAsync` cache rows and then apply a new local stamp without a
+  broker-side update. The age guard therefore bounds how long Chronos carries one local read
+  across blocking work; it does not prove venue freshness. Broker-side update timestamps or an
+  explicitly forced-refresh contract remain an open follow-up before this limitation can narrow.
 
 ## Operational health
 
@@ -90,6 +96,9 @@ runbooks.
   alert sidecar, or measured availability/RPO/RTO SLO is implemented. Therefore automatic
   observation is code-mitigated, but operational clock safety and a fully evidenced lane are not
   proven.
+- Account-summary age checks compare adapter timestamps with the configured process clock. A
+  backward wall-clock step can make an older observation appear younger. The display-only clock
+  health observer is not order authority, so clock trust remains an owner-operated prerequisite.
 
 ## Crypto family (built, disabled by default)
 

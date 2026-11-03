@@ -765,6 +765,15 @@ class BackendGatherers:
                     return None
                 contract = runtime.connection.run(runtime.broker.qualify_underlying(probe))
                 quote = runtime.connection.run(runtime.broker.request_underlying_quote(contract))
+                # Qualification and quote retrieval may block long enough for
+                # the account balances to age out before sizing consumes them.
+                require_account_summary_freshness(
+                    getattr(summary, "as_of", None),
+                    now=self._clock() if self._clock is not None else now,
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                )
             except Exception:
                 _logger.exception("Autonomy fact gathering failed")
                 return None

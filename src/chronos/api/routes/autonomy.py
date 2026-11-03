@@ -605,6 +605,18 @@ def compose_served_document(
             refusal=answer.refusal,
             now=now,
         ).model_dump(mode="json")
+    try:
+        # Positions, orders, and every requested bar were gathered after the
+        # first check. Refuse if the same account observation aged out before
+        # its balances enter the served artifact.
+        require_account_summary_freshness(
+            getattr(summary, "as_of", None),
+            now=account_summary_check_time(broker_mode=broker_mode, demo_now=demo_clock),
+            max_age_seconds=getattr(settings, "account_summary_max_age_seconds", 30),
+        )
+    except Exception:
+        _logger.exception("Evidence composition refused an aged account summary")
+        return None
     payload["daily_bars"] = bars
     payload["watchlist"] = list(bounded)
     payload["as_of"] = now.isoformat()

@@ -1,7 +1,7 @@
 """Concrete broker-reading risk-evidence provider.
 
 Gathers the :class:`~chronos.orders.risk.RiskEvidence` the engine needs from
-fresh broker reads (account, positions, open orders) plus persisted active
+broker reads (account, positions, open orders) plus persisted active
 intents and the family-aware trading session. This is the integration seam the
 owner exercises against a real paper gateway; the pipeline orchestration is
 tested with a canned provider, so this module is deliberately thin and
@@ -160,6 +160,14 @@ class BrokerRiskEvidenceProvider:
         )
         reconciliation_status = (
             readiness_after.status if bracket_is_consistent else ReconciliationStatus.PENDING
+        )
+        # Positions, orders, and session evidence are blocking reads. Recheck
+        # the original account observation at the last point before its
+        # balances enter the synchronous risk decision.
+        require_account_summary_freshness(
+            getattr(account, "as_of", None),
+            now=self._clock() if self._clock is not None else now,
+            max_age_seconds=self._settings.account_summary_max_age_seconds,
         )
         return RiskEvidence(
             account=account,

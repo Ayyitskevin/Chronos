@@ -1,4 +1,4 @@
-"""Fail-closed freshness checks for account summaries used as decision evidence."""
+"""Fail closed on the age of a broker adapter's local account-summary read."""
 
 from __future__ import annotations
 
@@ -41,10 +41,11 @@ def require_account_summary_freshness(
     now: datetime,
     max_age_seconds: int,
 ) -> None:
-    """Refuse missing, invalid, future-dated, or over-age account observations.
+    """Refuse missing, invalid, future-dated, or over-age local read stamps.
 
     The configured age is defense-in-depth bounded here as well as in Settings,
-    so a non-Settings caller cannot widen the maximum observation window.
+    so a non-Settings caller cannot widen the maximum observation window. The
+    stamp does not prove when the broker valued or last updated cached balances.
     """
 
     if (

@@ -265,7 +265,7 @@ def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effect
         _session_drawdown=breaker,
     )
 
-    nlv, error = OrderSubmissionBoundary._read_net_liquidation(boundary)
+    nlv, _as_of, error = OrderSubmissionBoundary._read_net_liquidation(boundary)
     refused, reason = OrderSubmissionBoundary._drawdown_evidence(
         boundary,
         nlv=nlv,

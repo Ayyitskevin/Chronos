@@ -620,10 +620,12 @@ def _account_summary_reads(source: str) -> list[str]:
     return reads
 
 
-def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> None:
-    """BP-3 touches neither live AccountSummary read — measured against the branch's merge-base
-    with its base ref, so merges of main into the branch (other packets' edits to these files)
-    do not fail a pin about THIS branch's edits.
+def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> None:
+    """BP-3 left the reads untouched; H1B1 may carry the submission stamp to its final guard.
+
+    The expected source is still derived from the merge-base, with only the three exact tuple
+    changes needed to carry ``as_of`` out of ``_read_net_liquidation``. This keeps the original
+    read scan effective without freezing out the reviewed freshness repair.
 
     D-53 (Kevin K-20261028-002): the pin compares the reads themselves (``_account_summary_reads``),
     not the whole of ``orders/evidence.py`` and ``orders/submission.py``, so a later safety fix
@@ -638,11 +640,31 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
         before = subprocess.run(
             ["git", "show", f"{base}:{path}"], cwd=_ROOT, capture_output=True, text=True, check=True
         ).stdout
+        expected = before
+        if path == "src/chronos/orders/submission.py":
+            replacements = (
+                (
+                    "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
+                    "def _read_net_liquidation(self) "
+                    "-> tuple[Decimal | None, datetime | None, str]:",
+                ),
+                (
+                    'return None, f"net liquidation unavailable: {error}"',
+                    'return None, None, f"net liquidation unavailable: {error}"',
+                ),
+                (
+                    'return account.net_liquidation, ""',
+                    'return account.net_liquidation, getattr(account, "as_of", None), ""',
+                ),
+            )
+            for old, new in replacements:
+                assert expected.count(old) == 1, old
+                expected = expected.replace(old, new)
         after = (_ROOT / path).read_text(encoding="utf-8")
         assert _account_summary_reads(before), f"{path} at {base[:12]}: no AccountSummary read"
-        assert _account_summary_reads(before) == _account_summary_reads(after), (
+        assert _account_summary_reads(expected) == _account_summary_reads(after), (
             f"{path} differs from the merge-base {base[:12]} with {ref}: this branch edited a "
-            "live AccountSummary read"
+            "live AccountSummary read beyond the approved H1B1 freshness delta"
         )
 
 
@@ -661,37 +683,37 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
         ),
         (  # the net liquidation comes from somewhere else
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, ""',
-            'return account.cash, ""',
+            'return account.net_liquidation, getattr(account, "as_of", None), ""',
+            'return account.cash, getattr(account, "as_of", None), ""',
         ),
         (  # a broader failure is swallowed around the read
             "src/chronos/orders/submission.py",
             "except (BrokerError, AccountSummaryFreshnessError) as error:\n"
-            '            return None, f"net liquidation unavailable: {error}"',
+            '            return None, None, f"net liquidation unavailable: {error}"',
             "except Exception as error:\n"
-            '            return None, f"net liquidation unavailable: {error}"',
+            '            return None, None, f"net liquidation unavailable: {error}"',
         ),
         # D43-FIX3 (Kimi HOLD P2 @ ec32fc8): the whole consuming expression, not only the direct
         # parent of the bound name, so arithmetic or a wrapper around the read is an edit of it
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, ""',
-            'return account.net_liquidation * 0, ""',
+            'return account.net_liquidation, getattr(account, "as_of", None), ""',
+            'return account.net_liquidation * 0, getattr(account, "as_of", None), ""',
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, ""',
-            'return account.net_liquidation + 1, ""',
+            'return account.net_liquidation, getattr(account, "as_of", None), ""',
+            'return account.net_liquidation + 1, getattr(account, "as_of", None), ""',
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, ""',
-            'return abs(account.net_liquidation), ""',
+            'return account.net_liquidation, getattr(account, "as_of", None), ""',
+            'return abs(account.net_liquidation), getattr(account, "as_of", None), ""',
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, ""',
-            'return round(account.net_liquidation), ""',
+            'return account.net_liquidation, getattr(account, "as_of", None), ""',
+            'return round(account.net_liquidation), getattr(account, "as_of", None), ""',
         ),
         (
             "src/chronos/orders/evidence.py",
@@ -706,8 +728,9 @@ def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> N
         # D43-FIX4 (reader F2, B1-B3): control flow around the read, not only the read's bytes
         (  # B1: an early return before the read
             "src/chronos/orders/submission.py",
-            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n        try:",
-            "    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n"
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, "
+            "datetime | None, str]:\n        try:",
+            "    def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:\n"
             "        if self is not None:\n"
             "            return Decimal('1000000'), ''\n"
             "        try:",
@@ -806,7 +829,7 @@ def test_3c_the_base_comparison_uses_no_frozen_sha() -> None:
     import re
 
     source = inspect.getsource(
-        test_3b_the_live_account_summary_reads_are_untouched_against_the_base
+        test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta
     )
     source += inspect.getsource(_packet_base_ref)
     assert re.search(r"[0-9a-f]{40}", source) is None, "a frozen sha is used as the base again"
