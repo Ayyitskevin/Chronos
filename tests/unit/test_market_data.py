@@ -996,7 +996,9 @@ async def test_empty_option_batch_quote_is_refused_before_cache(
         data_quality=quality,
     )
 
-    def return_empty(_contract: UnderlyingContract | OptionContract | CryptoContract) -> MarketQuote:
+    def return_empty(
+        _contract: UnderlyingContract | OptionContract | CryptoContract,
+    ) -> MarketQuote:
         return empty
 
     monkeypatch.setattr(broker, "_quote", return_empty)
