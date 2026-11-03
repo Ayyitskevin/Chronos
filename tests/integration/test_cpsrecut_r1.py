@@ -127,28 +127,29 @@ def test_broker_error_text_cannot_report_a_foreign_identifier() -> None:
 def test_completed_orders_send_error_releases_flight(monkeypatch: pytest.MonkeyPatch) -> None:
     gateway = fake_ibapi.FakeGateway.seeded()
     fake_ibapi.install(monkeypatch, gateway)
+    broker = OfficialIBKRBroker(fake_ibapi.official_settings())
 
-    async def go() -> None:
-        broker = OfficialIBKRBroker(fake_ibapi.official_settings())
-        await broker.connect()
-        answer = gateway.completed_orders
-
-        def fail(_client: object, _api_only: bool) -> None:
+    class App:
+        def reqCompletedOrders(self, _api_only: bool) -> None:
             raise RuntimeError("synthetic send error")
 
-        monkeypatch.setattr(gateway, "completed_orders", fail)
-        try:
-            with pytest.raises(RuntimeError, match="synthetic send error"):
-                await broker.completed_orders()
-            monkeypatch.setattr(gateway, "completed_orders", answer)
-            assert await broker.completed_orders() == ()
-        finally:
-            await broker.disconnect()
+    app = App()
+    monkeypatch.setattr(broker, "_require_app", lambda: app)
 
-    try:
-        asyncio.run(go())
-    finally:
-        gateway.release_readers()
+    async def immediate_wait(*_args: object) -> bool:
+        return True
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", immediate_wait)
+
+    async def go() -> None:
+        with pytest.raises(RuntimeError, match="synthetic send error"):
+            await broker.completed_orders()
+        monkeypatch.setattr(
+            app, "reqCompletedOrders", lambda _api_only: broker.bridge.on_completed_orders_end()
+        )
+        assert await broker.completed_orders() == ()
+
+    asyncio.run(go())
 
 
 def test_completed_orders_timeout_releases_flight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,21 +159,27 @@ def test_completed_orders_timeout_releases_flight(monkeypatch: pytest.MonkeyPatc
     gateway = fake_ibapi.FakeGateway.seeded()
     fake_ibapi.install(monkeypatch, gateway)
     monkeypatch.setattr(implementation, "_REQUEST_TIMEOUT_S", 0.05)
+    broker = OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    class App:
+        def reqCompletedOrders(self, _api_only: bool) -> None:
+            return None
+
+    app = App()
+    monkeypatch.setattr(broker, "_require_app", lambda: app)
+    waits = iter((False, True))
+
+    async def immediate_wait(*_args: object) -> bool:
+        return next(waits)
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", immediate_wait)
 
     async def go() -> None:
-        broker = OfficialIBKRBroker(fake_ibapi.official_settings())
-        await broker.connect()
-        answer = gateway.completed_orders
-        monkeypatch.setattr(gateway, "completed_orders", lambda _client, _api_only: None)
-        try:
-            with pytest.raises(BrokerConnectionError, match="did not complete"):
-                await broker.completed_orders()
-            monkeypatch.setattr(gateway, "completed_orders", answer)
-            assert await broker.completed_orders() == ()
-        finally:
-            await broker.disconnect()
+        with pytest.raises(BrokerConnectionError, match="did not complete"):
+            await broker.completed_orders()
+        monkeypatch.setattr(
+            app, "reqCompletedOrders", lambda _api_only: broker.bridge.on_completed_orders_end()
+        )
+        assert await broker.completed_orders() == ()
 
-    try:
-        asyncio.run(go())
-    finally:
-        gateway.release_readers()
+    asyncio.run(go())
