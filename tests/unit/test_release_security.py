@@ -180,7 +180,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
     # 60 at H1B1 (settings.py, runtime.py and api/autonomy_wiring.py each rotate a
     # source-inventory fingerprint for the account-summary freshness guard).
-    assert len(historical_candidates) == 60
+    # 63 at H1B1-R1 (settings.py, api/autonomy_wiring.py and the ib_async adapter
+    # disclosure each rotate their generated source-inventory fingerprint).
+    assert len(historical_candidates) == 63
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
