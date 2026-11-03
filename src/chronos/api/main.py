@@ -59,6 +59,7 @@ from chronos.api.autonomy_wiring import (
     evidence_posture_is_broken,
 )
 from chronos.api.dependencies import AutonomyAdmission, BackendState
+from chronos.api.maintenance import autonomy_maintenance_enabled
 from chronos.api.reconciliation_loop import reconciliation_task
 from chronos.api.routes.account import router as account_router
 from chronos.api.routes.autonomy import router as autonomy_router
@@ -186,6 +187,10 @@ async def _heartbeat_lease(
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # MAINT-BUILD: latch BEFORE backend assembly. Changes during or after startup
+    # cannot silently lift this boot's inhibit; the operator must explicitly
+    # configure off and restart. No mandate may be loaded/activated while held.
+    autonomy_maintenance = autonomy_maintenance_enabled()
     runtime = build_runtime(register_atexit=False)
     lease = WriterLease(
         runtime.database.sessions,
@@ -219,6 +224,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             clock_health=clock_health,
         )
         backend_state = app.state.backend
+        if autonomy_maintenance:
+            backend_state.note_startup_fault(StartupFaultCode.AUTONOMY_MAINTENANCE)
+            _logger.critical(
+                "Autonomy maintenance is ON: no autonomy runtime, activation or tick; "
+                "an owner-authorized operator must set CHRONOS_AUTONOMY_MAINTENANCE=off "
+                "and restart to lift it; process environment only, repo-root .env is ignored",
+                extra={"event": "autonomy_maintenance", "passed": False},
+            )
         if runtime.settings.clock_health_provider == "chrony":
             maximum_error = runtime.settings.clock_health_maximum_error_seconds
             assert maximum_error is not None  # Settings validation makes this structural.
@@ -461,7 +474,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Not calling it is deliberately not the same as revoking: no revocation
         # row is written, so acknowledging the hold costs the owner nothing.
         autonomy = None
-        if not recovery_held:
+        if not recovery_held and not autonomy_maintenance:
             try:
                 # `is_writer` is read per submission, never captured: the lease
                 # heartbeat can demote this process mid-session, and the autonomous

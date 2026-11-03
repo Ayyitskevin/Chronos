@@ -1,13 +1,15 @@
 """Q-Q3-1, re-pointed onto the real recovery path (Muse's ruling, 2026-10-14).
 
-The two strict xfails in ``tests/integration/test_cancel_refusal_tracker.py`` pin paths U-B
-deliberately does not take: a direct ``tracker.ingest`` of a venue SUBMITTED (the state machine
-has no CANCEL_PENDING -> SUBMITTED edge, by design) and a second cancel while CANCEL_PENDING
-(refused). Under U-B (design r3 §4.3) a stranded CANCEL_PENDING whose order still works at the
-venue is recovered by RECONCILIATION after the dwell, through the repository CAS. These pins prove
-that, on U-B's own rig, with the stranded mark written by the REAL ``OrderCancellationService``
-(an ambiguous cancel: the connection drops during the send, so the mark stays) rather than by
-the rig's shortcut.
+The two refusal tests in ``tests/integration/test_cancel_refusal_tracker.py`` —
+``test_direct_tracker_ingest_refuses_to_recover_stranded_cancel_pending`` and
+``test_a_second_cancel_of_a_stranded_cancel_pending_is_refused`` — pin paths U-B deliberately
+does not take: a direct ``tracker.ingest`` of a venue SUBMITTED (the state machine has no
+CANCEL_PENDING -> SUBMITTED edge, by design) and a second cancel while CANCEL_PENDING (refused).
+Under U-B (design r3 §4.3) a stranded CANCEL_PENDING whose order still works at the venue is
+recovered by RECONCILIATION after the dwell, through the repository CAS. These pins prove that,
+on U-B's own rig, with the stranded mark written by the REAL ``OrderCancellationService`` (an
+ambiguous cancel: the connection drops during the send, so the mark stays) rather than by the
+rig's shortcut.
 
 Times: the cancel runs at ``PRIOR`` (older than the mark floor ``M`` = 60 s); reconciliation pass
 ``k`` runs at ``NOW + 120 s * k`` with the monotonic clock at ``1000 + 120 k`` (the rig's
