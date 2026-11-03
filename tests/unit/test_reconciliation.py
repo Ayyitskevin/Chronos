@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypeVar, cast
@@ -719,16 +720,36 @@ def test_execution_requires_manual_fill_allocation_review() -> None:
     assert any("fill allocation" in reason for reason in result.symbols[0].reasons)
 
 
-def test_local_reader_failure_is_generic_pending_without_exception_disclosure(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+@contextmanager
+def _reconciliation_logs() -> Iterator[list[logging.LogRecord]]:
+    """Observe warnings directly even after logging configuration disables propagation."""
+
+    collected: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            collected.append(record)
+
+    logger = logging.getLogger("chronos.services.reconciliation")
+    handler = _Collector(level=logging.WARNING)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield collected
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_local_reader_failure_is_generic_pending_without_exception_disclosure() -> None:
     broker = _ScriptedBroker()
     coordinator, _, _ = _coordinator(
         broker,
         failure=RuntimeError(f"database failed for {ACCOUNT_ID}"),
     )
 
-    with caplog.at_level(logging.WARNING, logger="chronos.services.reconciliation"):
+    with _reconciliation_logs() as records:
         result = coordinator.reconcile()
 
     assert result.status is ReconciliationStatus.PENDING
@@ -737,19 +758,23 @@ def test_local_reader_failure_is_generic_pending_without_exception_disclosure(
     assert result.reasons == (
         "Local strategy evidence could not be read; reconciliation remains locked.",
     )
-    assert ACCOUNT_ID not in caplog.text
-    assert "database failed" not in caplog.text
+    events = [
+        record
+        for record in records
+        if getattr(record, "event", None) == "reconciliation_local_evidence_read_failed"
+    ]
+    assert len(events) == 1
+    assert ACCOUNT_ID not in events[0].getMessage()
+    assert "database failed" not in events[0].getMessage()
 
 
-def test_broker_read_failure_returns_generic_pending_without_snapshot(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_broker_read_failure_returns_generic_pending_without_snapshot() -> None:
     broker = _ScriptedBroker(
         server_time_failure=RuntimeError(f"disconnected from {ACCOUNT_ID}"),
     )
     coordinator, _, reader = _coordinator(broker)
 
-    with caplog.at_level(logging.WARNING, logger="chronos.services.reconciliation"):
+    with _reconciliation_logs() as records:
         result = coordinator.reconcile()
 
     assert result.status is ReconciliationStatus.PENDING
@@ -758,8 +783,14 @@ def test_broker_read_failure_returns_generic_pending_without_snapshot(
     assert result.reasons == (
         "Broker evidence could not be captured; reconciliation remains locked.",
     )
-    assert ACCOUNT_ID not in caplog.text
-    assert "disconnected" not in caplog.text
+    events = [
+        record
+        for record in records
+        if getattr(record, "event", None) == "reconciliation_broker_observation_failed"
+    ]
+    assert len(events) == 1
+    assert ACCOUNT_ID not in events[0].getMessage()
+    assert "disconnected" not in events[0].getMessage()
 
 
 def test_connection_manager_timeout_returns_typed_pending() -> None:
