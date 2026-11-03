@@ -165,6 +165,25 @@ def test_reload_readback_claims_effective_state_not_command_history() -> None:
     assert "Reload with `systemctl --user daemon-reload`" in text
 
 
+def test_execution_identity_claim_is_lexical_and_symlink_resolution_is_owner_reviewed() -> None:
+    text = " ".join(RUNBOOK.read_text().split())
+    assert (
+        "The command check rejects prefixes, wrappers, extra arguments "
+        "and a changed working directory." not in text
+    )
+    assert (
+        "The command check rejects lexically distinct prefixes, wrappers, arguments "
+        "and working directories." in text
+    )
+    assert (
+        "It does not resolve symlinks or attest interpreter, script or imported-code bytes." in text
+    )
+    assert (
+        "A wrapper behind the expected interpreter symlink can change the child environment" in text
+    )
+    assert "Reviewing symlink resolution is part of the existing owner-user trust boundary." in text
+
+
 @pytest.mark.parametrize("expect", ["on", "off"])
 def test_verified_final_removal_or_explicit_source_allows_the_requested_proof(
     tmp_path: Path, expect: str

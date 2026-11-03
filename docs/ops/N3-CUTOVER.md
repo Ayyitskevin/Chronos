@@ -146,13 +146,15 @@ printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
 The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
 result. These readbacks prove the loaded effective configuration and `NeedDaemonReload=no`,
 not that a `daemon-reload` command was executed; keep the explicit reload instruction above.
-The command check rejects prefixes, wrappers, extra arguments and a changed working directory.
+The command check rejects lexically distinct prefixes, wrappers, arguments and working directories.
 Its single-command readback format was measured on systemd 259; unsupported serialization is
-a STOP. ON proves systemd's final environment removal and the reviewed execution identity,
-not the rest of cutover readiness. It does not attest interpreter, script or imported-code bytes.
-Keep the reviewed interpreter/checkout, configuration and environment sources unchanged
-between proof and start; if anything changes, reload and repeat. The existing owner-user trust
-boundary applies: this does not defend against an operator changing those inputs after the check.
+a STOP. ON proves systemd's final environment removal and the reviewed lexical execution identity,
+not the rest of cutover readiness. It does not resolve symlinks or attest interpreter, script or
+imported-code bytes. A wrapper behind the expected interpreter symlink can change the child
+environment while this lexical check passes. Reviewing symlink resolution is part of the existing
+owner-user trust boundary. Keep the reviewed symlink resolution, interpreter/checkout, configuration
+and environment sources unchanged between proof and start; if anything changes, reload and repeat.
+This does not defend against an operator changing those inputs after the check.
 
 Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
 activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
@@ -755,7 +757,7 @@ a readiness check.
    continuation or duplicate for this switch). Do not use an `Environment=` override or the
    repo-root `.env` as the source. Reload with `systemctl --user daemon-reload`, then repeat
    the entire pre-start proof with **`maintenance_expect=off`**. It must discover the same
-   reviewed execution identity and required file, no maintenance removal, and one exact off assignment with no conflicts;
+   reviewed lexical execution identity and required file, no maintenance removal, and one exact off assignment with no conflicts;
    otherwise STOP before restarting. `maintenance pre-start proof: OFF` permits only this
    explicitly authorized restart, not a grant or readiness claim. This verifies the loaded
    effective state, not command history; the explicit daemon-reload instruction still applies.
