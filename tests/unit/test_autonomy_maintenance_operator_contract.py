@@ -49,6 +49,8 @@ def _run_proof(
         "NeedDaemonReload": "no",
         "EnvironmentFiles": f"{env_file} (ignore_errors=no)",
         "UnsetEnvironment": SWITCH if expect == "on" else "",
+        "WorkingDirectory": str(tmp_path / "checkout"),
+        "ExecStart": _reviewed_exec_start(tmp_path),
     }
     properties.update(changed or {})
     fixture = tmp_path / "properties.json"
@@ -70,6 +72,7 @@ def _run_proof(
     fake.chmod(0o700)
     script = _block("bash", "MAINT-R1 pre-start proof")
     script = script.replace("<PRIVATE_ENV_DIR>", str(tmp_path))
+    script = script.replace("<ABSOLUTE_CHRONOS_CHECKOUT>", str(tmp_path / "checkout"))
     script = script.replace("maintenance_expect=on", f"maintenance_expect={expect}")
     return subprocess.run(
         ["bash", "-c", script],
@@ -79,6 +82,87 @@ def _run_proof(
         timeout=10,
         check=False,
     )
+
+
+def _reviewed_exec_start(tmp_path: Path) -> str:
+    python = tmp_path / "checkout/.venv/bin/python"
+    return (
+        f"{{ path={python} ; argv[]={python} scripts/run_backend.py ; ignore_errors=no ; "
+        "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+    )
+
+
+@pytest.mark.parametrize("expect", ["on", "off"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "empty",
+        "env-prefix",
+        "wrapper",
+        "different-python",
+        "extra-argv",
+        "switch-argv",
+        "ignored-errors",
+        "multiple-commands",
+        "metadata-spoof-in-argv",
+        "missing-metadata",
+        "different-working-directory",
+    ],
+)
+def test_proof_requires_the_reviewed_command_and_working_directory(
+    tmp_path: Path, expect: str, case: str
+) -> None:
+    reviewed = _reviewed_exec_start(tmp_path)
+    python = tmp_path / "checkout/.venv/bin/python"
+    variants = {
+        "empty": "",
+        "env-prefix": reviewed.replace(
+            f"path={python} ; argv[]={python}",
+            f"path=/usr/bin/env ; argv[]=/usr/bin/env {SWITCH}=off {python}",
+        ),
+        "wrapper": reviewed.replace(str(python), "/fixture/wrapper.sh"),
+        "different-python": reviewed.replace(str(python), "/usr/bin/python3"),
+        "extra-argv": reviewed.replace(
+            "scripts/run_backend.py ;", "scripts/run_backend.py extra ;"
+        ),
+        "switch-argv": reviewed.replace(
+            "scripts/run_backend.py ;", f"scripts/run_backend.py {SWITCH}=off ;"
+        ),
+        "ignored-errors": reviewed.replace("ignore_errors=no", "ignore_errors=yes"),
+        "multiple-commands": reviewed + " " + reviewed,
+        "metadata-spoof-in-argv": reviewed.replace(
+            "scripts/run_backend.py ;", "scripts/run_backend.py ; ignore_errors=no ; start_time= ;"
+        ),
+        "missing-metadata": reviewed.split(" ; start_time=", 1)[0],
+        "different-working-directory": reviewed,
+    }
+    changed = {"ExecStart": variants[case]}
+    if case == "different-working-directory":
+        changed["WorkingDirectory"] = "/another/checkout"
+    result = _run_proof(tmp_path, expect=expect, changed=changed)
+    assert result.returncode != 0, result.stdout
+
+
+@pytest.mark.parametrize("failure", ["ExecStart", "WorkingDirectory"])
+def test_execution_identity_discovery_errors_stop_the_proof(tmp_path: Path, failure: str) -> None:
+    result = _run_proof(tmp_path, failure=failure)
+    assert result.returncode != 0, result.stdout
+
+
+def test_execution_identity_matches_the_reviewed_unit_template() -> None:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(ROOT / "docs/ops/chronos-backend.service")
+    assert parser["Service"]["WorkingDirectory"] == "%h/<CHRONOS_CHECKOUT>"
+    assert parser["Service"]["ExecStart"] == (
+        "%h/<CHRONOS_CHECKOUT>/.venv/bin/python scripts/run_backend.py"
+    )
+
+
+def test_reload_readback_claims_effective_state_not_command_history() -> None:
+    text = " ".join(RUNBOOK.read_text().split())
+    assert "every systemd environment source" in text
+    assert "not that a `daemon-reload` command was executed" in text
+    assert "Reload with `systemctl --user daemon-reload`" in text
 
 
 @pytest.mark.parametrize("expect", ["on", "off"])
