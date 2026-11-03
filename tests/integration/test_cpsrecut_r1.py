@@ -101,6 +101,7 @@ def test_foreign_account_identifiers_are_not_reported() -> None:
         assert "987654321" not in reason
         assert "CHR-OTHER-SYNTHETIC" not in reason
         assert "DU7654321" not in reason
+        assert "identity conflict" not in reason
     finally:
         rig.close()
 
