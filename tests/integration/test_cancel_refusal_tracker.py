@@ -337,7 +337,10 @@ def test_direct_tracker_ingest_refuses_to_recover_stranded_cancel_pending(
     with pytest.raises(BrokerConnectionError):
         harness.service.cancel("intent-1", now=FIXED_NOW)
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING
-    # U-B recovers a stranded cancel through reconciliation after the dwell, not direct ingest.
+    # Q-Q3-1 (Muse, 2026-10-14): by design, U-B recovers through reconciliation after the
+    # dwell, not direct ingest. test_stranded_cancel_pending_recovery.py::
+    # test_v1_a_stranded_cancel_pending_recovers_through_reconciliation_after_the_dwell
+    # pins that supported path.
     trail_before = _trail(harness)
     with pytest.raises(OrderLifecycleError, match="CANCEL_PENDING -> SUBMITTED"):
         harness.tracker.ingest(
@@ -438,7 +441,10 @@ def test_a_second_cancel_of_a_stranded_cancel_pending_is_refused(
         harness.service.cancel("intent-1", now=FIXED_NOW)
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING
     broker.mode = "accept"
-    # The supported retry follows reconciliation recovery, as pinned in the sibling recovery test.
+    # Q-Q3-1 (Muse, 2026-10-14): by design, the supported retry follows reconciliation recovery.
+    # test_stranded_cancel_pending_recovery.py::
+    # test_v2_a_second_cancel_is_refused_while_pending_and_succeeds_after_the_recovery
+    # pins that supported path.
     calls_before = list(broker.cancel_calls)
     with pytest.raises(OrderMutationError, match="cancel is already pending"):
         harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
