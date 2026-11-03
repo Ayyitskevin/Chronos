@@ -685,37 +685,35 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
         ),
         (  # the net liquidation comes from somewhere else
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, getattr(account, "as_of", None), ""',
-            'return account.cash, getattr(account, "as_of", None), ""',
+            "        return (\n            account.net_liquidation,\n",
+            "        return (\n            account.cash,\n",
         ),
         (  # a broader failure is swallowed around the read
             "src/chronos/orders/submission.py",
-            "except (BrokerError, AccountSummaryFreshnessError) as error:\n"
-            '            return None, None, f"net liquidation unavailable: {error}"',
-            "except Exception as error:\n"
-            '            return None, None, f"net liquidation unavailable: {error}"',
+            "except (BrokerError, AccountSummaryFreshnessError) as error:\n            return (\n",
+            "except Exception as error:\n            return (\n",
         ),
         # D43-FIX3 (Kimi HOLD P2 @ ec32fc8): the whole consuming expression, not only the direct
         # parent of the bound name, so arithmetic or a wrapper around the read is an edit of it
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, getattr(account, "as_of", None), ""',
-            'return account.net_liquidation * 0, getattr(account, "as_of", None), ""',
+            "        return (\n            account.net_liquidation,\n",
+            "        return (\n            account.net_liquidation * 0,\n",
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, getattr(account, "as_of", None), ""',
-            'return account.net_liquidation + 1, getattr(account, "as_of", None), ""',
+            "        return (\n            account.net_liquidation,\n",
+            "        return (\n            account.net_liquidation + 1,\n",
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, getattr(account, "as_of", None), ""',
-            'return abs(account.net_liquidation), getattr(account, "as_of", None), ""',
+            "        return (\n            account.net_liquidation,\n",
+            "        return (\n            abs(account.net_liquidation),\n",
         ),
         (
             "src/chronos/orders/submission.py",
-            'return account.net_liquidation, getattr(account, "as_of", None), ""',
-            'return round(account.net_liquidation), getattr(account, "as_of", None), ""',
+            "        return (\n            account.net_liquidation,\n",
+            "        return (\n            round(account.net_liquidation),\n",
         ),
         (
             "src/chronos/orders/evidence.py",
@@ -730,11 +728,14 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
         # D43-FIX4 (reader F2, B1-B3): control flow around the read, not only the read's bytes
         (  # B1: an early return before the read
             "src/chronos/orders/submission.py",
-            "    def _read_net_liquidation(self) -> tuple[Decimal | None, "
-            "datetime | None, str]:\n        try:",
-            "    def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:\n"
+            "    def _read_net_liquidation(\n        self,\n"
+            "    ) -> tuple[Decimal | None, datetime | None, AccountSummaryProvenance, str]:\n"
+            "        try:",
+            "    def _read_net_liquidation(\n        self,\n"
+            "    ) -> tuple[Decimal | None, datetime | None, AccountSummaryProvenance, str]:\n"
             "        if self is not None:\n"
-            "            return Decimal('1000000'), ''\n"
+            "            return Decimal('1000000'), self._clock(), "
+            "AccountSummaryProvenance.VERIFIED_RESPONSE, ''\n"
             "        try:",
         ),
         (  # B2: the read made conditional
@@ -751,7 +752,8 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
             "        try:\n            account = self._connection.run(",
             "        try:\n"
             "            if getattr(self, '_stale_ok', False):\n"
-            "                return Decimal('1000000'), ''\n"
+            "                return Decimal('1000000'), self._clock(), "
+            "AccountSummaryProvenance.VERIFIED_RESPONSE, ''\n"
             "            account = self._connection.run(",
         ),
     ],
@@ -1198,7 +1200,8 @@ def test_r2_1_the_cut_is_the_type_checking_import_and_the_docstring_and_nothing_
     # nothing else in the module moved — stated as a DELTA against the retained BP-3 PASS head
     # (refs/packets/BP-3/2), not as equality to a dead head: outside the run recorder (whose AP-1
     # hook is pinned by test_ap1r1_3) every top-level statement is AST-equal once the r2 hunks
-    # (docstring, the result-type imports, the TYPE_CHECKING block) are set aside
+    # (docstring, the result-type imports, the TYPE_CHECKING block) and C's exact
+    # provenance metadata (independently pinned below) are set aside
     kept_before, _ = _recorder_delta(
         _git("show", f"{_commit_by_marker('(BP-3 r2)')}:{_REPOSITORY}")
     )
@@ -1363,10 +1366,98 @@ def test_ap1r1_2_the_chain_is_linear_and_the_version_pins_follow_its_head() -> N
     assert SCHEMA_VERSION == head_module._SCHEMA_VERSION
 
 
-def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
-    """Top-level dumps (minus the r2/AP-1 hunks) and the recorder's method bodies, separately."""
+def _without_c_account_provenance(tree: ast.Module) -> ast.Module:
+    """Admit only C's exact typed field, classifier keyword and two import names.
 
-    tree = ast.parse(source)
+    Older BP-3/AP-1 equality pins still cover every other expression. A trusted
+    default, unconditional proof or another raw projection is not normalized.
+    """
+
+    import copy
+
+    tree = copy.deepcopy(tree)
+    field = ast.dump(
+        ast.parse("provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN").body[0]
+    )
+    keyword = ast.dump(
+        ast.parse("F(provenance=account_summary_provenance(snapshot.account))")
+        .body[0]
+        .value.keywords[0]
+    )
+    body = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module in {
+            "chronos.domain.account_freshness",
+            "chronos.domain.enums",
+        }:
+            approved_name = (
+                "account_summary_provenance"
+                if node.module.endswith("account_freshness")
+                else "AccountSummaryProvenance"
+            )
+            node.names = [
+                alias for alias in node.names if (alias.name, alias.asname) != (approved_name, None)
+            ]
+            if not node.names:
+                continue
+        if isinstance(node, ast.ClassDef) and node.name == "ReconciliationAccountFacts":
+            node.body = [statement for statement in node.body if ast.dump(statement) != field]
+        if isinstance(node, ast.ClassDef) and node.name == "ReconciliationSnapshot":
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "ReconciliationAccountFacts"
+                ):
+                    call.keywords = [item for item in call.keywords if ast.dump(item) != keyword]
+        body.append(node)
+    tree.body = body
+    return tree
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("AccountSummaryProvenance.UNKNOWN", "AccountSummaryProvenance.VERIFIED_RESPONSE"),
+        (
+            "account_summary_provenance(snapshot.account)",
+            "AccountSummaryProvenance.VERIFIED_RESPONSE",
+        ),
+        (
+            "kept=True, provenance=",
+            "account_id=snapshot.account.account_id, kept=True, provenance=",
+        ),
+        ("import account_summary_provenance", "import account_summary_provenance, unexpected"),
+    ],
+)
+def test_acctfresh_metadata_cut_keeps_unapproved_proof_and_raw_projection_edits(old, new) -> None:
+    source = (
+        "from chronos.domain.account_freshness import account_summary_provenance\n"
+        "from chronos.domain.enums import AccountSummaryProvenance, ReconciliationStatus\n"
+        "class ReconciliationAccountFacts:\n"
+        "    kept: bool\n"
+        "    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN\n"
+        "class ReconciliationSnapshot:\n"
+        "    def f(self):\n"
+        "        return ReconciliationAccountFacts(kept=True, "
+        "provenance=account_summary_provenance(snapshot.account))\n"
+    )
+    expected = (
+        "from chronos.domain.enums import ReconciliationStatus\n"
+        "class ReconciliationAccountFacts:\n    kept: bool\n"
+        "class ReconciliationSnapshot:\n"
+        "    def f(self):\n        return ReconciliationAccountFacts(kept=True)\n"
+    )
+    approved, _ = _recorder_delta(source)
+    assert approved == _recorder_delta(expected)[0]
+    assert source.count(old) == 1
+    assert _recorder_delta(source.replace(old, new))[0] != approved
+
+
+def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
+    """Top-level dumps minus the pinned r2/AP-1/I-3b/C hunks, and recorder bodies."""
+
+    tree = _without_c_account_provenance(ast.parse(source))
     kept: list[str] = []
     recorder: dict[str, Any] = {}
     for node in tree.body:
@@ -1436,7 +1527,7 @@ def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_after_every_recor
     after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
     kept_before, rec_before = _recorder_delta(before)
     kept_after, rec_after = _recorder_delta(after)
-    assert kept_after == kept_before  # every other top-level statement is AST-equal to 6150839
+    assert kept_after == kept_before  # after the exact, separately pinned C metadata cut
     assert set(rec_before) == {"__init__", "record"}
     assert set(rec_before) <= set(rec_after)  # later rounds may add helpers (AP-1b did)
     # __init__: `self._sessions = sessions` was added first; the old body is kept in order
@@ -1643,7 +1734,15 @@ def test_ap1br1_2_the_r1_commit_touched_exactly_the_two_pin_files() -> None:
 # make the raw id unrecoverable from a new row: the fingerprint is still brute-forceable alone.
 
 _I3B_FACT_KEYS = frozenset(
-    {"account_fingerprint", "net_liquidation", "total_cash", "buying_power", "currency", "as_of"}
+    {
+        "account_fingerprint",
+        "net_liquidation",
+        "total_cash",
+        "buying_power",
+        "currency",
+        "as_of",
+        "provenance",
+    }
 )
 
 
@@ -1681,6 +1780,9 @@ def test_i3b_1_a_new_run_stores_no_masked_account_id_and_no_other_raw_projection
         DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
     )
     assert facts["net_liquidation"] == "100000.50" and facts["currency"] == "USD"
+    # This old synthetic view has no verified producer label. Persisting it must
+    # retain UNKNOWN rather than manufacture financial authority.
+    assert facts["provenance"] == "UNKNOWN"
     # the fix: exactly the non-raw facts, and no projection of the raw id anywhere in the row
     assert set(facts) == _I3B_FACT_KEYS, sorted(set(facts) ^ _I3B_FACT_KEYS)
     decoded = json.dumps(persisted, ensure_ascii=False)
@@ -1705,7 +1807,11 @@ def test_i3b_2_a_historical_row_with_the_masked_id_stays_readable_and_replays_by
     mask = mask_account_id(DEMO_ACCOUNT_ID)
     run_id = "periodic-00000001-20260920T150000000000Z"
     current = _snapshot(run_id).broker_snapshot_json()
-    facts = {k: v for k, v in current["account_facts"].items() if k != "masked_account_id"}
+    facts = {
+        k: v
+        for k, v in current["account_facts"].items()
+        if k not in {"masked_account_id", "provenance"}
+    }
     historical = {**current, "account_facts": {"masked_account_id": mask, **facts}}
     with database.sessions.begin() as session:
         session.add(
@@ -1782,10 +1888,10 @@ def test_i3b_2_a_historical_row_with_the_masked_id_stays_readable_and_replays_by
 
 def test_i3b_3_the_i3b_delta_is_the_field_and_the_producer_keyword_and_nothing_else() -> None:
     """The frozen-module pins set aside exactly I-3b's two deletions; this pins what they are:
-    the facts model's fields and the producer's keywords are the same six names, in order."""
+    the retained facts plus C's provenance field and producer keyword, in order."""
 
     kept = ["account_fingerprint", "net_liquidation", "total_cash", "buying_power"]
-    kept += ["currency", "as_of"]
+    kept += ["currency", "as_of", "provenance"]
     tree = ast.parse((_ROOT / _REPOSITORY).read_text(encoding="utf-8"))
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     fields = [
