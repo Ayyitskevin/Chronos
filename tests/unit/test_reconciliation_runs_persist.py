@@ -828,9 +828,7 @@ def test_3c_the_base_comparison_uses_no_frozen_sha() -> None:
     import inspect
     import re
 
-    source = inspect.getsource(
-        test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta
-    )
+    source = inspect.getsource(test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta)
     source += inspect.getsource(_packet_base_ref)
     assert re.search(r"[0-9a-f]{40}", source) is None, "a frozen sha is used as the base again"
     tree = ast.parse(inspect.getsource(sys.modules[__name__]))
