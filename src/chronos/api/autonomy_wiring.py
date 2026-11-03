@@ -798,6 +798,7 @@ class BackendGatherers:
                     total_cash_usd=summary.total_cash,
                     buying_power_usd=summary.buying_power,
                     as_of=getattr(summary, "as_of", None),
+                    provenance=account_summary_provenance(summary),
                     max_age_seconds=getattr(
                         runtime.settings, "account_summary_max_age_seconds", 30
                     ),
