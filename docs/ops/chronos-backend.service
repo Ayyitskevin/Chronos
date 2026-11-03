@@ -29,7 +29,8 @@ EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
 # CHRONOS_AUTONOMY_MAINTENANCE=off line in this EnvironmentFile and restart;
 # repo-root .env does not set the switch. EnvironmentFile beats Environment.
 # For cutover, the dedicated UnsetEnvironment drop-in in N3-CUTOVER.md wins
-# over every environment source. Verify its effective properties before EVERY
+# over every systemd environment source. Verify its effective properties and
+# reviewed direct ExecStart/working directory before EVERY
 # start; lift only by the runbook's explicit source/readback procedure.
 # P3-2: ExecStart's scripts/run_backend.py puts <checkout>/src on sys.path itself;
 # `python -m chronos.cli` below has no such shim, so without `pip install -e .` the

@@ -71,7 +71,7 @@ UnsetEnvironment=CHRONOS_AUTONOMY_MAINTENANCE
 
 Then `systemctl --user daemon-reload` and run the pre-start proof below. **Do not substitute
 `Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`: `EnvironmentFile=` overrides `Environment=`.**
-`UnsetEnvironment=` is applied last and removes the variable from every source, including an
+`UnsetEnvironment=` is applied last and removes the variable from every systemd environment source, including an
 inherited or stale `off` in the private environment file. Absence invokes the backend's safe ON
 default before assembly. A later drop-in can clear that removal; the effective-property check
 below catches it before startup. The repo-root `.env` read by Settings does not set this switch;
@@ -80,7 +80,10 @@ switch. This page authorizes no agent to edit a unit, reload it, restart a servi
 
 **Repeat this entire proof immediately before EVERY backend start/restart through step 8.**
 Replace `<PRIVATE_ENV_DIR>` with the absolute private directory discovered for this unit, as in
-the one-home check below. The required file list must be exactly the shipped backend source;
+the one-home check below, and `<ABSOLUTE_CHRONOS_CHECKOUT>` with the independently reviewed
+absolute checkout path. The expected command is the shipped unit's direct
+`.venv/bin/python scripts/run_backend.py`, with that checkout as its working directory; do not
+derive an expected command from an unreviewed override. The required file list must be exactly the shipped backend source;
 an empty, optional, additional or unexpected source, failed discovery, stale reload or missing
 final removal is a STOP. The ON branch never reads or prints private file contents. Run in Bash:
 
@@ -91,6 +94,7 @@ set -euo pipefail
 maintenance_expect=on
 backend_unit=chronos-backend.service
 expected_env_file='<PRIVATE_ENV_DIR>/chronos-backend.env'
+expected_checkout='<ABSOLUTE_CHRONOS_CHECKOUT>'
 stop_maintenance_proof() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
 unit_property() { systemctl --user show "$backend_unit" --property="$1" --value; }
 case "$expected_env_file" in /*) ;; *) stop_maintenance_proof 'replace the private directory';; esac
@@ -98,6 +102,18 @@ load_state=$(unit_property LoadState)
 [ "$load_state" = loaded ] || stop_maintenance_proof 'backend unit is not loaded'
 reload_needed=$(unit_property NeedDaemonReload)
 [ "$reload_needed" = no ] || stop_maintenance_proof 'reload the reviewed unit first'
+working_directory=$(unit_property WorkingDirectory)
+[ "$working_directory" = "$expected_checkout" ] ||
+  stop_maintenance_proof 'effective working directory differs from the reviewed checkout'
+exec_start=$(unit_property ExecStart)
+exec_identity=${exec_start%%' ; start_time='*}
+expected_exec_identity="{ path=$expected_checkout/.venv/bin/python ; argv[]=$expected_checkout/.venv/bin/python scripts/run_backend.py ; ignore_errors=no"
+[ "$exec_identity" = "$expected_exec_identity" ] ||
+  stop_maintenance_proof 'effective ExecStart differs from the reviewed direct command'
+exec_metadata=${exec_start#"$exec_identity ; "}
+exec_metadata_pattern='^start_time=[^;{}]* ; stop_time=[^;{}]* ; pid=[0-9]+ ; code=[^;{}]* ; status=[^;{}]* }$'
+[[ "$exec_metadata" =~ $exec_metadata_pattern ]] ||
+  stop_maintenance_proof 'unsupported or multiple ExecStart records'
 environment_files=$(unit_property EnvironmentFiles)
 [ "$environment_files" = "$expected_env_file (ignore_errors=no)" ] ||
   stop_maintenance_proof 'effective backend environment files differ from the reviewed source'
@@ -128,10 +144,15 @@ printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
 ```
 
 The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
-result. This proves systemd's final environment removal for the reviewed loaded unit, not the
-rest of cutover readiness. Keep the reviewed configuration and environment sources unchanged
+result. These readbacks prove the loaded effective configuration and `NeedDaemonReload=no`,
+not that a `daemon-reload` command was executed; keep the explicit reload instruction above.
+The command check rejects prefixes, wrappers, extra arguments and a changed working directory.
+Its single-command readback format was measured on systemd 259; unsupported serialization is
+a STOP. ON proves systemd's final environment removal and the reviewed execution identity,
+not the rest of cutover readiness. It does not attest interpreter, script or imported-code bytes.
+Keep the reviewed interpreter/checkout, configuration and environment sources unchanged
 between proof and start; if anything changes, reload and repeat. The existing owner-user trust
-boundary applies: this does not defend against an operator changing the unit after the check.
+boundary applies: this does not defend against an operator changing those inputs after the check.
 
 Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
 activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
@@ -734,9 +755,11 @@ a readiness check.
    continuation or duplicate for this switch). Do not use an `Environment=` override or the
    repo-root `.env` as the source. Reload with `systemctl --user daemon-reload`, then repeat
    the entire pre-start proof with **`maintenance_expect=off`**. It must discover the same
-   required file, no maintenance removal, and one exact off assignment with no conflicts;
+   reviewed execution identity and required file, no maintenance removal, and one exact off assignment with no conflicts;
    otherwise STOP before restarting. `maintenance pre-start proof: OFF` permits only this
-   explicitly authorized restart, not a grant or readiness claim. A running process never
+   explicitly authorized restart, not a grant or readiness claim. This verifies the loaded
+   effective state, not command history; the explicit daemon-reload instruction still applies.
+   A running process never
    re-reads the switch. Restart the backend and verify
    that `autonomy_maintenance` is absent from `/health`; any other fault/refusal remains a STOP.
    The normal mandate/posture/recovery gates still decide whether autonomy can start. Only then
