@@ -319,6 +319,9 @@ class Settings(BaseSettings):
     min_open_interest: Annotated[int, Field(ge=0)] = 100
     max_relative_spread: Annotated[Decimal, Field(gt=0)] = Decimal("0.20")
     max_quote_age_seconds: PositiveInt = 5
+    # Account balances may influence sizing and risk only while this fresh; the
+    # domain guard independently caps it at 30 seconds.
+    account_summary_max_age_seconds: Annotated[int, Field(ge=1, le=30)] = 30
     market_timezone: str = "America/New_York"
     max_contracts_per_order: PositiveInt = 1
     max_symbol_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.25")

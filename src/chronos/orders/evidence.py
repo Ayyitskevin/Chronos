@@ -15,6 +15,7 @@ rules.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -22,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import require_account_summary_freshness
 from chronos.domain.enums import (
     OptionRight,
     OrderIntent,
@@ -67,6 +69,7 @@ class BrokerRiskEvidenceProvider:
         settings: Settings,
         reconciliation_readiness: ReconciliationReadiness | None = None,
         intents: _OpeningCounter | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._connection = connection
         self._settings = settings
@@ -75,10 +78,19 @@ class BrokerRiskEvidenceProvider:
         # daily-opening count is UNKNOWN rather than zero — see `_opening_today`,
         # where the difference decides whether the cap binds or evaporates.
         self._intents = intents
+        # The runtime injects wall UTC for broker adapters and demo_now for the
+        # deterministic DEMO adapter. The optional fallback preserves explicit
+        # caller clocks for isolated providers and their test doubles.
+        self._clock = clock
 
     def gather(self, intent: WheelOrderIntent, *, now: datetime) -> RiskEvidence:
         readiness_before = self._reconciliation_readiness.snapshot()
         account = self._connection.run(self._connection.broker.account_summary())
+        require_account_summary_freshness(
+            getattr(account, "as_of", None),
+            now=self._clock() if self._clock is not None else now,
+            max_age_seconds=self._settings.account_summary_max_age_seconds,
+        )
         positions = self._connection.run(self._connection.broker.positions())
         open_orders = self._connection.run(self._connection.broker.open_orders())
         readiness_after = self._reconciliation_readiness.snapshot()

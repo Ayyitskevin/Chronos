@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from chronos.api.auth import require_token
 from chronos.api.dependencies import BackendState, get_state, require_writer
 from chronos.broker.base import BrokerError
+from chronos.domain.account_freshness import AccountSummaryFreshnessError
 from chronos.domain.enums import OptionRight, OrderIntent, ProductFamily
 from chronos.domain.models import ChronosModel, OptionContractSpec
 from chronos.orders.intent import (
@@ -292,7 +293,13 @@ def propose(request: OrderProposeRequest, state: WriterDep) -> ProposeResponse:
         # resolve, or an adapter that refuses the family). Surface as 502, not a
         # bare 500 — the request was well-formed; the broker could not fulfil it.
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
-    result = _service(state).propose(intent)
+    try:
+        result = _service(state).propose(intent)
+    except AccountSummaryFreshnessError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
     return ProposeResponse(
         order=_view(result.intent),
         risk_decision_id=result.risk.decision_id,

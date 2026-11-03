@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderIntent
 from chronos.domain.models import AccountSummary
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent
-from chronos.orders.risk import OrderRiskEngine
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
+from chronos.orders.risk import OrderRiskEngine
+from chronos.orders.submission import OrderSubmissionBoundary
 from tests.support.order_fakes import PAPER_ACCOUNT, FakeBroker, option_contract, paper_settings
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
@@ -49,16 +54,23 @@ def _account_summary(as_of: datetime | None) -> AccountSummary:
     )
 
 
-def _gather(summary: AccountSummary, *, now: datetime):
+def _gather(
+    summary: AccountSummary,
+    *,
+    now: datetime,
+    clock: Callable[[], datetime] | None = None,
+    broker_mode: str = "demo",
+):
     broker = _SummaryBroker(summary)
     readiness = ReconciliationReadiness()
     connection = BrokerConnectionManager(broker, readiness=readiness)
     connection.start()
-    settings = paper_settings(broker_mode="demo")
+    settings = paper_settings(broker_mode=broker_mode)
     provider = BrokerRiskEvidenceProvider(
         connection=connection,
         settings=settings,
         reconciliation_readiness=readiness,
+        clock=clock,
     )
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
@@ -110,7 +122,11 @@ def test_account_summary_exactly_at_configured_age_boundary_reaches_risk_engine(
 
 
 def test_demo_account_summary_uses_the_demo_clock_for_freshness() -> None:
-    settings, intent, evidence = _gather(_account_summary(DEMO_NOW), now=DEMO_NOW)
+    settings, intent, evidence = _gather(
+        _account_summary(DEMO_NOW),
+        now=DEMO_NOW + timedelta(hours=1),
+        clock=lambda: DEMO_NOW,
+    )
 
     decision = OrderRiskEngine(settings, persistence_key=TEST_PERSISTENCE_KEY).evaluate(
         intent,
@@ -119,3 +135,49 @@ def test_demo_account_summary_uses_the_demo_clock_for_freshness() -> None:
     )
     assert decision.decided_at == DEMO_NOW
     assert evidence.account.as_of == DEMO_NOW
+
+
+def test_account_summary_age_setting_is_positive_and_capped_at_thirty_seconds() -> None:
+    for invalid_age in (0, 31):
+        with pytest.raises(ValidationError):
+            paper_settings(account_summary_max_age_seconds=invalid_age)
+
+
+def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effects() -> None:
+    broker = _SummaryBroker(_account_summary(DEMO_NOW - timedelta(seconds=31)))
+
+    class _Connection:
+        def __init__(self) -> None:
+            self.broker = broker
+
+        def run(self, awaitable: object) -> object:
+            return asyncio.run(awaitable)  # type: ignore[arg-type]
+
+    class _Breaker:
+        called = False
+
+        def check(self, _nlv: Decimal, *, now: datetime) -> object:
+            self.called = True
+            return None
+
+    breaker = _Breaker()
+    boundary = SimpleNamespace(
+        _connection=_Connection(),
+        _clock=lambda: DEMO_NOW,
+        _settings=paper_settings(),
+        _session_drawdown=breaker,
+    )
+
+    nlv, error = OrderSubmissionBoundary._read_net_liquidation(boundary)
+    refused, reason = OrderSubmissionBoundary._drawdown_evidence(
+        boundary,
+        nlv=nlv,
+        nlv_error=error,
+        now=DEMO_NOW,
+    )
+
+    assert nlv is None
+    assert "stale" in error
+    assert refused
+    assert "without engaging the kill switch" in reason
+    assert not breaker.called
