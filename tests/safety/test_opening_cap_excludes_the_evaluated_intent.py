@@ -84,7 +84,7 @@ def test_reused_id_with_different_economics_is_not_excluded(field: str, value: o
     forged = intent.model_copy(update={field: value})
     count = _provider(repo)._opening_today(forged, now=_MORNING)
     assert count is None
-    assert _opening_check(count).status is RiskCheckStatus.FAIL
+    assert _opening_check(count).status is RiskCheckStatus.UNKNOWN
     assert repo.count_opening_since(current_account_id=_ACCOUNT, since=_MORNING) == 1
 
 
@@ -102,3 +102,27 @@ def test_foreign_account_cannot_exclude_the_persisted_intent() -> None:
     _persist(repo, intent)
     forged = intent.model_copy(update={"account_id": "DU7654321"})
     assert _provider(repo)._opening_today(forged, now=_MORNING) is None
+
+
+def test_repository_rejects_a_foreign_evaluation_in_a_valid_count_scope() -> None:
+    db = _database()
+    repo = OrderIntentRepository(db.sessions)
+    intent = _intent()
+    _persist(repo, intent)
+    with pytest.raises(ValueError, match="account"):
+        repo.count_opening_since(
+            current_account_id=_ACCOUNT,
+            since=_MORNING,
+            evaluated_intent=intent.model_copy(update={"account_id": "DU7654321"}),
+        )
+
+
+def test_identical_persisted_evaluation_can_be_repeated_without_waiving_other_rows() -> None:
+    db = _database()
+    repo = OrderIntentRepository(db.sessions)
+    repo.create(_record("prior", created_at=_MORNING), current_account_id=_ACCOUNT)
+    intent = _intent()
+    _persist(repo, intent)
+    for _ in range(2):
+        assert _provider(repo)._opening_today(intent, now=_MORNING) == 1
+    assert repo.count_opening_since(current_account_id=_ACCOUNT, since=_MORNING) == 2
