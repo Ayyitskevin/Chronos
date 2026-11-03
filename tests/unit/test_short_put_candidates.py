@@ -503,7 +503,9 @@ def test_unpriced_option_refusal_preserves_read_only_display_evidence(
     broker = _CandidateBroker()
     request_option_quotes = broker.request_option_quotes
 
-    async def return_unpriced_quotes(contracts: Sequence[OptionContract]) -> tuple[MarketQuote, ...]:
+    async def return_unpriced_quotes(
+        contracts: Sequence[OptionContract],
+    ) -> tuple[MarketQuote, ...]:
         quotes = await request_option_quotes(contracts)
         return tuple(
             quote.model_copy(
@@ -525,6 +527,7 @@ def test_unpriced_option_refusal_preserves_read_only_display_evidence(
 
     assert result.status is EligibilityStatus.NO_TRADE
     assert result.opening_actions_locked is True
+    assert set(broker.option_quote_contract_ids[-1]).isdisjoint(market_data._quote_cache)
     assert result.underlying_quote is not None
     assert result.chain is not None
     assert result.resolution is not None
