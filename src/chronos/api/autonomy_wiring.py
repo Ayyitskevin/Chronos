@@ -73,7 +73,11 @@ from chronos.autonomy import (
     TradableAssetClass,
 )
 from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
+from chronos.broker.demo import demo_now
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import (
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     BrokerAdapter,
     BrokerMode,
@@ -718,11 +722,13 @@ class BackendGatherers:
         *,
         mandate: AutonomyMandate,
         mandate_digest: str,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._runtime = runtime
         self._fingerprint = fingerprint
         self._generation = generation
         self._mandate = mandate
+        self._clock = clock
         self._managed_contracts: frozenset[tuple[int, str]] | None = None
         self._exits_this_tick: set[tuple[int, str]] = set()
         self._tick_account_id: str | None = None
@@ -745,6 +751,13 @@ class BackendGatherers:
             self._managed_contracts = self._read_managed_contracts()
             try:
                 summary = runtime.connection.run(runtime.broker.account_summary())
+                require_account_summary_freshness(
+                    getattr(summary, "as_of", None),
+                    now=self._clock() if self._clock is not None else now,
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                )
                 self._tick_account_id = summary.account_id
                 status = runtime.connection.run(runtime.broker.connection_status())
                 probe = self._probe_symbol(mandate)
@@ -1213,6 +1226,11 @@ def build_autonomy_runtime(
         process_generation,
         mandate=mandate,
         mandate_digest=canonical_digest(mandate),
+        clock=(
+            demo_now
+            if getattr(settings, "broker_mode", BrokerMode.IBKR) is BrokerMode.DEMO
+            else utc_now
+        ),
     )
     return AutonomyRuntime(
         sessions=runtime.database.sessions,

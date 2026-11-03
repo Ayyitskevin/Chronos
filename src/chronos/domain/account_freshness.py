@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from chronos.domain.enums import BrokerMode
+
 MAX_ACCOUNT_SUMMARY_AGE_SECONDS = 30
 
 
@@ -23,6 +25,14 @@ class AccountSummaryFreshnessError(ValueError):
     def __init__(self, reason: AccountSummaryFreshnessReason) -> None:
         self.reason = reason
         super().__init__(f"account summary freshness refused: {reason.value.lower()}")
+
+
+def account_summary_check_time(*, broker_mode: BrokerMode, demo_now: datetime) -> datetime:
+    """Sample wall time after a live read, or retain the deterministic DEMO clock."""
+
+    if broker_mode is BrokerMode.DEMO:
+        return demo_now
+    return datetime.now(UTC)
 
 
 def require_account_summary_freshness(

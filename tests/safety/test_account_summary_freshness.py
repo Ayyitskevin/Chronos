@@ -12,6 +12,11 @@ import pytest
 from pydantic import ValidationError
 
 from chronos.broker.connection import BrokerConnectionManager
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    AccountSummaryFreshnessReason,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import OrderIntent
 from chronos.domain.models import AccountSummary
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
@@ -138,9 +143,39 @@ def test_demo_account_summary_uses_the_demo_clock_for_freshness() -> None:
 
 
 def test_account_summary_age_setting_is_positive_and_capped_at_thirty_seconds() -> None:
+    assert paper_settings().account_summary_max_age_seconds == 30
     for invalid_age in (0, 31):
         with pytest.raises(ValidationError):
             paper_settings(account_summary_max_age_seconds=invalid_age)
+
+
+def test_account_summary_guard_hard_caps_non_settings_callers() -> None:
+    with pytest.raises(AccountSummaryFreshnessError) as refusal:
+        require_account_summary_freshness(
+            DEMO_NOW,
+            now=DEMO_NOW,
+            max_age_seconds=31,
+        )
+
+    assert refusal.value.reason is AccountSummaryFreshnessReason.INVALID_MAX_AGE
+
+
+def test_account_summary_guard_rejects_naive_timestamp_and_clock() -> None:
+    with pytest.raises(AccountSummaryFreshnessError) as timestamp_refusal:
+        require_account_summary_freshness(
+            DEMO_NOW.replace(tzinfo=None),
+            now=DEMO_NOW,
+            max_age_seconds=30,
+        )
+    assert timestamp_refusal.value.reason is AccountSummaryFreshnessReason.INVALID_TIMESTAMP
+
+    with pytest.raises(AccountSummaryFreshnessError) as clock_refusal:
+        require_account_summary_freshness(
+            DEMO_NOW,
+            now=DEMO_NOW.replace(tzinfo=None),
+            max_age_seconds=30,
+        )
+    assert clock_refusal.value.reason is AccountSummaryFreshnessReason.INVALID_CLOCK
 
 
 def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effects() -> None:

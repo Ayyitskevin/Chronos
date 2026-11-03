@@ -62,6 +62,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from chronos.api import bars as bar_plane
 from chronos.api.auth import require_proposer, require_token
 from chronos.api.dependencies import BackendState, admission_accepts, require_writer
+from chronos.domain.account_freshness import (
+    account_summary_check_time,
+    require_account_summary_freshness,
+)
+from chronos.domain.enums import BrokerMode
 from chronos.domain.models import ChronosModel
 from chronos.marketdata.bars import BarInterval
 from chronos.supervisor import evidence_bundles, evidence_kinds, ingress, proposers
@@ -550,6 +555,18 @@ def compose_served_document(
 
     try:
         summary = runtime.connection.run(runtime.broker.account_summary())
+        settings = getattr(runtime, "settings", None)
+        broker_mode = getattr(settings, "broker_mode", BrokerMode.DEMO)
+        demo_clock = (
+            runtime.connection.run(runtime.broker.server_time())
+            if settings is not None and broker_mode is BrokerMode.DEMO
+            else now
+        )
+        require_account_summary_freshness(
+            getattr(summary, "as_of", None),
+            now=account_summary_check_time(broker_mode=broker_mode, demo_now=demo_clock),
+            max_age_seconds=getattr(settings, "account_summary_max_age_seconds", 30),
+        )
         positions = runtime.connection.run(runtime.broker.positions())
         orders = runtime.order_management.list_orders()
     except Exception:

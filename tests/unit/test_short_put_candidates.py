@@ -493,6 +493,29 @@ def test_fresh_empty_account_ranks_puts_in_one_serialized_read_only_run() -> Non
     assert market_data.active_subscription_count == 0
 
 
+@pytest.mark.parametrize(
+    ("as_of", "reason"),
+    [
+        (NOW - timedelta(seconds=31), "STALE"),
+        (NOW + timedelta(microseconds=1), "FUTURE_DATED"),
+    ],
+)
+def test_stale_or_future_account_summary_locks_candidate_capital(
+    as_of: datetime,
+    reason: str,
+) -> None:
+    summary = _account(as_of=as_of)
+    broker = _CandidateBroker(account_first=summary, account_second=summary)
+    service, runner, _reader, _market_data = _service(broker, _reconciliation())
+
+    result = service.evaluate("AAPL")
+
+    assert result.status is EligibilityStatus.NO_TRADE
+    assert result.resolution is None
+    assert any(reason in refusal for refusal in result.reasons)
+    assert runner.run_calls == 1
+
+
 def test_snapshot_captured_during_reconciliation_uses_post_reconcile_clock() -> None:
     clock_calls = 0
 

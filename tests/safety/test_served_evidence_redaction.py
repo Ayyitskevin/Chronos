@@ -16,6 +16,7 @@ and recorded, never sent.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -126,6 +127,31 @@ def test_the_served_document_carries_no_raw_account_id(
     assert facts["account"]["net_liquidation"] == "250000.00"
     assert facts["positions"][0]["quantity"] == "3"
     assert facts["positions"][0]["contract"]["symbol"] == "SPY"
+
+
+def test_stale_account_summary_refuses_a_served_evidence_bundle(
+    demo_env: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    raw_id_planted: None,
+) -> None:
+    with _boot_with_evidence(monkeypatch, demo_env) as client:
+        original = demo_module.DemoBroker.account_summary
+
+        async def stale_summary(self: Any) -> Any:
+            summary = await original(self)
+            return summary.model_copy(
+                update={"as_of": demo_module.demo_now() - timedelta(seconds=31)}
+            )
+
+        monkeypatch.setattr(demo_module.DemoBroker, "account_summary", stale_summary)
+        response = client.post(
+            "/autonomy/evidence",
+            json={"kind": "backend_served", "symbols": ["SPY"], "lookback_days": 5},
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["refusal"] == "EVIDENCE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("provider", sorted(_PROVIDERS))

@@ -529,6 +529,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         )
         short_put_risk_preview = ShortPutRiskPreviewService(
             short_put_candidates,
+            account_summary_max_age_seconds=settings.account_summary_max_age_seconds,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
         short_put_demo_what_if = ShortPutDemoWhatIfService(

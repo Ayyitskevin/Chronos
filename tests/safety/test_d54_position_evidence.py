@@ -278,6 +278,45 @@ def test_a_held_managed_position_sizes_the_close_and_reaches_handoff_in_the_head
     assert pe.ACCOUNT not in " ".join(outcome.sizing.constraints)
 
 
+def test_stale_cycle_account_summary_refuses_before_sizing_evidence(
+    database: Database,
+) -> None:
+    broker = pe.Broker()
+    broker.summary_as_of = pe.NOW - timedelta(seconds=31)
+    mandate = _mandate()
+    runtime = pe.runtime(broker, database)
+    gatherers = BackendGatherers(
+        runtime,
+        pe.FINGERPRINT,
+        7,
+        mandate=mandate,
+        mandate_digest="d" * 64,
+    )
+
+    facts = gatherers.cycle_facts(mandate)(pe.NOW)
+
+    assert facts is None
+    assert broker.position_calls == 0
+
+
+def test_cycle_account_summary_uses_the_injected_demo_clock(database: Database) -> None:
+    broker = pe.Broker()
+    mandate = _mandate()
+    runtime = pe.runtime(broker, database, broker_mode=BrokerMode.DEMO)
+    gatherers = BackendGatherers(
+        runtime,
+        pe.FINGERPRINT,
+        7,
+        mandate=mandate,
+        mandate_digest="d" * 64,
+        clock=lambda: pe.NOW,
+    )
+
+    facts = gatherers.cycle_facts(mandate)(pe.NOW + timedelta(hours=1))
+
+    assert facts is not None
+
+
 def test_the_chained_cycle_record_carries_the_position_provenance(
     session: Session, database: Database
 ) -> None:
