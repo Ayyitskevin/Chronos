@@ -245,15 +245,17 @@ def _identity_conflict_reason(
                 and observation.permanent_id == persisted_permanent_id
             ):
                 return (
-                    f"identity conflict: broker {kind} carrying the persisted permanent id "
-                    "reports a different order reference"
+                    f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
+                    f"persisted permId {persisted_permanent_id} reports order reference "
+                    f"{observation.order_ref!r}"
                 )
             if observation.order_ref == order_ref and _permid_contradicts(
                 observation.permanent_id, persisted_permanent_id
             ):
                 return (
-                    f"identity conflict: owned order reference reports a conflicting "
-                    f"permanent id on a broker {kind}"
+                    f"identity conflict: owned order reference reports permId "
+                    f"{observation.permanent_id} on broker {kind} "
+                    f"{observation.broker_order_id}, persisted {persisted_permanent_id}"
                 )
     return None
 
