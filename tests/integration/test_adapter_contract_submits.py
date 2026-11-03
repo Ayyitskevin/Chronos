@@ -120,7 +120,7 @@ async def test_a_fill_moves_positions_executions_and_cash_consistently(
 async def test_a_fill_moves_the_position_by_contract_identity_through_the_real_adapter(
     s2_harness: BrokerHarness,
 ) -> None:
-    """U1's fill case with the one assertion the adapter can honour: identity, not equality."""
+    """Independently pin the real adapter's fill using option identity, not metadata equality."""
 
     hook = s2_harness.cause_fill
     assert hook is not None

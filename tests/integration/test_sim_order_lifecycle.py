@@ -825,6 +825,9 @@ def test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order(venue: _
         assert result.lifecycle is expected_ack
         if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
             assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
             report = h.service.reconcile_on_restart_report(now=h.now)
             assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
@@ -862,6 +865,9 @@ def test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal(venue: _Ve
         assert result.lifecycle is expected_ack
         if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
             assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
             report = h.service.reconcile_on_restart_report(now=h.now)
             assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
