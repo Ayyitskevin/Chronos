@@ -488,12 +488,10 @@ class DemoBroker:
         send_guard: BrokerSendGuard | None = None,
     ) -> OrderSubmission:
         del request, send_guard
-        self._require_connection()
         raise BrokerRefusedBeforeSend("DemoBroker cannot submit orders")
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission:
         del request
-        self._require_connection()
         raise BrokerRefusedBeforeSend("DemoBroker cannot modify orders")
 
     async def cancel_order(self, broker_order_id: int) -> CancellationResult:
