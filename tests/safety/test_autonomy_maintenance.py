@@ -22,6 +22,39 @@ from tests.safety.test_proposal_route_autonomy_admission import _World
 SWITCH = "CHRONOS_AUTONOMY_MAINTENANCE"
 
 
+@pytest.mark.parametrize(
+    ("value", "inhibited"),
+    [
+        (None, True),
+        ("on", True),
+        ("", True),
+        ("0", True),
+        ("false", True),
+        ("disabled", True),
+        ("offline", True),
+        ("off-later", True),
+        ("not-off", True),
+        ("o ff", True),
+        ("off;", True),
+        ("off\0", True),
+        ("\uff4f\uff46\uff46", True),
+        ("\u043eff", True),
+        ("of", True),
+        ("off", False),
+        ("OFF", False),
+        ("  Off\n", False),
+        ("\toff\t", False),
+    ],
+)
+def test_only_the_complete_normalized_off_token_lifts(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, inhibited: bool
+) -> None:
+    # A mapping permits the NUL case: os.environ cannot contain it, but the
+    # reader's malformed-input contract must still refuse it.
+    monkeypatch.setattr(maintenance, "environ", {} if value is None else {SWITCH: value})
+    assert maintenance.autonomy_maintenance_enabled() is inhibited
+
+
 @pytest.fixture
 def world(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[_World, threading.Event]:
     world = _World(tmp_path, monkeypatch)
@@ -105,6 +138,15 @@ def test_maintenance_or_unknown_state_never_builds_or_activates(
         with caplog.at_level(logging.CRITICAL), rig.boot() as (client, app):
             assert_inhibited(client, app, ticked)
             assert any(getattr(r, "event", None) == "autonomy_maintenance" for r in caplog.records)
+            messages = [
+                r.getMessage()
+                for r in caplog.records
+                if getattr(r, "event", None) == "autonomy_maintenance"
+            ]
+            assert any(
+                "process environment only" in message and "repo-root .env is ignored" in message
+                for message in messages
+            )
     finally:
         logger.removeHandler(caplog.handler)
 
