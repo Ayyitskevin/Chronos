@@ -317,6 +317,26 @@ def test_cycle_account_summary_uses_the_injected_demo_clock(database: Database) 
     assert facts is not None
 
 
+def test_cycle_account_summary_rechecks_after_the_blocking_market_reads(
+    database: Database,
+) -> None:
+    broker = pe.Broker()
+    mandate = _mandate()
+    checks = iter((pe.NOW + timedelta(seconds=29), pe.NOW + timedelta(seconds=31)))
+    gatherers = BackendGatherers(
+        pe.runtime(broker, database, broker_mode=BrokerMode.DEMO),
+        pe.FINGERPRINT,
+        7,
+        mandate=mandate,
+        mandate_digest="d" * 64,
+        clock=lambda: next(checks),
+    )
+
+    facts = gatherers.cycle_facts(mandate)(pe.NOW)
+
+    assert facts is None
+
+
 def test_the_chained_cycle_record_carries_the_position_provenance(
     session: Session, database: Database
 ) -> None:

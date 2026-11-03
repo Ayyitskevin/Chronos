@@ -484,6 +484,7 @@ def make_broker(
     # published and the timeout is the sole possible outcome, passes a small one.
     quote_timeout_seconds: float = 30.0,
     on_connection_uncertain: Callable[[str], object] | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> IBKRBroker:
     settings = Settings(
         broker_mode=BrokerMode.IBKR,
@@ -493,7 +494,7 @@ def make_broker(
     return IBKRBroker(
         settings,
         client=client,
-        clock=lambda: FIXED_NOW,
+        clock=clock or (lambda: FIXED_NOW),
         quote_timeout_seconds=quote_timeout_seconds,
         on_connection_uncertain=on_connection_uncertain,
     )
@@ -611,6 +612,22 @@ async def test_account_summary_requires_every_authoritative_value() -> None:
     client.account_values = [value for value in client.account_values if value.tag != "BuyingPower"]
     with pytest.raises(BrokerDataError, match="BuyingPower"):
         await broker.account_summary()
+
+
+@pytest.mark.asyncio
+async def test_account_summary_timestamp_is_local_read_time_even_for_unchanged_cached_rows() -> None:
+    client = FakeIB()
+    local_time = [FIXED_NOW]
+    broker = make_broker(client, clock=lambda: local_time[0])
+    await broker.connect()
+
+    first = await broker.account_summary()
+    local_time[0] += timedelta(hours=1)
+    second = await broker.account_summary()
+
+    assert second.model_copy(update={"as_of": first.as_of}) == first
+    assert first.as_of == FIXED_NOW
+    assert second.as_of == FIXED_NOW + timedelta(hours=1)
 
 
 @pytest.mark.asyncio

@@ -92,6 +92,33 @@ def _gather(
         connection.close()
 
 
+def _gather_with_direct_runner(
+    summary: AccountSummary,
+    *,
+    clock: Callable[[], datetime],
+):
+    broker = _SummaryBroker(summary)
+    readiness = ReconciliationReadiness()
+    settings = paper_settings()
+    provider = BrokerRiskEvidenceProvider(
+        connection=SimpleNamespace(
+            broker=broker,
+            run=lambda awaitable: asyncio.run(awaitable),
+        ),
+        settings=settings,
+        reconciliation_readiness=readiness,
+        clock=clock,
+    )
+    intent = build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        contract=option_contract(),
+        quantity=1,
+        limit_price=Decimal("1.20"),
+    )
+    return provider.gather(intent, now=DEMO_NOW)
+
+
 @pytest.mark.parametrize(
     ("as_of", "reason"),
     [
@@ -141,6 +168,32 @@ def test_demo_account_summary_uses_the_demo_clock_for_freshness() -> None:
     )
     assert decision.decided_at == DEMO_NOW
     assert evidence.account.as_of == DEMO_NOW
+
+
+def test_risk_evidence_accepts_a_twenty_nine_second_summary_without_delay() -> None:
+    evidence = _gather_with_direct_runner(
+        _account_summary(DEMO_NOW),
+        clock=lambda: DEMO_NOW + timedelta(seconds=29),
+    )
+
+    assert evidence.account.as_of == DEMO_NOW
+
+
+def test_risk_evidence_rechecks_after_the_blocking_broker_reads() -> None:
+    checks = iter(
+        (
+            DEMO_NOW + timedelta(seconds=29),
+            DEMO_NOW + timedelta(seconds=31),
+        )
+    )
+
+    with pytest.raises(AccountSummaryFreshnessError) as refusal:
+        _gather_with_direct_runner(
+            _account_summary(DEMO_NOW),
+            clock=lambda: next(checks),
+        )
+
+    assert refusal.value.reason is AccountSummaryFreshnessReason.STALE
 
 
 def test_live_account_summary_clock_uses_wall_time_after_the_read() -> None:
