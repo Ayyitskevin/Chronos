@@ -180,7 +180,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
     # 58 at CPSRECUT-R1B (official_ibkr.py's completed-orders flight cleanup rotates its
     # generated source-inventory fingerprint).
-    assert len(historical_candidates) == 58
+    # 59 at CPSRECUT-R2 (official_ibkr.py's timeout-generation quarantine rotates it again).
+    assert len(historical_candidates) == 59
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
