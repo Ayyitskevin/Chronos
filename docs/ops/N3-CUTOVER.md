@@ -57,6 +57,93 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 `--restore-into` (N3-4, step 4); never calls the broker; has no `--force`. Every refusal is a typed
 `code` in its JSON and exit `2`; `--apply` writes nothing before every check has passed.
 
+## Backend autonomy maintenance — required before every cutover boot
+
+Autonomy maintenance is ON by default. Before the FIRST backend start in this cutover
+(including the restart after recovery acknowledgement), the Kevin-authorized operator must
+install a dedicated `chronos-backend.service.d/90-autonomy-maintenance.conf` drop-in:
+
+```ini
+# MAINT-R1 cutover drop-in
+[Service]
+UnsetEnvironment=CHRONOS_AUTONOMY_MAINTENANCE
+```
+
+Then `systemctl --user daemon-reload` and run the pre-start proof below. **Do not substitute
+`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`: `EnvironmentFile=` overrides `Environment=`.**
+`UnsetEnvironment=` is applied last and removes the variable from every source, including an
+inherited or stale `off` in the private environment file. Absence invokes the backend's safe ON
+default before assembly. A later drop-in can clear that removal; the effective-property check
+below catches it before startup. The repo-root `.env` read by Settings does not set this switch;
+the unit's `chronos-backend.env` does become process environment. No key/token is part of the
+switch. This page authorizes no agent to edit a unit, reload it, restart a service or lift it.
+
+**Repeat this entire proof immediately before EVERY backend start/restart through step 8.**
+Replace `<PRIVATE_ENV_DIR>` with the absolute private directory discovered for this unit, as in
+the one-home check below. The required file list must be exactly the shipped backend source;
+an empty, optional, additional or unexpected source, failed discovery, stale reload or missing
+final removal is a STOP. The ON branch never reads or prints private file contents. Run in Bash:
+
+```bash
+# MAINT-R1 pre-start proof
+(
+set -euo pipefail
+maintenance_expect=on
+backend_unit=chronos-backend.service
+expected_env_file='<PRIVATE_ENV_DIR>/chronos-backend.env'
+stop_maintenance_proof() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
+unit_property() { systemctl --user show "$backend_unit" --property="$1" --value; }
+case "$expected_env_file" in /*) ;; *) stop_maintenance_proof 'replace the private directory';; esac
+load_state=$(unit_property LoadState)
+[ "$load_state" = loaded ] || stop_maintenance_proof 'backend unit is not loaded'
+reload_needed=$(unit_property NeedDaemonReload)
+[ "$reload_needed" = no ] || stop_maintenance_proof 'reload the reviewed unit first'
+environment_files=$(unit_property EnvironmentFiles)
+[ "$environment_files" = "$expected_env_file (ignore_errors=no)" ] ||
+  stop_maintenance_proof 'effective backend environment files differ from the reviewed source'
+final_removals=$(unit_property UnsetEnvironment)
+case "$maintenance_expect" in
+  on)
+    case " $final_removals " in
+      *" CHRONOS_AUTONOMY_MAINTENANCE "*) ;;
+      *) stop_maintenance_proof 'final name-only maintenance removal is missing';;
+    esac
+    ;;
+  off)
+    case "$final_removals" in
+      *CHRONOS_AUTONOMY_MAINTENANCE*) stop_maintenance_proof 'maintenance removal is still effective';;
+    esac
+    counts=$(awk '
+      !/^[[:space:]]*#/ && index($0, "CHRONOS_AUTONOMY_MAINTENANCE") {
+        named++; if ($0 == "CHRONOS_AUTONOMY_MAINTENANCE=off") exact++
+      }
+      END {printf "%d %d", named, exact}
+    ' "$expected_env_file")
+    [ "$counts" = '1 1' ] || stop_maintenance_proof 'require one exact off assignment and no conflicts'
+    ;;
+  *) stop_maintenance_proof 'expected mode must be on or off';;
+esac
+printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
+)
+```
+
+The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
+result. This proves systemd's final environment removal for the reviewed loaded unit, not the
+rest of cutover readiness. Keep the reviewed configuration and environment sources unchanged
+between proof and start; if anything changes, reload and repeat. The existing owner-user trust
+boundary applies: this does not defend against an operator changing the unit after the check.
+
+Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
+activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
+must be NOT_EXPECTED, and the server emits a CRITICAL `autonomy_maintenance` event. Normal
+backend initialization and reconciliation continue. `/health/live` stays 200; `/health/ready`
+is 503 while this intentional startup inhibit is set. A diagnostic `/health` 200 alone is not
+proof. Preserve the existing mandate quarantine as an additional precaution, not a substitute
+for this backend guard. Lift only at step 9, on Kevin's explicit word, using the single-source
+OFF procedure there. There is no in-process or automatic lift. Even without a configured
+mandate, the default inhibit intentionally reports NOT_READY; do not lift it merely to silence
+a readiness check.
+
 ## Before you start
 
 - **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** **And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) AND the recovery-key-only escrow change have merged to main too.** **And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 rehearsal) has merged to main too.** The STOP at the top of this page says how to check. If any is
@@ -178,93 +265,6 @@ nothing of yours — the four sentinel directories it leaves at the live names i
   print("SCHEMA_VERSION = 17")
   '
   ```
-
-## Backend autonomy maintenance — required before every cutover boot
-
-Autonomy maintenance is ON by default. Before the FIRST backend start in this cutover
-(including the restart after recovery acknowledgement), the Kevin-authorized operator must
-install a dedicated `chronos-backend.service.d/90-autonomy-maintenance.conf` drop-in:
-
-```ini
-# MAINT-R1 cutover drop-in
-[Service]
-UnsetEnvironment=CHRONOS_AUTONOMY_MAINTENANCE
-```
-
-Then `systemctl --user daemon-reload` and run the pre-start proof below. **Do not substitute
-`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`: `EnvironmentFile=` overrides `Environment=`.**
-`UnsetEnvironment=` is applied last and removes the variable from every source, including an
-inherited or stale `off` in the private environment file. Absence invokes the backend's safe ON
-default before assembly. A later drop-in can clear that removal; the effective-property check
-below catches it before startup. The repo-root `.env` read by Settings does not set this switch;
-the unit's `chronos-backend.env` does become process environment. No key/token is part of the
-switch. This page authorizes no agent to edit a unit, reload it, restart a service or lift it.
-
-**Repeat this entire proof immediately before EVERY backend start/restart through step 8.**
-Replace `<PRIVATE_ENV_DIR>` with the absolute private directory discovered for this unit, as in
-the one-home check below. The required file list must be exactly the shipped backend source;
-an empty, optional, additional or unexpected source, failed discovery, stale reload or missing
-final removal is a STOP. The ON branch never reads or prints private file contents. Run in Bash:
-
-```bash
-# MAINT-R1 pre-start proof
-(
-set -euo pipefail
-maintenance_expect=on
-backend_unit=chronos-backend.service
-expected_env_file='<PRIVATE_ENV_DIR>/chronos-backend.env'
-stop_maintenance_proof() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
-unit_property() { systemctl --user show "$backend_unit" --property="$1" --value; }
-case "$expected_env_file" in /*) ;; *) stop_maintenance_proof 'replace the private directory';; esac
-load_state=$(unit_property LoadState)
-[ "$load_state" = loaded ] || stop_maintenance_proof 'backend unit is not loaded'
-reload_needed=$(unit_property NeedDaemonReload)
-[ "$reload_needed" = no ] || stop_maintenance_proof 'reload the reviewed unit first'
-environment_files=$(unit_property EnvironmentFiles)
-[ "$environment_files" = "$expected_env_file (ignore_errors=no)" ] ||
-  stop_maintenance_proof 'effective backend environment files differ from the reviewed source'
-final_removals=$(unit_property UnsetEnvironment)
-case "$maintenance_expect" in
-  on)
-    case " $final_removals " in
-      *" CHRONOS_AUTONOMY_MAINTENANCE "*) ;;
-      *) stop_maintenance_proof 'final name-only maintenance removal is missing';;
-    esac
-    ;;
-  off)
-    case "$final_removals" in
-      *CHRONOS_AUTONOMY_MAINTENANCE*) stop_maintenance_proof 'maintenance removal is still effective';;
-    esac
-    counts=$(awk '
-      !/^[[:space:]]*#/ && index($0, "CHRONOS_AUTONOMY_MAINTENANCE") {
-        named++; if ($0 == "CHRONOS_AUTONOMY_MAINTENANCE=off") exact++
-      }
-      END {printf "%d %d", named, exact}
-    ' "$expected_env_file")
-    [ "$counts" = '1 1' ] || stop_maintenance_proof 'require one exact off assignment and no conflicts'
-    ;;
-  *) stop_maintenance_proof 'expected mode must be on or off';;
-esac
-printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
-)
-```
-
-The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
-result. This proves systemd's final environment removal for the reviewed loaded unit, not the
-rest of cutover readiness. Keep the reviewed configuration and environment sources unchanged
-between proof and start; if anything changes, reload and repeat. The existing owner-user trust
-boundary applies: this does not defend against an operator changing the unit after the check.
-
-Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
-activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
-must be NOT_EXPECTED, and the server emits a CRITICAL `autonomy_maintenance` event. Normal
-backend initialization and reconciliation continue. `/health/live` stays 200; `/health/ready`
-is 503 while this intentional startup inhibit is set. A diagnostic `/health` 200 alone is not
-proof. Preserve the existing mandate quarantine as an additional precaution, not a substitute
-for this backend guard. Lift only at step 9, on Kevin's explicit word, using the single-source
-OFF procedure there. There is no in-process or automatic lift. Even without a configured
-mandate, the default inhibit intentionally reports NOT_READY; do not lift it merely to silence
-a readiness check.
 
 ## Steps
 
