@@ -495,21 +495,6 @@ FINDINGS: dict[str, str] = {
         "boundary refuses earlier), but the adapter does not make the not-sent proof "
         "the real adapter makes."
     ),
-    "U1-F3": (
-        "FakeBroker has no order book: canned answers that never move. open_orders, "
-        "executions and positions are constructor tuples; executions(since) ignores "
-        "'since' (tests/support/order_fakes.py:101-103); cancel_order answers CANCELLED "
-        "for any id and removes nothing (:157-165); submit_order records the call but "
-        "never adds the order (:118-145); there is no fill model (SURVEY G1/G2)."
-    ),
-    "U1-F4": (
-        "FakeBroker does not enforce the pre-send conditions the real adapter does "
-        "(OfficialIBKRBroker._reverify_for_order_path, submit_order, modify_order, "
-        "official_ibkr.py:2152-2177, 2291-2312, 2385-2395): it answers while "
-        "'disconnected' (connection_status is always connected, order_fakes.py:78-87), "
-        "previews and submits for any account, submits without request.transmit, "
-        "accepts modify_order, and cancels orders it does not own."
-    ),
 }
 
 #: (harness name, test function name) -> finding id. Each entry is a STRICT xfail.
