@@ -742,6 +742,20 @@ def _reconciliation_logs() -> Iterator[list[logging.LogRecord]]:
         logger.setLevel(previous)
 
 
+def _reconciliation_log_text(records: list[logging.LogRecord]) -> str:
+    formatter = logging.Formatter()
+    output: list[str] = []
+    for record in records:
+        output.append(record.getMessage())
+        if record.exc_info:
+            output.append(formatter.formatException(record.exc_info))
+        if record.exc_text:
+            output.append(record.exc_text)
+        if record.stack_info:
+            output.append(record.stack_info)
+    return "\n".join(output)
+
+
 def test_local_reader_failure_is_generic_pending_without_exception_disclosure() -> None:
     broker = _ScriptedBroker()
     coordinator, _, _ = _coordinator(
@@ -764,8 +778,9 @@ def test_local_reader_failure_is_generic_pending_without_exception_disclosure() 
         if getattr(record, "event", None) == "reconciliation_local_evidence_read_failed"
     ]
     assert len(events) == 1
-    assert ACCOUNT_ID not in events[0].getMessage()
-    assert "database failed" not in events[0].getMessage()
+    text = _reconciliation_log_text(records)
+    assert ACCOUNT_ID not in text
+    assert "database failed" not in text
 
 
 def test_broker_read_failure_returns_generic_pending_without_snapshot() -> None:
@@ -789,8 +804,9 @@ def test_broker_read_failure_returns_generic_pending_without_snapshot() -> None:
         if getattr(record, "event", None) == "reconciliation_broker_observation_failed"
     ]
     assert len(events) == 1
-    assert ACCOUNT_ID not in events[0].getMessage()
-    assert "disconnected" not in events[0].getMessage()
+    text = _reconciliation_log_text(records)
+    assert ACCOUNT_ID not in text
+    assert "disconnected" not in text
 
 
 def test_connection_manager_timeout_returns_typed_pending() -> None:
