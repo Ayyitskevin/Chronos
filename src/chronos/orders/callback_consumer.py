@@ -148,6 +148,7 @@ class CallbackOutcome(StrEnum):
 
     APPLIED = "applied"
     IDENTITY_REFINED = "identity_refined"
+    FILL_PROGRESS_RECORDED = "fill_progress_recorded"
     NO_CHANGE = "no_change"
     ALREADY_RECORDED = "already_recorded"
     PAIRED = "paired"
@@ -1202,6 +1203,11 @@ class CallbackConsumer:
             return CallbackOutcome.LIFECYCLE_CONTRADICTION, {"lifecycle": lifecycle.value}
         if result.lifecycle_changed:
             return CallbackOutcome.APPLIED, {"lifecycle": lifecycle.value}
+        if result.fill_progress_recorded:
+            return CallbackOutcome.FILL_PROGRESS_RECORDED, {
+                "lifecycle": lifecycle.value,
+                "identity_refined": result.identity_refined,
+            }
         if result.identity_refined:
             return CallbackOutcome.IDENTITY_REFINED, {"lifecycle": lifecycle.value}
         if self._tracker_intent_status(intent_id) is not intent:

@@ -885,7 +885,9 @@ class OrderRestartReconciler:
                     broker_status=update.lifecycle,
                     transition_applied=outcome.lifecycle_changed,
                     reason=(
-                        "identity evidence refined; lifecycle unchanged"
+                        "fill progress recorded; lifecycle unchanged"
+                        if outcome.fill_progress_recorded and not outcome.lifecycle_changed
+                        else "identity evidence refined; lifecycle unchanged"
                         if outcome.identity_refined and not outcome.lifecycle_changed
                         else "matching broker order or execution observed"
                     ),
@@ -1458,24 +1460,38 @@ class OrderRestartReconciler:
                     )
                 )
                 continue
-            with self._epochs_held(plan.epochs) as current:
-                if current:
-                    won = self._tracker.record_planned_transition(
+            try:
+                with self._epochs_held(plan.epochs) as current:
+                    if current:
+                        won = self._tracker.record_planned_transition(
+                            intent_id=intent.intent_id,
+                            current_account_id=current_account_id,
+                            from_status=intent.status,
+                            to_status=plan.to_status,
+                            event_key=plan.event_key,
+                            source=plan.source
+                            or (
+                                "FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"
+                            ),
+                            broker_order_id=plan.broker_order_id,
+                            permanent_id=plan.permanent_id,
+                            client_id=plan.client_id,
+                            filled_quantity=plan.filled,
+                            remaining_quantity=plan.remaining,
+                            evidence=dict(plan.evidence),
+                            now=now,
+                        )
+            except RecordedFillsAdvanced as refused:
+                unresolved.append(
+                    RestartOrderObservation(
                         intent_id=intent.intent_id,
-                        current_account_id=current_account_id,
-                        from_status=intent.status,
-                        to_status=plan.to_status,
-                        event_key=plan.event_key,
-                        source=plan.source
-                        or ("FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"),
-                        broker_order_id=plan.broker_order_id,
-                        permanent_id=plan.permanent_id,
-                        client_id=plan.client_id,
-                        filled_quantity=plan.filled,
-                        remaining_quantity=plan.remaining,
-                        evidence=dict(plan.evidence),
-                        now=now,
+                        local_status=intent.status,
+                        broker_status=plan.to_status,
+                        transition_applied=False,
+                        reason=f"fill_floor_conflict: RecordedFillsAdvanced: {refused}",
                     )
+                )
+                continue
             if not current:
                 unresolved.append(
                     RestartOrderObservation(

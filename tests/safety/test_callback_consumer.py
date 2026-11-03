@@ -741,6 +741,22 @@ def test_5e_a_late_working_status_after_fill_never_regresses_the_lifecycle(rig: 
     ]
 
 
+def test_5e_a_same_status_fill_increase_is_recorded_as_fill_progress(rig: _Rig) -> None:
+    rig.status(_ORDER, "PendingCancel", 0, 10, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+    rig.status(_ORDER, "PendingCancel", 1, 9, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert rig.intent_status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.harness.tracker.recorded_filled_quantity(
+        "intent-1", current_account_id=PAPER_ACCOUNT
+    ) == Decimal("1")
+    assert _outcomes(rig.harness) == [
+        CallbackOutcome.APPLIED.value,
+        CallbackOutcome.FILL_PROGRESS_RECORDED.value,
+    ]
+
+
 def test_5e_a_contradicting_terminal_is_typed_never_a_no_op(rig: _Rig) -> None:
     rig.status(_ORDER, "Filled", 1, 0, 1.25, _PERM, _CLIENT)
     rig.status(_ORDER, "Cancelled", 1, 0, 1.25, _PERM, _CLIENT)
