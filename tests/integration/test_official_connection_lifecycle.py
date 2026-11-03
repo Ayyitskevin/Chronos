@@ -305,6 +305,11 @@ def test_handshake_diagnostics_select_only_bounded_current_gateway_codes() -> No
         old_notices + current_notices,
         limit=3,
     ) == (902, 903, 904)
+    assert official_module._new_gateway_notice_codes(
+        old_notices,
+        old_notices + ("[326] current-session refusal",),
+        limit=3,
+    ) == (326,)
 
 
 # --- 4. handshake timeouts, wrong account -------------------------------------------------
