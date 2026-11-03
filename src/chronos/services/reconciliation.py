@@ -15,7 +15,9 @@ from typing import Any, Literal, Protocol, TypeVar
 from pydantic import AwareDatetime, Field
 
 from chronos.broker.base import Broker
+from chronos.domain.account_freshness import account_summary_provenance
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -77,6 +79,7 @@ class ReconciliationAccountView(ChronosModel):
     buying_power: Decimal = Field(ge=0)
     currency: str
     as_of: AwareDatetime
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN
 
 
 class ReconciliationPositionView(ChronosModel):
@@ -882,6 +885,7 @@ def _snapshot_view(
             buying_power=account.buying_power,
             currency=account.currency,
             as_of=account.as_of,
+            provenance=account_summary_provenance(account),
         ),
         positions=tuple(
             ReconciliationPositionView(

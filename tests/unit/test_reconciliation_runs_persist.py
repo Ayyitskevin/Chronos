@@ -480,7 +480,7 @@ def _account_summary_reads(source: str) -> list[str]:
             yield node
 
     def is_freshness_guard_use(node: ast.AST) -> bool:
-        """Exclude the new timestamp-only guard from the economic read-consumer pin."""
+        """Exclude the timestamp/provenance guard from the economic read-consumer pin."""
 
         for parent in chain(node):
             if (
@@ -621,11 +621,11 @@ def _account_summary_reads(source: str) -> list[str]:
 
 
 def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> None:
-    """BP-3 left the reads untouched; H1B1 may carry the submission stamp to its final guard.
+    """BP-3 left the reads untouched; H1B1/C carry stamp and proof to the final guard.
 
     The expected source is still derived from the merge-base, with only the three exact tuple
-    changes needed to carry ``as_of`` out of ``_read_net_liquidation``. This keeps the original
-    read scan effective without freezing out the reviewed freshness repair.
+    changes needed to carry ``as_of`` and provenance out of ``_read_net_liquidation``. All
+    balance expressions and control paths remain pinned; this admits only the C metadata.
 
     D-53 (Kevin K-20261028-002): the pin compares the reads themselves (``_account_summary_reads``),
     not the whole of ``orders/evidence.py`` and ``orders/submission.py``, so a later safety fix
@@ -646,15 +646,17 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
                 (
                     "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
                     "def _read_net_liquidation(self) "
-                    "-> tuple[Decimal | None, datetime | None, str]:",
+                    "-> tuple[Decimal | None, datetime | None, AccountSummaryProvenance, str]:",
                 ),
                 (
                     'return None, f"net liquidation unavailable: {error}"',
-                    'return None, None, f"net liquidation unavailable: {error}"',
+                    "return None, None, AccountSummaryProvenance.UNKNOWN, "
+                    'f"net liquidation unavailable: {error}"',
                 ),
                 (
                     'return account.net_liquidation, ""',
-                    'return account.net_liquidation, getattr(account, "as_of", None), ""',
+                    'return account.net_liquidation, getattr(account, "as_of", None), '
+                    'account_summary_provenance(account), ""',
                 ),
             )
             for old, new in replacements:
@@ -664,7 +666,7 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
         assert _account_summary_reads(before), f"{path} at {base[:12]}: no AccountSummary read"
         assert _account_summary_reads(expected) == _account_summary_reads(after), (
             f"{path} differs from the merge-base {base[:12]} with {ref}: this branch edited a "
-            "live AccountSummary read beyond the approved H1B1 freshness delta"
+            "live AccountSummary read beyond the approved H1B1/C metadata delta"
         )
 
 

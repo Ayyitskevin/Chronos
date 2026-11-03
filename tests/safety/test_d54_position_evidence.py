@@ -53,6 +53,7 @@ from chronos.autonomy import (
     VersionPins,
 )
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     BrokerAdapter,
     BrokerMode,
     DataQuality,
@@ -1092,6 +1093,7 @@ def test_a_submitting_mode_still_refuses_a_held_position_at_reconciled_proven_st
         intent,
         RiskEvidence(
             account=AccountSummary(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 account_id=PAPER_ACCOUNT,
                 net_liquidation=Decimal(100_000),
                 total_cash=Decimal(60_000),
@@ -1165,3 +1167,39 @@ def test_a_held_position_is_refused_by_the_real_reconciler_and_order_plane_joine
             order_plane_handoff(app, is_writer=lambda: True)(intent)
     finally:
         app.close()
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_account_provenance_gates_autonomy_sizing_facts(
+    database: Database,
+    verified: bool,
+) -> None:
+    from chronos.domain.enums import AccountSummaryProvenance
+
+    class ProvenanceBroker(pe.Broker):
+        async def account_summary(self):
+            summary = await super().account_summary()
+            summary.provenance = (
+                AccountSummaryProvenance.VERIFIED_RESPONSE
+                if verified
+                else AccountSummaryProvenance.UNKNOWN
+            )
+            return summary
+
+    broker = ProvenanceBroker()
+    mandate = _mandate()
+    gatherers = BackendGatherers(
+        pe.runtime(broker, database),
+        pe.FINGERPRINT,
+        7,
+        mandate=mandate,
+        mandate_digest="d" * 64,
+        clock=lambda: pe.NOW,
+    )
+    facts = gatherers.cycle_facts(mandate)(pe.NOW)
+    if verified:
+        assert facts is not None
+        assert facts.account.total_cash_usd == Decimal("60000")
+    else:
+        assert facts is None
+    assert broker.position_calls == 0

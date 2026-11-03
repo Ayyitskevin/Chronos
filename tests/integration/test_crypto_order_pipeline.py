@@ -35,6 +35,7 @@ from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     IBEnvironment,
     OrderIntent,
     OrderLifecycle,
@@ -75,6 +76,7 @@ def _crypto_settings(**overrides: object) -> Settings:
 
 def _crypto_account() -> AccountSummary:
     return AccountSummary(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=PAPER_ACCOUNT,
         net_liquidation=Decimal("100000"),
         total_cash=Decimal("80000"),

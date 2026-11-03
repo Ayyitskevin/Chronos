@@ -25,6 +25,7 @@ from chronos.config.limits import (
     MAX_OPTION_SELECTION_OTHER_ASSETS,
 )
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DemoCase,
@@ -65,6 +66,7 @@ class AccountSummary(ChronosModel):
     buying_power: Decimal = Field(ge=0)
     currency: str = "USD"
     as_of: AwareDatetime
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN
 
 
 class UnderlyingContract(ChronosModel):

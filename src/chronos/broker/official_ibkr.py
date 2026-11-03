@@ -64,6 +64,7 @@ from chronos.config.limits import (
 )
 from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -690,6 +691,7 @@ def account_summary_from_rows(
     *,
     expected_account: str,
     as_of: datetime,
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN,
 ) -> AccountSummary:
     values: dict[str, Decimal] = {}
     currency = "USD"
@@ -717,6 +719,7 @@ def account_summary_from_rows(
         buying_power=values["BuyingPower"],
         currency=currency,
         as_of=as_of,
+        provenance=provenance,
     )
 
 
@@ -1186,6 +1189,7 @@ class OfficialIBKRBroker:
             [(expected, tag, value, currency) for _, tag, value, currency in relevant],
             expected_account=expected,
             as_of=datetime.now(tz=UTC),
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         )
 
     async def positions(self) -> tuple[BrokerPosition, ...]:

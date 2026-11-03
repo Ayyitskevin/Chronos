@@ -24,6 +24,7 @@ from chronos.broker.demo import DemoBroker
 from chronos.config.settings import Settings
 from chronos.domain.account_freshness import (
     AccountSummaryFreshnessError,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import (
@@ -1020,6 +1021,7 @@ class ShortPutDemoApprovalService:
         try:
             require_account_summary_freshness(
                 getattr(snapshot.account, "as_of", None),
+                provenance=account_summary_provenance(snapshot.account),
                 now=completed_at,
                 max_age_seconds=settings.account_summary_max_age_seconds,
             )

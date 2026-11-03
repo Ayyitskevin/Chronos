@@ -32,6 +32,13 @@ class BrokerAdapter(StrEnum):
     IB_ASYNC = "ib_async"
 
 
+class AccountSummaryProvenance(StrEnum):
+    """Adapter evidence of a direct response, never of broker valuation time."""
+
+    UNKNOWN = "UNKNOWN"
+    VERIFIED_RESPONSE = "VERIFIED_RESPONSE"
+
+
 class DataQuality(StrEnum):
     LIVE = "LIVE"
     FROZEN = "FROZEN"

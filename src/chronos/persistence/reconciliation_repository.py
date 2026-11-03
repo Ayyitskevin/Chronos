@@ -46,7 +46,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from chronos.domain.enums import ReconciliationStatus
+from chronos.domain.account_freshness import account_summary_provenance
+from chronos.domain.enums import AccountSummaryProvenance, ReconciliationStatus
 from chronos.domain.models import ChronosModel
 from chronos.persistence.acknowledgement_repository import (
     ACKNOWLEDGEMENT_KIND,
@@ -100,6 +101,7 @@ class ReconciliationAccountFacts(ChronosModel):
     buying_power: Any
     currency: str
     as_of: AwareDatetime
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN
 
 
 class ReconciliationSnapshot(ChronosModel):
@@ -150,6 +152,7 @@ class ReconciliationSnapshot(ChronosModel):
                 buying_power=str(snapshot.account.buying_power),
                 currency=snapshot.account.currency,
                 as_of=snapshot.account.as_of,
+                provenance=account_summary_provenance(snapshot.account),
             )
             positions = tuple(_position_entry(view) for view in snapshot.positions)
             open_orders = tuple(

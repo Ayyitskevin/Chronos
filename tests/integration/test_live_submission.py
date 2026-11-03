@@ -26,6 +26,7 @@ from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend, BrokerSend
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -117,6 +118,7 @@ class LiveSpyBroker(FakeBroker):
         if self.account_summary_error is not None:
             raise self.account_summary_error
         return AccountSummary(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             account_id=self.account_id,
             net_liquidation=self.nlv,
             total_cash=Decimal("80000"),
@@ -152,6 +154,7 @@ class _CannedEvidence:
         readiness = self._readiness.snapshot()
         return RiskEvidence(
             account=AccountSummary(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 account_id=LIVE_ACCOUNT,
                 net_liquidation=Decimal("100000"),
                 total_cash=Decimal("80000"),
@@ -1049,3 +1052,34 @@ def test_a_live_boundary_with_no_bound_lease_verifier_transmits_nothing(
         assert stored is not None and stored.status is not OrderLifecycle.SUBMISSION_UNKNOWN
     finally:
         harness.close()
+
+
+def test_unverified_account_refuses_live_submit_without_drawdown_effects(
+    live: _LiveHarness,
+) -> None:
+    class DrawdownSpy:
+        called = False
+
+        def check(self, _nlv: Decimal, *, now: datetime):
+            self.called = True
+            raise AssertionError("unverified balance reached the drawdown breaker")
+
+    live.arm()
+    intent = _live_intent()
+    _confirmed(live, intent)
+    summary = live.connection.run(live.broker.account_summary()).model_copy(
+        update={"provenance": AccountSummaryProvenance.UNKNOWN}
+    )
+
+    async def unverified_summary():
+        return summary
+
+    live.broker.account_summary = unverified_summary
+    breaker = DrawdownSpy()
+    live.boundary._session_drawdown = breaker
+    outcome = _submit(live, intent)
+    _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
+    assert "unverified_provenance" in outcome.detail
+    assert not breaker.called
+    assert not live.kill_switch.is_engaged()
+    assert live.broker.submit_calls == []
