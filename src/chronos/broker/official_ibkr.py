@@ -1373,8 +1373,10 @@ class OfficialIBKRBroker:
 
         app = self._require_app()
         flight = self.bridge.start_completed_orders()
+        request_sent = False
         try:
             app.reqCompletedOrders(True)
+            request_sent = True
             done = await asyncio.get_running_loop().run_in_executor(
                 None, flight.done.wait, _REQUEST_TIMEOUT_S
             )
@@ -1387,7 +1389,10 @@ class OfficialIBKRBroker:
                     records.append(record)
             return tuple(records)
         finally:
-            self.bridge.release_completed_orders(flight)
+            self.bridge.release_completed_orders(
+                flight,
+                quarantine_late_callbacks=request_sent,
+            )
 
     def _completed_record(self, contract: Any, order: Any, order_state: Any) -> BrokerOrder | None:
         order_ref = str(getattr(order, "orderRef", "") or "")

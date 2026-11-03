@@ -26,6 +26,7 @@ def test_late_completed_order_stream_is_quarantined_from_retry(
 
     assert retry.items == []
     assert not retry.done.is_set()
+    assert "retired request generation 1" in caplog.text
     assert "FOREIGN" not in caplog.text
     assert "987654321" not in caplog.text
 
