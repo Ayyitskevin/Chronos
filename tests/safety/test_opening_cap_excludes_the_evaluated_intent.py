@@ -95,7 +95,9 @@ def test_unpersisted_intent_does_not_exclude_another_row() -> None:
     assert _provider(repo)._opening_today(_intent(), now=_MORNING) == 1
 
 
-def test_foreign_account_cannot_exclude_the_persisted_intent() -> None:
+def test_foreign_account_is_refused_by_the_account_scope() -> None:
+    # The provider derives current_account_id from this forged intent, so the
+    # existing bound-scope check refuses before the new evaluated-account guard.
     db = _database()
     repo = OrderIntentRepository(db.sessions)
     intent = _intent()
@@ -105,16 +107,28 @@ def test_foreign_account_cannot_exclude_the_persisted_intent() -> None:
 
 
 def test_repository_rejects_a_foreign_evaluation_in_a_valid_count_scope() -> None:
+    # Keep the count scope VALID to reach the new guard with a forged evaluation.
+    # The sole production caller passes intent.account_id as current_account_id,
+    # making this comparison tautological there: defence in depth for other callers.
     db = _database()
     repo = OrderIntentRepository(db.sessions)
     intent = _intent()
     _persist(repo, intent)
-    with pytest.raises(ValueError, match="account"):
+    assert (
+        repo.count_opening_since(
+            current_account_id=_ACCOUNT, since=_MORNING, evaluated_intent=intent
+        )
+        == 0
+    )
+    with pytest.raises(
+        ValueError, match=r"^Evaluated intent account does not match the count scope$"
+    ):
         repo.count_opening_since(
             current_account_id=_ACCOUNT,
             since=_MORNING,
             evaluated_intent=intent.model_copy(update={"account_id": "DU7654321"}),
         )
+    assert repo.count_opening_since(current_account_id=_ACCOUNT, since=_MORNING) == 1
 
 
 def test_identical_persisted_evaluation_can_be_repeated_without_waiving_other_rows() -> None:

@@ -982,6 +982,30 @@ def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill(venue: _Ven
         assert h.sent_order_count == 1
 
 
+def test_daily_opening_cap_boundaries_through_propose(venue: _Venue) -> None:
+    # U3F1 r1, adapted from builder-opus55's review probe: exercise persist ->
+    # gather -> evaluate, not the provider/engine's private count-check seams.
+    # Prior counts 2/3/4 are limit-1/limit/limit+1. The fifth must still count
+    # the rejected fourth. Dropping evaluated_intent or filtering REJECTED kills this.
+    settings_factory = paper_settings if venue.kind == "sim" else official_transmit_settings
+    with harness(venue, settings=settings_factory(max_opening_orders_per_day=3)) as h:
+        for number, letter in enumerate("ABCDE", start=1):
+            intent_id = f"boundary-intent-{number}"
+            result = h.propose(h.buy(quantity=number, ref=_ref(letter), intent_id=intent_id))
+            failed = {c.name: c.detail for c in result.risk.checks if c.status.value != "PASS"}
+
+            assert result.risk.approved is (number <= 3), (number, failed)
+            if number <= 3:
+                assert failed == {}
+            else:
+                assert set(failed) == {"max_opening_orders_per_day"}
+                assert (
+                    f"{number} would exceed the 3 daily cap" in failed["max_opening_orders_per_day"]
+                )
+                assert h.status(intent_id) is OrderLifecycle.REJECTED
+            assert h.sent_order_count == 0
+
+
 def test_a_buy_the_sim_account_cannot_fund_is_refused_by_risk(venue: _Venue) -> None:
     # Fails if the cash check stops reading the sim's account summary. The positive
     # control proves the same check passes just under the line (100000 cash, 10% buffer).
