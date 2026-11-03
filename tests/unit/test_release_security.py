@@ -180,7 +180,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
     # 58 at XFIX-D (demo.py: typed pre-send refusals supersede its CB-1 source fingerprint).
     # 59 at XFIX-D r1 (demo.py: disconnected refusals supersede its initial XFIX-D fingerprint).
-    assert len(historical_candidates) == 59
+    # 60 at U1-F1 (demo.py: removing a cancelled order supersedes XFIX-D r1's fingerprint).
+    assert len(historical_candidates) == 60
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
