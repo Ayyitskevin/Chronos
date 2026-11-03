@@ -598,7 +598,9 @@ class CallbackBridge:
     def start_completed_orders(self) -> _SingleFlight:
         with self._lock:
             if self._completed_orders is not None and not self._completed_orders.done.is_set():
-                raise RuntimeError("a completed-orders request is already in flight")
+                raise BrokerDataError(
+                    "a completed-orders request is already in flight; reconnect to reset the stream"
+                )
             flight = _SingleFlight()
             self._completed_orders = flight
             return flight

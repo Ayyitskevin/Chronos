@@ -77,6 +77,15 @@ class IngestOutcome:
 _NOTHING_RECORDED = IngestOutcome(lifecycle_changed=False, identity_refined=False)
 
 
+@dataclass(frozen=True, slots=True)
+class PersistedIdentities:
+    """Every distinct non-null broker identity persisted for one intent."""
+
+    permanent_ids: frozenset[int]
+    client_ids: frozenset[int]
+    broker_order_ids: frozenset[int]
+
+
 class OrderStatusUpdate(ChronosModel):
     """One normalized broker order-status observation for a known intent."""
 
@@ -455,6 +464,26 @@ class OrderTracker:
         distinct values fail closed with :class:`OrderIdentityConflict` (design r3 §2.1).
         """
         return self._single_identity(intent_id, "broker_order_id", current_account_id)
+
+    def persisted_identities(
+        self, intent_id: str, *, current_account_id: str
+    ) -> PersistedIdentities:
+        """Distinct non-null identity sets across all persisted events for an intent."""
+
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+
+        def distinct(field: str) -> frozenset[int]:
+            return frozenset(
+                int(value)
+                for value in (getattr(event, field) for event in events)
+                if value is not None
+            )
+
+        return PersistedIdentities(
+            permanent_ids=distinct("permanent_id"),
+            client_ids=distinct("client_id"),
+            broker_order_ids=distinct("broker_order_id"),
+        )
 
     def _single_identity(self, intent_id: str, field: str, current_account_id: str) -> int | None:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
