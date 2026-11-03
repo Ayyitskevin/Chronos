@@ -617,6 +617,13 @@ class CallbackBridge:
         if flight is not None:
             flight.done.set()
 
+    def release_completed_orders(self, flight: _SingleFlight) -> None:
+        """Release exactly the request that returned, failed to send, or timed out."""
+
+        with self._lock:
+            if self._completed_orders is flight:
+                self._completed_orders = None
+
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).
 

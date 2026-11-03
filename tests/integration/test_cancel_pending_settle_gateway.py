@@ -240,14 +240,12 @@ def test_a_second_pass_after_the_settle_changes_nothing(
 # --- Daybreak P3-1: an unanswered completed-orders read must not poison later passes ----------
 
 
-def test_P3_1_a_timed_out_completed_orders_read_is_a_typed_hold_until_reconnect(
+def test_P3_1_a_timed_out_completed_orders_read_releases_the_flight(
     world: tuple[Rig, OfficialIBKRBroker],
     gateway: fake_ibapi.FakeGateway,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stream has no request id, so the unanswered flight is never overlapped: every later
-    pass on the same connection holds with the typed reason (it used to raise RuntimeError out
-    of the whole pass); a reconnect clears it and the next pass settles."""
+    """A timeout is a typed hold, but it cannot poison every later same-session request."""
 
     from chronos.broker import official_ibkr as official_ibkr_module
 
@@ -256,16 +254,10 @@ def test_P3_1_a_timed_out_completed_orders_read_is_a_typed_hold_until_reconnect(
     _cancel(rig, adapter)
     answer = gateway.completed_orders
     monkeypatch.setattr(gateway, "completed_orders", lambda client, api_only: None)  # silent
-    for _ in range(2):
-        report = _at(rig)
-        assert rig.status() is CP
-        assert any("completed-orders evidence is not available" in r for r in issues(report))
-    monkeypatch.setattr(gateway, "completed_orders", answer)
-    report = _at(rig)  # same connection: the old flight is still outstanding
+    report = _at(rig)
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
-    rig.connection.run(adapter.disconnect())
-    rig.connection.run(adapter.connect())
+    monkeypatch.setattr(gateway, "completed_orders", answer)
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
 

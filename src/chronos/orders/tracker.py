@@ -361,6 +361,7 @@ class OrderTracker:
         remaining_quantity: Decimal,
         evidence: dict[str, object],
         now: datetime,
+        expected_identities: PersistedIdentities,
     ) -> bool:
         """One lifecycle CAS planned by the reconciler from proven broker evidence.
 
@@ -385,6 +386,11 @@ class OrderTracker:
             evidence=evidence,
             occurred_at=now,
             enforce_from_status=True,
+            expected_identity_sets=(
+                expected_identities.permanent_ids,
+                expected_identities.client_ids,
+                expected_identities.broker_order_ids,
+            ),
         )
 
     def fill_figures(
