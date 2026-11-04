@@ -20,6 +20,7 @@ import pytest
 from tests.support import fake_ibapi
 from tests.support.settle_rig import NOW, Rig, issues, make_rig
 
+from chronos.broker.base import BrokerDataError
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.domain.enums import OrderLifecycle
 
@@ -258,9 +259,11 @@ def test_P3_1_a_timed_out_completed_orders_read_requires_reconnect(
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
     monkeypatch.setattr(gateway, "completed_orders", answer)
+    with pytest.raises(BrokerDataError, match="reconnect"):
+        rig.connection.run(adapter.completed_orders())
     report = _at(rig)
     assert rig.status() is CP
-    assert any("reconnect" in r for r in issues(report))
+    assert any("completed-orders evidence is not available" in r for r in issues(report))
     adapter.bridge.reset_for_reconnect()
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
