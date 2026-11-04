@@ -27,11 +27,10 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.base import CompletedOrderEvidence
 from chronos.broker.connection import BrokerConnectionManager
-from chronos.domain.enums import ConnectionState, OrderLifecycle
+from chronos.domain.enums import ConnectionState, OrderLifecycle, TERMINAL_ORDER_LIFECYCLES
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.state_machine import (
-    TERMINAL_ORDER_LIFECYCLES,
     OrderLifecycleError,
     OrderLifecycleMachine,
 )
