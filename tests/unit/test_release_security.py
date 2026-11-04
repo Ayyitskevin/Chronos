@@ -180,7 +180,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
     # 58 at FILLFLOOR r3 (the regenerated capability matrix's source-inventory fingerprint).
     # 59 at FILLFLOOR r6 (the superseded capability-matrix fingerprint moved to history).
-    assert len(historical_candidates) == 59
+    # 60 and 61 at FILLFLOOR r7 (stale generated demo and official adapter fingerprints).
+    assert len(historical_candidates) == 61
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

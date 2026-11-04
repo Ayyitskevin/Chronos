@@ -224,8 +224,8 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | src/chronos/runtime.py | `2ecea133b2a5a4d82df0610f5262292841b31c6fe19ba8da99f7f595cf12c1fd` |
 | src/chronos/api/autonomy_wiring.py | `29abdc7ac8a3a9487dc55d17f21d81a5bf68e97c771e5e84c17643b2afc57747` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
-| src/chronos/broker/demo.py | `5fc99d52d4ce0360349e15c0d6db010e28ecd88e9149cc58a60f61b7cfb72396` |
-| src/chronos/broker/official_ibkr.py | `a8c43cac1553e400ecfa5243576b451787153214c88eaae133ba7409e9828d9a` |
+| src/chronos/broker/demo.py | `aebe0ac32b69c6f53fe5555fce5d8d05659bb753322099d399f98873abd25f43` |
+| src/chronos/broker/official_ibkr.py | `7ec9b673ff9faf66945eec3c8966d8f8f0f19532daf4b5d71318863a7b6bc516` |
 | src/chronos/broker/ibkr.py | `db77599924803d3c4a5faf59fb4238f901e509307b5d4895a43b39bcd28e50ae` |
 
 Machine-readable detail: [`capability-matrix.json`](capability-matrix.json).

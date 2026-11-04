@@ -2724,15 +2724,20 @@ class OfficialIBKRBroker:
         raw_status = str(payload[2]) if payload and payload[0] == "orderStatus" else ""
         filled_quantity: Decimal | None = None
         if payload and payload[0] == "orderStatus" and len(payload) > 3 and payload[3] is not None:
+            quantity_problem: str | None = "cancel acknowledgement fill figures were unreadable"
             try:
-                filled_quantity = Decimal(str(payload[3]))
-            except (InvalidOperation, TypeError, ValueError) as error:
-                raise BrokerDataError(
-                    f"cancel acknowledgement for order {broker_order_id} had an invalid fill figure"
-                ) from error
-            if not filled_quantity.is_finite() or filled_quantity < 0:
-                raise BrokerDataError(
-                    f"cancel acknowledgement for order {broker_order_id} had an invalid fill figure"
+                candidate_filled = Decimal(str(payload[3]))
+                candidate_remaining = Decimal(str(payload[4]))
+            except (InvalidOperation, IndexError, TypeError, ValueError):
+                pass
+            else:
+                quantity_problem = quantity_refusal(candidate_filled, candidate_remaining)
+                if quantity_problem is None:
+                    filled_quantity = candidate_filled
+            if quantity_problem is not None:
+                self.bridge.notices.append(
+                    f"[order-quantity] cancel acknowledgement for order {broker_order_id}: "
+                    f"{quantity_problem}; fill figure treated as absent"
                 )
         lowered = raw_status.lower()
         if lowered in {"cancelled", "apicancelled"}:
