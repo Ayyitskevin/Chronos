@@ -13,6 +13,16 @@ and the durable kill switch. After the owner activates an approved AutonomyManda
 approved model may originate trading decisions without per-order approval, inside that
 mandate's bounds.
 
+The backend additionally inhibits autonomy startup unless its process environment explicitly
+sets `CHRONOS_AUTONOMY_MAINTENANCE=off` (MAINT-BUILD, D-59(b)). Missing, invalid or
+unreadable state means maintenance ON. The decision is latched before backend assembly:
+no autonomy builder, activation, `mandate_activated` record or scheduled autonomy tick while
+held. The operator sees `autonomy_maintenance` in `/health` and a CRITICAL log. Only a
+Kevin-authorized operator's explicit configuration change and restart lifts it; no polling,
+HTTP action or recovery acknowledgement auto-lifts it. Reconciliation and inspection remain
+available. Existing mandate, posture, recovery and order gates still apply after a lift.
+See `docs/limitations.md` and `docs/ops/N3-CUTOVER.md` for the process-environment contract.
+
 The model's authority is narrow by construction:
 
 - It may act **only** by emitting a typed `AITradeDecision` through the single deterministic
