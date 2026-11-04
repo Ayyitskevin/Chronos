@@ -237,8 +237,9 @@ _GATE: dict[str, tuple[str, ...]] = {
         "chronos-backend`), acknowledge nothing, and stop here.**",
         "That includes another reason in the log or the 409 (`state_directory_lost`, "
         "`marker_unreadable`, `installation_mismatch`, `restore_pending`), another startup fault "
-        "beside `recovery_unverified`, and no hold at all: `startup_faults: none` here means the "
-        "marker was not where the backend looks, so the live-safety state this host ran with is "
+        "besides `autonomy_maintenance` and `recovery_unverified`, and no hold at all: "
+        "`autonomy_maintenance` without `recovery_unverified` here means the marker was not where "
+        "the backend looks, so the live-safety state this host ran with is "
         "missing.",
         "`python -m chronos.cli campaign status` and `campaign preflight` cannot show this reason: "
         "until the restart after your acknowledgement they report the fresh store's missing "
@@ -267,20 +268,17 @@ _GATE: dict[str, tuple[str, ...]] = {
         "chronos-backend` → `active`, then the `/health` and `/autonomy/alerts` commands above "
         "again, but not the `grep`: the log still holds the held boot's `recovery_hold_engaged` "
         "line, which proves nothing now. They must print:",
-        "`startup_faults: none`: the hold is cleared.",
-        "`HTTP 200`: writes are allowed (the body lists unacknowledged alerts; it may hold the "
-        "mandate alert below instead of `[]`).",
+        "`startup_faults: autonomy_maintenance`: only the deliberate autonomy inhibit remains; "
+        "the recovery hold is cleared.",
+        "`HTTP 200`: the read succeeds; the body lists any unacknowledged alerts instead of `[]`.",
         "`reconciliation: RECONCILED` with `reconciliation=RUNNING`: startup reconciliation ran "
         "and the refresher runs (`STARTING` in the first seconds: re-run).",
-        "`autonomy=NOT_EXPECTED` is right until step 9, for one of two reasons: no "
-        "`AUTONOMY_MANDATE_FILE` is configured, or the configured mandate still carries the "
-        "unkeyed fingerprint.",
-        "Then the log says `Persistent mandate is scoped to a different account; autonomy stays "
-        'inert`, and the alert list holds `"kind":"autonomy.mandate_invalid"`.',
-        "Step 9 re-authors the mandate; autonomy starts after it.",
-        "**Anything else (a startup fault, a 409, `reconciliation` not `RECONCILED`, "
-        "`autonomy=RUNNING`: a grant active before step 8 proved the key) means stop the backend "
-        "and stop here.**",
+        "`autonomy=NOT_EXPECTED` is required until step 9: maintenance blocks assembly even "
+        "when a configured mandate already matches the new keyed fingerprint.",
+        "No mandate activation may be written during these boots.",
+        "**Anything else (a startup fault other than `autonomy_maintenance`, a 409, "
+        "`reconciliation` not `RECONCILED`, or `autonomy=RUNNING`) means stop the backend and "
+        "stop here.**",
         "A bare `/health` 200 is not this proof.",
         "Steps 8 and 9 start only after it passes.",
     ),
@@ -699,6 +697,8 @@ def test_c1rf2_each_part_starts_its_own_paragraph() -> None:
 def demo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     """A synthetic deployment: store, state files, token and log all under ``tmp_path``."""
 
+    monkeypatch.setenv("CHRONOS_AUTONOMY_MAINTENANCE", "on")
+
     monkeypatch.chdir(ROOT)
     monkeypatch.setenv("BROKER_MODE", "demo")
     monkeypatch.setenv("ALLOW_ORDER_TRANSMIT", "false")
@@ -861,10 +861,10 @@ def test_c1rf2_a_synthetic_cutover_boots_held_then_clears_after_the_acknowledgem
         assert getattr(client.app.state, "autonomy", None) is None  # no mandate configured
 
 
-def test_c1rf2_an_unkeyed_mandate_stays_inert_after_the_gate_for_the_named_reason(
+def test_c1rf2_maintenance_quarantines_the_grant_then_explicit_lift_checks_its_fingerprint(
     demo_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Before step 9 the configured grant still carries the old fingerprint: inert, and said."""
+    """No grant is loaded before step 9; after explicit lift its fingerprint still gates it."""
 
     with _boot():
         pass
@@ -888,6 +888,15 @@ def test_c1rf2_an_unkeyed_mandate_stays_inert_after_the_gate_for_the_named_reaso
         assert health == _gate_blocks()[3].splitlines()[:3]
         alerts = client.get("/autonomy/alerts", headers=_token(demo_env))
         assert alerts.status_code == 200
+        assert alerts.json() == []  # the builder never loads even this configured grant
+    monkeypatch.setenv("CHRONOS_AUTONOMY_MAINTENANCE", "off")
+    with _boot() as client:
+        assert getattr(client.app.state, "autonomy", None) is None
+        assert (
+            "autonomy_maintenance"
+            not in client.get("/health").json()["observations"]["startup_faults"]
+        )
+        alerts = client.get("/autonomy/alerts", headers=_token(demo_env))
         assert '"kind":"autonomy.mandate_invalid"' in alerts.text
     log = (demo_env / "logs" / "chronos.log").read_text(encoding="utf-8")
     assert "Persistent mandate is scoped to a different account; autonomy stays inert" in log

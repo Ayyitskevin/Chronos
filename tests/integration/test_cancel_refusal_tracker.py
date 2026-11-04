@@ -329,20 +329,7 @@ def test_a_replayed_attempt_is_refused_rather_than_sent_without_a_durable_mark(
     assert _status(harness) is OrderLifecycle.SUBMITTED
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=OrderLifecycleError,
-    reason=(
-        "Q-Q3-1 (ruled by Muse, 2026-10-14): by design under U-B the state machine has no "
-        "CANCEL_PENDING -> SUBMITTED edge, so this direct tracker.ingest of a venue SUBMITTED "
-        "still raises. A stranded CANCEL_PENDING whose order still works IS recovered, through "
-        "reconciliation after the dwell (the repository CAS, source RECONCILE_RECOVERY): pinned "
-        "by test_v1_a_stranded_cancel_pending_recovers_through_reconciliation_after_the_dwell "
-        "in tests/integration/test_stranded_cancel_pending_recovery.py. This pins the path "
-        "recovery deliberately does NOT take."
-    ),
-)
-def test_a_stranded_cancel_pending_recovers_when_the_venue_shows_the_order_working(
+def test_direct_tracker_ingest_refuses_to_recover_stranded_cancel_pending(
     rig: tuple[_Harness, _CancelBroker],
 ) -> None:
     harness, broker = rig
@@ -350,11 +337,17 @@ def test_a_stranded_cancel_pending_recovers_when_the_venue_shows_the_order_worki
     with pytest.raises(BrokerConnectionError):
         harness.service.cancel("intent-1", now=FIXED_NOW)
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING
-    outcome = harness.tracker.ingest(
-        _update(OrderLifecycle.SUBMITTED, "0", "1"), current_account_id=PAPER_ACCOUNT
-    )
-    assert outcome.lifecycle_changed is True
-    assert _status(harness) is OrderLifecycle.SUBMITTED
+    # Q-Q3-1 (Muse, 2026-10-14): by design, U-B recovers through reconciliation after the
+    # dwell, not direct ingest. test_stranded_cancel_pending_recovery.py::
+    # test_v1_a_stranded_cancel_pending_recovers_through_reconciliation_after_the_dwell
+    # pins that supported path.
+    trail_before = _trail(harness)
+    with pytest.raises(OrderLifecycleError, match="CANCEL_PENDING -> SUBMITTED"):
+        harness.tracker.ingest(
+            _update(OrderLifecycle.SUBMITTED, "0", "1"), current_account_id=PAPER_ACCOUNT
+        )
+    assert _status(harness) is OrderLifecycle.CANCEL_PENDING
+    assert _trail(harness) == trail_before
 
 
 # --- Q3 r1: the completion write is a compare-and-set too (Daybreak P2-1) ----------------------
@@ -439,22 +432,7 @@ def test_a_second_cancel_of_a_pending_order_says_what_state_it_is_in(
         harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=OrderMutationError,
-    reason=(
-        "Q-Q3-1 (ruled by Muse, 2026-10-14), the other half: by design a second cancel while "
-        "CANCEL_PENDING is refused by the explicit already-pending guard in "
-        "OrderCancellationService.cancel (mutations.py, before the cancellable-status check). "
-        "Under U-B "
-        "the operator's route is reconciliation: after the dwell the intent is recovered to a "
-        "cancellable state and the same cancel then succeeds: pinned by "
-        "test_v2_a_second_cancel_is_refused_while_pending_and_succeeds_after_the_recovery in "
-        "tests/integration/test_stranded_cancel_pending_recovery.py. This pins the direct retry "
-        "that stays refused."
-    ),
-)
-def test_a_stranded_cancel_pending_can_be_cancelled_again(
+def test_a_second_cancel_of_a_stranded_cancel_pending_is_refused(
     rig: tuple[_Harness, _CancelBroker],
 ) -> None:
     harness, broker = rig
@@ -463,5 +441,12 @@ def test_a_stranded_cancel_pending_can_be_cancelled_again(
         harness.service.cancel("intent-1", now=FIXED_NOW)
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING
     broker.mode = "accept"
-    result = harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
-    assert result.lifecycle is OrderLifecycle.CANCELLED
+    # Q-Q3-1 (Muse, 2026-10-14): by design, the supported retry follows reconciliation recovery.
+    # test_stranded_cancel_pending_recovery.py::
+    # test_v2_a_second_cancel_is_refused_while_pending_and_succeeds_after_the_recovery
+    # pins that supported path.
+    calls_before = list(broker.cancel_calls)
+    with pytest.raises(OrderMutationError, match="cancel is already pending"):
+        harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
+    assert _status(harness) is OrderLifecycle.CANCEL_PENDING
+    assert broker.cancel_calls == calls_before
