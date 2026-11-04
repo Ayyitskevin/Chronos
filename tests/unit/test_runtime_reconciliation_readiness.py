@@ -1,9 +1,11 @@
 import asyncio
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 
-import pytest
 from tests.support.order_fakes import FIXED_NOW, PAPER_ACCOUNT, FakeBroker
 
 from chronos.api.reconciliation_loop import reconcile_once
@@ -268,21 +270,49 @@ class _RaisingBlockerSymbol:
         raise RuntimeError("sentinel blocker read failure")
 
 
-def test_blocker_union_failure_is_guarded_and_reconcile_once_succeeds(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+@contextmanager
+def _runtime_logs() -> Iterator[list[logging.LogRecord]]:
+    """Capture the runtime's own logger, whatever an earlier test did to logging.
+
+    ``caplog`` handles the root logger, and ``configure_logging`` sets ``chronos.propagate =
+    False`` process-wide (utils/logging.py), so once any earlier test has configured logging a
+    root-level capture sees no chronos record. pytest 9.1 happens to attach its capture handler
+    to non-propagating loggers, which hid this on the locked version; an older pytest in a stale
+    venv (8.4.2) does not, and the same test failed there in the full run. A handler on the
+    logger itself works on both.
+    """
+
+    collected: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            collected.append(record)
+
+    logger = logging.getLogger("chronos.runtime")
+    handler = _Collector(level=logging.DEBUG)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield collected
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_blocker_union_failure_is_guarded_and_reconcile_once_succeeds() -> None:
     portfolio = _manual_review_portfolio(symbols=(_RaisingBlockerSymbol(),))
     runtime = _runtime_for(_restart_report(), portfolio)
 
-    assert reconcile_once(runtime) == (True, False)
+    with _runtime_logs() as records:
+        assert reconcile_once(runtime) == (True, False)
     snapshot = runtime.reconciliation_readiness.snapshot()
 
     assert snapshot.status is ReconciliationStatus.MANUAL_REVIEW
     assert snapshot.reason == "portfolio reconciliation requires manual review"
     assert snapshot.blockers == frozenset({ReadinessBlocker.BLOCKERS_UNDETERMINED})
     assert any(
-        getattr(record, "event", None) == "readiness_blockers_undetermined"
-        for record in caplog.records
+        getattr(record, "event", None) == "readiness_blockers_undetermined" for record in records
     )
 
 
