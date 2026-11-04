@@ -31,12 +31,14 @@ def test_same_status_pending_cancel_fill_increase_is_persisted_and_idempotent() 
         rig.seed()
         rig.pending()
 
-        outcome = rig.tracker.ingest(_pending_cancel_fill_update(), current_account_id=rig.account)
+        rig.tracker.ingest(_pending_cancel_fill_update(), current_account_id=rig.account)
 
-        assert outcome.lifecycle_changed is False
-        assert outcome.identity_refined is False
-        assert outcome.fill_progress_recorded is True
+        # Assert the persisted behavior, not a newly added result field, so this pin
+        # fails on the old implementation because the witnessed quantity is still zero.
         assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("1")
         assert rig.events()[-1].filled_quantity == Decimal("1")
         assert rig.events()[-1].from_status is OrderLifecycle.CANCEL_PENDING
         assert rig.events()[-1].to_status is OrderLifecycle.CANCEL_PENDING
@@ -71,7 +73,6 @@ def test_fill_during_confirmation_refuses_stale_cancelled_zero_settlement() -> N
         report = rig.reconcile()
 
         assert len(fill_outcomes) == 1
-        assert fill_outcomes[0].fill_progress_recorded is True
         assert rig.status() is OrderLifecycle.CANCEL_PENDING
         assert rig.tracker.recorded_filled_quantity(
             "intent-1", current_account_id=rig.account
@@ -101,10 +102,7 @@ def test_fill_between_replan_and_write_is_typed_and_keeps_cancel_pending() -> No
             nonlocal injected
             if kwargs.get("to_status") is OrderLifecycle.CANCELLED and not injected:
                 injected = True
-                outcome = rig.tracker.ingest(
-                    _pending_cancel_fill_update(), current_account_id=rig.account
-                )
-                assert outcome.fill_progress_recorded is True
+                rig.tracker.ingest(_pending_cancel_fill_update(), current_account_id=rig.account)
             return real_record_transition(**kwargs)  # type: ignore[arg-type]
 
         rig.repo.record_transition = record_after_late_fill  # type: ignore[method-assign]
@@ -119,6 +117,77 @@ def test_fill_between_replan_and_write_is_typed_and_keeps_cancel_pending() -> No
         assert len(report.unresolved) == 1
         assert report.unresolved[0].reason.startswith("fill_floor_conflict: RecordedFillsAdvanced:")
         assert "recorded fills advanced" in report.unresolved[0].reason
+    finally:
+        rig.close()
+
+
+def test_lower_same_status_fill_is_ignored_without_appending_an_event() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        higher = _pending_cancel_fill_update().model_copy(
+            update={"filled_quantity": Decimal("2"), "remaining_quantity": Decimal("8")}
+        )
+        assert rig.tracker.ingest(higher, current_account_id=rig.account).fill_progress_recorded
+        before = rig.events()
+
+        lower = higher.model_copy(
+            update={"filled_quantity": Decimal("1"), "remaining_quantity": Decimal("9")}
+        )
+        rig.tracker.ingest(lower, current_account_id=rig.account)
+
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("2")
+        assert rig.events() == before
+    finally:
+        rig.close()
+
+
+def test_two_level_same_status_fill_progress_uses_distinct_event_keys() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+
+        for filled, remaining in (("1", "9"), ("2", "8")):
+            update = _pending_cancel_fill_update().model_copy(
+                update={
+                    "filled_quantity": Decimal(filled),
+                    "remaining_quantity": Decimal(remaining),
+                }
+            )
+            assert rig.tracker.ingest(update, current_account_id=rig.account).fill_progress_recorded
+
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("2")
+        assert [event.filled_quantity for event in rig.events()[-2:]] == [
+            Decimal("1"),
+            Decimal("2"),
+        ]
+    finally:
+        rig.close()
+
+
+def test_settle_report_names_in_place_fill_progress() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        rig.venue.open = [venue_order(OrderLifecycle.SUBMITTED, "1")]
+
+        report = rig.reconcile()
+
+        observed = next(item for item in report.proven if item.intent_id == "intent-1")
+        assert observed.reason == "fill progress recorded in place"
+        assert observed.transition_applied is False
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.events()[-1].source == "FILL_PROGRESS"
+        assert rig.events()[-1].filled_quantity == Decimal("1")
     finally:
         rig.close()
 
