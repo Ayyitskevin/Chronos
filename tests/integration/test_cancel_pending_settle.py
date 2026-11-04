@@ -439,7 +439,7 @@ def test_P1_1_a_broker_id_history_with_two_ids_never_binds_even_if_the_latest_ma
     before = len(rig.events())
     report = rig.reconcile()
     assert rig.status() is CP and len(rig.events()) == before
-    assert any("not bound to this intent" in reason for reason in issues(report))
+    assert any("identity conflict" in reason for reason in issues(report))
 
 
 def test_a_persisted_permid_conflict_settles_nothing(rig: Rig) -> None:
@@ -519,15 +519,18 @@ def test_a_failed_completed_orders_read_is_a_typed_reason_and_writes_nothing(rig
     assert rig.readiness.snapshot().status.value == "PENDING"
 
 
-def test_P3_1_a_second_completed_orders_request_is_a_typed_refusal_until_reconnect() -> None:
+def test_P3_1_an_overlapping_completed_orders_request_is_a_typed_nonsticky_refusal() -> None:
     from chronos.broker.base import BrokerDataError
     from chronos.broker.callbacks import CallbackBridge
     from chronos.broker.request_registry import RequestRegistry
 
     bridge = CallbackBridge(RequestRegistry())
-    bridge.start_completed_orders()  # the first request never completes (id-less stream)
-    with pytest.raises(BrokerDataError, match="reconnect"):
+    first = bridge.start_completed_orders()
+    with pytest.raises(BrokerDataError, match="already in flight"):
         bridge.start_completed_orders()
+    bridge.on_completed_orders_end()
+    bridge.release_completed_orders(first)
+    bridge.start_completed_orders()
     bridge.reset_for_reconnect()
     bridge.start_completed_orders()  # a fresh session starts clean
 

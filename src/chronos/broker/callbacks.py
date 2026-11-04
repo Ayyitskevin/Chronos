@@ -29,7 +29,7 @@ from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any
 
-from chronos.broker.base import BrokerDataError
+from chronos.broker.base import BrokerDataError, CompletedOrdersReconnectRequired
 from chronos.broker.market_data import (
     MarketDataPacingError,
     MarketDataPermissionError,
@@ -599,13 +599,10 @@ class CallbackBridge:
     def start_completed_orders(self) -> _SingleFlight:
         with self._lock:
             if self._completed_orders_tainted:
-                raise BrokerDataError(
-                    "a completed-orders request timed out; reconnect before requesting "
-                    "completed orders again"
-                )
+                raise CompletedOrdersReconnectRequired
             if self._completed_orders is not None and not self._completed_orders.done.is_set():
                 raise BrokerDataError(
-                    "a completed-orders request is already in flight; reconnect to reset the stream"
+                    "a completed-orders request is already in flight; wait for it to finish"
                 )
             flight = _SingleFlight()
             self._completed_orders = flight
@@ -643,11 +640,18 @@ class CallbackBridge:
     ) -> None:
         """Release one request and require reconnect when its stream can still answer."""
 
+        taint_set = False
         with self._lock:
             if self._completed_orders is flight:
                 self._completed_orders = None
                 if taint_if_incomplete and not flight.done.is_set():
+                    taint_set = not self._completed_orders_tainted
                     self._completed_orders_tainted = True
+        if taint_set:
+            self._logger.warning(
+                CompletedOrdersReconnectRequired.MESSAGE,
+                extra={"event": "completed_orders_reconnect_required"},
+            )
 
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).

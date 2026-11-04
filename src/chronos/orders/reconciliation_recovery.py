@@ -25,7 +25,7 @@ from functools import partial
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
-from chronos.broker.base import CompletedOrderEvidence
+from chronos.broker.base import CompletedOrderEvidence, CompletedOrdersReconnectRequired
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
@@ -234,6 +234,19 @@ def _identity_conflict_reason(
         return None
     for kind, observations in (("order", open_orders), ("execution", executions)):
         for observation in observations:
+            if (
+                observation.order_ref
+                and observation.order_ref != order_ref
+                and observation.permanent_id == persisted_permanent_id
+                and (
+                    observation.account_id != current_account_id
+                    or observation.client_id != expected_broker_client_id
+                )
+            ):
+                return (
+                    "identity conflict: broker evidence reports the persisted permanent id "
+                    "under another order reference"
+                )
             if (
                 observation.account_id != current_account_id
                 or observation.client_id != expected_broker_client_id
@@ -789,6 +802,12 @@ class OrderRestartReconciler:
                 planned = intent.status in _SETTLE_STATUSES or self._recovered(
                     intent, current_account_id=current_account_id
                 )
+                if planned:
+                    # A settle path requires exactly one broker order id across the full event
+                    # history. The latest id is not a substitute for that proof.
+                    self._tracker.single_broker_order_id(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.
@@ -943,6 +962,8 @@ class OrderRestartReconciler:
                 else:
                     try:
                         cache.append((self._connection.run(broker.completed_orders()), ""))
+                    except CompletedOrdersReconnectRequired as error:
+                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
                     except Exception:
                         # ANY failure of this optional read is a typed, fail-closed hold for the
                         # intents that need it -- never an exception out of the whole pass
