@@ -158,38 +158,7 @@ def official_transmit_settings(**overrides: object) -> Settings:
 
 #: (venue, case) -> (id, exception the venue raises instead, why). Strict xfails: the day
 #: the difference disappears, the case XPASSes and fails the suite until the row is removed.
-KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] = {
-    ("official_fake", "test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order"): (
-        "U0-D1",
-        AssertionError,
-        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
-        "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
-        "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
-        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
-        "when #302 landed, and its pin is now the passing "
-        "test_a_two_step_cancel_settles_after_reconciliation in "
-        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
-        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
-        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
-        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
-    ),
-    ("official_fake", "test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal"): (
-        "U0-D1",
-        AssertionError,
-        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
-        "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
-        "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
-        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
-        "when #302 landed, and its pin is now the passing "
-        "test_a_two_step_cancel_settles_after_reconciliation in "
-        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
-        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
-        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
-        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
-    ),
-}
+KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] = {}
 
 
 @pytest.fixture(autouse=True)
@@ -839,7 +808,19 @@ def test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order(venue: _
         result = h.service.cancel("intent-1", now=h.now)
 
         assert result.requested is True
-        assert result.lifecycle is OrderLifecycle.CANCELLED
+        expected_ack = (
+            OrderLifecycle.CANCEL_PENDING
+            if venue.kind == "official_fake"
+            else OrderLifecycle.CANCELLED
+        )
+        assert result.lifecycle is expected_ack
+        if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
+            assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
+            report = h.service.reconcile_on_restart_report(now=h.now)
+            assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
         statuses = [
             e.to_status for e in h.tracker_repo.events("intent-1", current_account_id=h.account)
@@ -867,7 +848,19 @@ def test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal(venue: _Ve
 
         result = h.service.cancel("intent-1", now=h.now)
 
-        assert result.lifecycle is OrderLifecycle.CANCELLED
+        expected_ack = (
+            OrderLifecycle.CANCEL_PENDING
+            if venue.kind == "official_fake"
+            else OrderLifecycle.CANCELLED
+        )
+        assert result.lifecycle is expected_ack
+        if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
+            assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
+            report = h.service.reconcile_on_restart_report(now=h.now)
+            assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
         assert h.sim_open_order_ids() == set()
         assert h.sim_position() == Decimal("5")

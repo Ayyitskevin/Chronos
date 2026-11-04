@@ -44,7 +44,7 @@ from chronos.broker.base import (
     BrokerSafetyError,
 )
 from chronos.domain.enums import ConnectionState, OrderLifecycle, OrderSide
-from chronos.domain.models import OrderPreview, OrderSubmission
+from chronos.domain.models import OptionContract, OrderPreview, OrderSubmission
 from tests.contract import conftest as contract_conftest
 from tests.contract.conftest import (
     DEFERRED,
@@ -449,9 +449,23 @@ async def test_a_fill_moves_positions_executions_and_cash_consistently(
     )
     assert all(execution.commission is not None for execution in new)
 
+    def identity(contract: object) -> tuple[object, ...] | None:
+        if not isinstance(contract, OptionContract):
+            return None
+        return (
+            contract.con_id,
+            contract.symbol,
+            contract.right,
+            contract.strike,
+            contract.expiration,
+        )
+
+    wanted = identity(request.contract)
+    assert wanted is not None
+
     def held(snapshot: Book) -> Decimal:
         return sum(
-            (p.quantity for p in snapshot.positions if p.contract == request.contract),
+            (p.quantity for p in snapshot.positions if identity(p.contract) == wanted),
             Decimal(0),
         )
 

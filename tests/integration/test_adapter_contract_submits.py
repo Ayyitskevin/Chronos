@@ -111,17 +111,6 @@ async def test_a_working_submission_appears_in_open_orders(s2_harness: BrokerHar
     await contract.test_a_working_submission_appears_in_open_orders(s2_harness)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "S2-A1 (artifact, not an adapter defect): U1's fill case compares "
-        "p.contract == request.contract, but the adapter's normalizer rebuilds the option "
-        "from IB's contract fields without underlying_con_id / deliverable_* (S1a reader "
-        "P2-2); the sibling identity case below proves the position is real. A U1 edit to "
-        "compare identity is the owner's call."
-    ),
-)
 async def test_a_fill_moves_positions_executions_and_cash_consistently(
     s2_harness: BrokerHarness,
 ) -> None:
@@ -131,7 +120,7 @@ async def test_a_fill_moves_positions_executions_and_cash_consistently(
 async def test_a_fill_moves_the_position_by_contract_identity_through_the_real_adapter(
     s2_harness: BrokerHarness,
 ) -> None:
-    """U1's fill case with the one assertion the adapter can honour: identity, not equality."""
+    """Independently pin the real adapter's fill using option identity, not metadata equality."""
 
     hook = s2_harness.cause_fill
     assert hook is not None
