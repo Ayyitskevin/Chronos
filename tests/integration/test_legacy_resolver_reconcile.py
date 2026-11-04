@@ -757,23 +757,48 @@ def test_r1_record_transition_writes_a_figure_at_or_above_the_recorded_maximum(
         filled_quantity=Decimal(attempted),
         occurred_at=NOW,
         enforce_from_status=True,
-        refuse_below_recorded_fills=True,
     )
     assert rig.status() is OrderLifecycle.CANCELLED
 
 
-def test_r1_the_guard_is_opt_in_other_writers_are_unchanged(rig: _Rig) -> None:
-    """Every other ``record_transition`` caller keeps today's behaviour (the default is False)."""
+def test_r1_unflagged_terminal_write_below_fill_floor_is_refused(rig: _Rig) -> None:
+    """D-67 / Kevin K-20261103-002: every terminal write observes the fill floor without opt-in."""
+
+    from chronos.persistence.order_repositories import RecordedFillsAdvanced
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    before = rig.repo.events("intent-1", current_account_id=ACCOUNT)
+
+    with pytest.raises(RecordedFillsAdvanced) as refused:
+        rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="intent-1:cancel-default-below-floor",
+            source="CANCEL",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            to_status=OrderLifecycle.CANCELLED,
+            current_account_id=ACCOUNT,
+            filled_quantity=Decimal(0),
+            occurred_at=NOW,
+        )
+
+    assert refused.value.recorded == Decimal(3)
+    assert refused.value.attempted == Decimal(0)
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT) == before
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+
+
+def test_r1_default_nonterminal_transition_keeps_existing_behavior(rig: _Rig) -> None:
+    """The structural floor is terminal-only; the default nonterminal write still succeeds."""
 
     rig.seed(OrderLifecycle.PARTIALLY_FILLED)
     assert rig.repo.record_transition(
         intent_id="intent-1",
-        event_key="intent-1:cancel-default",
+        event_key="intent-1:cancel-pending-default",
         source="CANCEL",
         from_status=OrderLifecycle.PARTIALLY_FILLED,
-        to_status=OrderLifecycle.CANCELLED,
+        to_status=OrderLifecycle.CANCEL_PENDING,
         current_account_id=ACCOUNT,
         filled_quantity=Decimal(0),
         occurred_at=NOW,
     )
-    assert rig.status() is OrderLifecycle.CANCELLED
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING
