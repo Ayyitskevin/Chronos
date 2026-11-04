@@ -13,9 +13,9 @@ from tests.support.settle_rig import NOW, PERM_ID, ScriptedVenue, make_rig, venu
 from chronos.api.auth import require_token
 from chronos.api.dependencies import require_writer
 from chronos.api.routes import orders as orders_route
-from chronos.domain.enums import OrderLifecycle
+from chronos.domain.enums import OrderLifecycle, ReconciliationStatus
 from chronos.domain.models import CancellationResult
-from chronos.orders.mutations import OrderCancellationService
+from chronos.orders.mutations import OrderCancellationService, OrderMutationError
 from chronos.orders.tracker import OrderStatusUpdate
 from chronos.persistence.order_repositories import RecordedFillsAdvanced
 
@@ -394,6 +394,57 @@ def test_ingest_fills_floor_flag_still_refuses_a_lower_nonterminal_transition() 
         rig.close()
 
 
+def test_ingest_fills_floor_flag_refuses_lower_same_status_identity_evidence() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        higher = _pending_cancel_fill_update().model_copy(
+            update={"filled_quantity": Decimal("3"), "remaining_quantity": Decimal("7")}
+        )
+        assert rig.tracker.ingest(higher, current_account_id=rig.account).fill_progress_recorded
+        before = rig.events()
+        lower_identity = higher.model_copy(
+            update={
+                "filled_quantity": Decimal("2"),
+                "remaining_quantity": Decimal("8"),
+                "permanent_id": PERM_ID + 1,
+            }
+        )
+
+        with pytest.raises(RecordedFillsAdvanced) as raised:
+            rig.tracker.ingest(lower_identity, current_account_id=rig.account, fills_floor=True)
+
+        assert raised.value.recorded == Decimal("3")
+        assert raised.value.attempted == Decimal("2")
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.events() == before
+    finally:
+        rig.close()
+
+
+def test_ingest_fills_floor_flag_accepts_equal_same_status_identity_evidence() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        higher = _pending_cancel_fill_update().model_copy(
+            update={"filled_quantity": Decimal("3"), "remaining_quantity": Decimal("7")}
+        )
+        assert rig.tracker.ingest(higher, current_account_id=rig.account).fill_progress_recorded
+        equal_identity = higher.model_copy(update={"permanent_id": PERM_ID + 1})
+
+        outcome = rig.tracker.ingest(
+            equal_identity, current_account_id=rig.account, fills_floor=True
+        )
+
+        assert outcome.identity_refined
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.events()[-1].filled_quantity == Decimal("3")
+    finally:
+        rig.close()
+
+
 @pytest.mark.parametrize("late_fill", [False, True], ids=["already-witnessed", "during-cancel"])
 def test_cancel_service_carries_figureless_terminal_fill_forward(
     late_fill: bool,
@@ -481,11 +532,11 @@ def test_official_cancel_ack_keeps_explicit_fill_semantics(
 
         monkeypatch.setattr(h.gateway, "cancel_order", cancel)
         if ack_fill < 5:
-            with pytest.raises(RecordedFillsAdvanced) as raised:
+            with pytest.raises(OrderMutationError) as raised:
                 h.service.cancel("intent-1", now=h.now)
 
-            assert raised.value.recorded == Decimal("5")
-            assert raised.value.attempted == Decimal("0")
+            assert "0" in str(raised.value) and "5" in str(raised.value)
+            assert "reconcile" in str(raised.value).lower()
             assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
             assert h.tracker.recorded_filled_quantity(
                 "intent-1", current_account_id=h.account
@@ -557,6 +608,15 @@ def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
     try:
         rig.seed()
         rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="5")
+        readiness = rig.readiness.snapshot()
+        assert rig.readiness.complete(
+            expected_generation=readiness.generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason="test positive readiness baseline",
+            reconciled_at=NOW,
+        )
+        readiness_before_cancel = rig.readiness.snapshot()
+        assert readiness_before_cancel.ready
 
         async def cancel_order(broker_order_id: int) -> CancellationResult:
             return CancellationResult(
@@ -574,14 +634,13 @@ def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
             intents=rig.intents,
             tracker=rig.tracker,
             tracker_repo=rig.repo,
+            reconciliation_readiness=rig.readiness,
         )
         management = SimpleNamespace(
             cancel=lambda intent_id: service.cancel(
                 intent_id, current_account_id=rig.account, now=NOW
             ),
-            get=lambda intent_id: rig.intents.get(
-                intent_id, current_account_id=rig.account
-            ),
+            get=lambda intent_id: rig.intents.get(intent_id, current_account_id=rig.account),
         )
         state = SimpleNamespace(runtime=SimpleNamespace(order_management=management))
         app = FastAPI()
@@ -597,11 +656,17 @@ def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
             detail = response.json()["detail"].lower()
             assert "5" in detail and "0" in detail and "reconcile" in detail
             assert rig.status() is OrderLifecycle.CANCEL_PENDING
+            readiness_after_cancel = rig.readiness.snapshot()
+            assert readiness_after_cancel.generation > readiness_before_cancel.generation
+            assert readiness_after_cancel.status is ReconciliationStatus.PENDING
             assert rig.tracker.recorded_filled_quantity(
                 "intent-1", current_account_id=rig.account
             ) == Decimal("5")
         else:
             assert rig.status() is OrderLifecycle.CANCELLED
             assert rig.events()[-1].filled_quantity == Decimal("5")
+            readiness_after_cancel = rig.readiness.snapshot()
+            assert readiness_after_cancel.generation == readiness_before_cancel.generation
+            assert readiness_after_cancel.ready
     finally:
         rig.close()

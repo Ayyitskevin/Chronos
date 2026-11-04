@@ -25,11 +25,13 @@ from chronos.domain.models import (
     OrderSubmission,
 )
 from chronos.orders.intent import WheelOrderIntent, build_option_intent
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.state_machine import is_terminal
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRepository,
     OrderTrackerRepository,
+    RecordedFillsAdvanced,
 )
 
 _MODIFIABLE_STATUSES = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
@@ -131,11 +133,13 @@ class OrderCancellationService:
         intents: OrderIntentRepository,
         tracker: OrderTracker,
         tracker_repo: OrderTrackerRepository,
+        reconciliation_readiness: ReconciliationReadiness | None = None,
     ) -> None:
         self._connection = connection
         self._intents = intents
         self._tracker = tracker
         self._tracker_repo = tracker_repo
+        self._reconciliation_readiness = reconciliation_readiness
 
     def cancel(
         self,
@@ -218,19 +222,32 @@ class OrderCancellationService:
         venue's own callbacks, which carry the final status.
         """
 
-        written = self._tracker_repo.record_transition(
-            intent_id=intent_id,
-            event_key=f"{intent_id}:{broker_order_id}:CANCELLED",
-            source="CANCEL",
-            from_status=OrderLifecycle.CANCEL_PENDING,
-            to_status=OrderLifecycle.CANCELLED,
-            current_account_id=current_account_id,
-            broker_order_id=broker_order_id,
-            evidence={"message": result.message},
-            occurred_at=result.timestamp,
-            filled_quantity=result.filled_quantity,
-            enforce_from_status=True,
-        )
+        try:
+            written = self._tracker_repo.record_transition(
+                intent_id=intent_id,
+                event_key=f"{intent_id}:{broker_order_id}:CANCELLED",
+                source="CANCEL",
+                from_status=OrderLifecycle.CANCEL_PENDING,
+                to_status=OrderLifecycle.CANCELLED,
+                current_account_id=current_account_id,
+                broker_order_id=broker_order_id,
+                evidence={"message": result.message},
+                occurred_at=result.timestamp,
+                filled_quantity=result.filled_quantity,
+                enforce_from_status=True,
+            )
+        except RecordedFillsAdvanced as conflict:
+            recorded = format(conflict.recorded.normalize(), "f")
+            attempted = format(conflict.attempted.normalize(), "f")
+            reason = (
+                f"cancel acknowledgement reports {attempted} filled, below the {recorded} "
+                "already recorded; the order remains unresolved; reconcile before acting"
+            )
+            if self._reconciliation_readiness is not None:
+                self._reconciliation_readiness.invalidate(
+                    f"cancel acknowledgement fill floor conflict: {attempted} below {recorded}"
+                )
+            raise OrderMutationError(reason) from conflict
         if written:
             return
         intent = self._intents.get(intent_id, current_account_id=current_account_id)

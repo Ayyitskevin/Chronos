@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from chronos.domain.enums import TERMINAL_ORDER_LIFECYCLES, OrderLifecycle
+from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
 from chronos.orders.state_machine import OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
@@ -195,21 +195,18 @@ class OrderTracker:
         Every terminal update is checked against the largest recorded fill inside the repository's
         transition transaction, regardless of caller flags. A terminal update below that floor
         raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the
-        caller's earlier read of the maximum may be stale. ``fills_floor`` retains its opt-in
-        behavior for non-terminal writes used by existing recovery callers.
+        caller's earlier read of the maximum may be stale. ``fills_floor`` also requests that
+        atomic floor for non-terminal writes used by existing recovery callers.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
         if intent is None:
             raise ValueError(f"Unknown order intent {update.intent_id!r}")
 
-        # The monotonic stale-fill guard applies ONLY to fill-progress updates:
-        # a fill callback reporting a lower cumulative fill than already seen is
-        # stale and ignored. Terminal/administrative transitions (CANCELLED,
-        # REJECTED, CANCEL_PENDING) are not silently dropped here; lifecycle
-        # legality is checked below, and terminal fill regressions are refused
-        # atomically by the repository's structural fill floor.
-        if update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}:
+        # A lower PARTIALLY_FILLED callback is stale and ignored. FILLED is terminal:
+        # its explicit figure must reach the repository's atomic floor so a contradiction
+        # is reported instead of silently discarded.
+        if update.lifecycle is OrderLifecycle.PARTIALLY_FILLED:
             prior_filled = self._latest_filled(update.intent_id, current_account_id)
             if update.filled_quantity < prior_filled:
                 return _NOTHING_RECORDED
@@ -252,9 +249,7 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
-            refuse_below_recorded_fills=(
-                fills_floor and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
-            ),
+            refuse_below_recorded_fills=fills_floor,
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
@@ -333,7 +328,7 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
-            refuse_below_recorded_fills=(fills_floor and status in TERMINAL_ORDER_LIFECYCLES),
+            refuse_below_recorded_fills=fills_floor,
         )
         return IngestOutcome(
             lifecycle_changed=False,

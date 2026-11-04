@@ -402,7 +402,7 @@ class RecordedFillsAdvanced(ValueError):
     Raised by :meth:`OrderTrackerRepository.record_transition` for every terminal lifecycle, or
     for any lifecycle when ``refuse_below_recorded_fills=True``. The check runs INSIDE the
     transition's transaction, so the check and the write are one atomic decision: nothing was
-    written. A ``ValueError``, so an operator path surfaces it through its existing refusal mapping.
+    written. The repository does not map this refusal for the operator; the caller must handle it.
     """
 
     def __init__(self, intent_id: str, *, recorded: Decimal, attempted: Decimal) -> None:
@@ -547,17 +547,22 @@ class OrderTrackerRepository:
             return tuple(_event_row_to_record(row) for row in rows)
 
     @staticmethod
-    def _max_recorded_fills(session: Session, intent_id: str) -> Decimal | None:
-        return session.scalar(
-            select(func.max(OrderEventRow.filled_quantity)).where(
-                OrderEventRow.intent_id == intent_id
-            )
+    def _max_recorded_fills(
+        session: Session, intent_id: str, *, excluding_event_id: int | None = None
+    ) -> Decimal | None:
+        statement = select(func.max(OrderEventRow.filled_quantity)).where(
+            OrderEventRow.intent_id == intent_id
         )
+        if excluding_event_id is not None:
+            statement = statement.where(OrderEventRow.id != excluding_event_id)
+        return session.scalar(statement)
 
     @classmethod
     def _refuse_below_recorded_fills(cls, session: Session, row: OrderEventRow) -> None:
         """Raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than the
-        largest figure on the intent's events (``row`` itself included).
+        largest figure on the intent's prior events, excluding ``row``. The persisted column may
+        round the new row to eight decimal places, so comparing the unrounded attempt with its own
+        rounded value would create a false conflict.
 
         Called inside the row's savepoint, after its flush: the INSERT took the write lock, so no
         other writer can commit between this read and the commit, and raising rolls the savepoint
@@ -565,7 +570,7 @@ class OrderTrackerRepository:
         transaction before the first statement, so a savepoint RELEASE would commit it).
         """
 
-        recorded = cls._max_recorded_fills(session, row.intent_id)
+        recorded = cls._max_recorded_fills(session, row.intent_id, excluding_event_id=row.id)
         attempted = row.filled_quantity if row.filled_quantity is not None else Decimal(0)
         if recorded is not None and attempted < recorded:
             raise RecordedFillsAdvanced(

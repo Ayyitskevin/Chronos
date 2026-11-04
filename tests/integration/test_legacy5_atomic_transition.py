@@ -364,12 +364,17 @@ def test_r2_ingest_without_the_keyword_still_enforces_terminal_fill_floor(book: 
     assert all(status is not OrderLifecycle.CANCELLED for status, _ in book.trail())
 
 
-def test_r2_the_floor_applies_to_terminal_updates_only(book: _Book) -> None:
-    """P3-3: a non-terminal update below the maximum (CANCEL_PENDING at 0 with 3 recorded) is
-    written as before, even with ``fills_floor`` on."""
-
+def test_r2_the_opt_in_floor_refuses_a_lower_nonterminal_transition(book: _Book) -> None:
+    """The recovery caller's opt-in floor also fences non-terminal writes."""
     book.seed(OrderLifecycle.PARTIALLY_FILLED)
-    outcome = book.a.tracker.ingest(
-        _update(OrderLifecycle.CANCEL_PENDING, "0"), current_account_id=ACCOUNT, fills_floor=True
-    )
+    before = book.trail()
+    lower = _update(OrderLifecycle.CANCEL_PENDING, "0")
+
+    with pytest.raises(RecordedFillsAdvanced):
+        book.a.tracker.ingest(lower, current_account_id=ACCOUNT, fills_floor=True)
+
+    assert book.status() is OrderLifecycle.PARTIALLY_FILLED
+    assert book.trail() == before
+
+    outcome = book.a.tracker.ingest(lower, current_account_id=ACCOUNT)
     assert outcome.lifecycle_changed and book.status() is OrderLifecycle.CANCEL_PENDING
