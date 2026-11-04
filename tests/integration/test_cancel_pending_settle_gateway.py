@@ -237,15 +237,15 @@ def test_a_second_pass_after_the_settle_changes_nothing(
     assert rig.events() == before
 
 
-# --- Daybreak P3-1: an unanswered completed-orders read must not poison later passes ----------
+# --- Daybreak P3-1: an unanswered completed-orders read taints until reconnect -----------------
 
 
-def test_P3_1_a_timed_out_completed_orders_read_releases_the_flight(
+def test_P3_1_a_timed_out_completed_orders_read_requires_reconnect(
     world: tuple[Rig, OfficialIBKRBroker],
     gateway: fake_ibapi.FakeGateway,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timeout is a typed hold, but it cannot poison every later same-session request."""
+    """K-20261103-003: timeout holds CANCEL_PENDING and refuses reads until reconnect."""
 
     from chronos.broker import official_ibkr as official_ibkr_module
 
@@ -258,6 +258,10 @@ def test_P3_1_a_timed_out_completed_orders_read_releases_the_flight(
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
     monkeypatch.setattr(gateway, "completed_orders", answer)
+    report = _at(rig)
+    assert rig.status() is CP
+    assert any("reconnect" in r for r in issues(report))
+    adapter.bridge.reset_for_reconnect()
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
 

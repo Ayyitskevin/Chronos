@@ -152,9 +152,11 @@ def test_completed_orders_send_error_releases_flight(monkeypatch: pytest.MonkeyP
     asyncio.run(go())
 
 
-def test_completed_orders_timeout_releases_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_completed_orders_timeout_requires_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K-20261103-003: timeout refuses another read until a fresh connection session."""
+
     from chronos.broker import official_ibkr as implementation
-    from chronos.broker.base import BrokerConnectionError
+    from chronos.broker.base import BrokerConnectionError, BrokerDataError
 
     gateway = fake_ibapi.FakeGateway.seeded()
     fake_ibapi.install(monkeypatch, gateway)
@@ -177,6 +179,9 @@ def test_completed_orders_timeout_releases_flight(monkeypatch: pytest.MonkeyPatc
     async def go() -> None:
         with pytest.raises(BrokerConnectionError, match="did not complete"):
             await broker.completed_orders()
+        with pytest.raises(BrokerDataError, match="reconnect"):
+            await broker.completed_orders()
+        broker.bridge.reset_for_reconnect()
         monkeypatch.setattr(
             app, "reqCompletedOrders", lambda _api_only: broker.bridge.on_completed_orders_end()
         )
