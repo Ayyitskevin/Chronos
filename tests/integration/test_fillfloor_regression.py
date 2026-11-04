@@ -1,8 +1,10 @@
 """Fill progress must survive same-status callbacks and fence stale cancel settlement."""
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
+from tests.integration import test_sim_order_lifecycle as sim
 from tests.support.settle_rig import NOW, PERM_ID, ScriptedVenue, make_rig, venue_order
 
 from chronos.domain.enums import OrderLifecycle
@@ -335,5 +337,107 @@ def test_cancel_service_carries_figureless_terminal_fill_forward(
         terminal_event = rig.events()[-1]
         assert terminal_event.to_status is OrderLifecycle.CANCELLED
         assert terminal_event.filled_quantity == Decimal("1")
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("ack_fill", [0, 5], ids=["lower-explicit", "equal-control"])
+def test_official_cancel_ack_keeps_explicit_fill_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ack_fill: int
+) -> None:
+    venue = sim._Venue("official_fake", monkeypatch, tmp_path)
+    with sim.harness(venue, plans={sim._ref("A"): sim.FillPlan(partial_fraction=(1, 2))}) as h:
+        intent = h.buy(ref=sim._ref("A"), intent_id="intent-1")
+        h.confirm(intent)
+        assert h.submit(intent).submitted
+        h.bar(**sim.CROSSING)
+        h.service.reconcile_on_restart_report(now=h.now)
+        assert h.status("intent-1") is OrderLifecycle.PARTIALLY_FILLED
+        assert h.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=h.account
+        ) == Decimal("5")
+
+        def cancel(client: sim.FakeEClient, adapter_id: int) -> None:
+            # Keep the real adapter and ownership checks; control only the venue acknowledgement.
+            working = h.gateway._working()[h.gateway._sim_of[adapter_id]]
+            result = h.gateway._run(h.sim.cancel_order(working.broker_order_id))
+            assert result.requested
+            client.emit(
+                "orderStatus",
+                adapter_id,
+                "Cancelled",
+                float(ack_fill),
+                0.0,
+                0.0,
+                working.permanent_id,
+                0,
+                0.0,
+                int(client.client_id or 0),
+                "",
+                0.0,
+            )
+
+        monkeypatch.setattr(h.gateway, "cancel_order", cancel)
+        if ack_fill < 5:
+            with pytest.raises(RecordedFillsAdvanced) as raised:
+                h.service.cancel("intent-1", now=h.now)
+
+            assert raised.value.recorded == Decimal("5")
+            assert raised.value.attempted == Decimal("0")
+            assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert h.tracker.recorded_filled_quantity(
+                "intent-1", current_account_id=h.account
+            ) == Decimal("5")
+            assert not any(
+                event.to_status is OrderLifecycle.CANCELLED
+                for event in h.tracker_repo.events("intent-1", current_account_id=h.account)
+            )
+        else:
+            result = h.service.cancel("intent-1", now=h.now)
+
+            assert result.filled_quantity == Decimal("5")
+            assert h.status("intent-1") is OrderLifecycle.CANCELLED
+            terminal_event = h.tracker_repo.events("intent-1", current_account_id=h.account)[-1]
+            assert terminal_event.filled_quantity == Decimal("5")
+
+
+@pytest.mark.parametrize(("ack_fill", "expected_fill"), [("1", "1"), ("2", "2")])
+def test_cancel_service_accepts_equal_or_higher_explicit_fill(
+    ack_fill: str, expected_fill: str
+) -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        partial = _pending_cancel_fill_update().model_copy(
+            update={"lifecycle": OrderLifecycle.PARTIALLY_FILLED}
+        )
+        assert rig.tracker.ingest(partial, current_account_id=rig.account).lifecycle_changed
+
+        async def cancel_order(broker_order_id: int) -> CancellationResult:
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=True,
+                lifecycle=OrderLifecycle.CANCELLED,
+                message="explicit cumulative fill",
+                timestamp=NOW,
+                filled_quantity=Decimal(ack_fill),
+            )
+
+        rig.venue.cancel_order = cancel_order
+        service = OrderCancellationService(
+            connection=rig.connection,
+            intents=rig.intents,
+            tracker=rig.tracker,
+            tracker_repo=rig.repo,
+        )
+
+        result = service.cancel("intent-1", current_account_id=rig.account, now=NOW)
+
+        assert result.filled_quantity == Decimal(expected_fill)
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal(expected_fill)
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal(expected_fill)
     finally:
         rig.close()

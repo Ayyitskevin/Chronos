@@ -29,7 +29,7 @@ import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from chronos.broker.base import (
@@ -2722,6 +2722,18 @@ class OfficialIBKRBroker:
         finally:
             self.bridge.clear_order_ack(broker_order_id)
         raw_status = str(payload[2]) if payload and payload[0] == "orderStatus" else ""
+        filled_quantity: Decimal | None = None
+        if payload and payload[0] == "orderStatus" and len(payload) > 3 and payload[3] is not None:
+            try:
+                filled_quantity = Decimal(str(payload[3]))
+            except (InvalidOperation, TypeError, ValueError) as error:
+                raise BrokerDataError(
+                    f"cancel acknowledgement for order {broker_order_id} had an invalid fill figure"
+                ) from error
+            if not filled_quantity.is_finite() or filled_quantity < 0:
+                raise BrokerDataError(
+                    f"cancel acknowledgement for order {broker_order_id} had an invalid fill figure"
+                )
         lowered = raw_status.lower()
         if lowered in {"cancelled", "apicancelled"}:
             lifecycle = OrderLifecycle.CANCELLED
@@ -2737,4 +2749,5 @@ class OfficialIBKRBroker:
             lifecycle=lifecycle,
             message=raw_status or "cancel requested; awaiting broker confirmation",
             timestamp=datetime.now(tz=UTC),
+            filled_quantity=filled_quantity,
         )

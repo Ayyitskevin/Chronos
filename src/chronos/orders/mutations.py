@@ -228,6 +228,7 @@ class OrderCancellationService:
             broker_order_id=broker_order_id,
             evidence={"message": result.message},
             occurred_at=result.timestamp,
+            filled_quantity=result.filled_quantity,
             enforce_from_status=True,
         )
         if written:

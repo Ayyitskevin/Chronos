@@ -17,14 +17,47 @@ from chronos.domain.enums import (
     DemoProfile,
     OptionRight,
     OrderIntent,
+    OrderLifecycle,
     OrderSide,
     SecurityType,
 )
-from chronos.domain.models import CryptoContract, OptionContractSpec, OrderRequest
+from chronos.domain.models import (
+    BrokerOrder,
+    CryptoContract,
+    OptionContractSpec,
+    OrderRequest,
+    UnderlyingContract,
+)
 
 
 def test_demo_broker_satisfies_protocol(demo_broker: DemoBroker) -> None:
     assert isinstance(demo_broker, Broker)
+
+
+@pytest.mark.asyncio
+async def test_demo_cancel_result_carries_the_order_fill_figure() -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    await broker.connect()
+    broker._orders = (
+        BrokerOrder(
+            broker_order_id=41,
+            client_id=0,
+            account_id=DEMO_ACCOUNT_ID,
+            order_ref="CHR-demo-cancel",
+            contract=UnderlyingContract(con_id=1, symbol="AAPL"),
+            side=OrderSide.BUY,
+            quantity=Decimal("10"),
+            filled_quantity=Decimal("2"),
+            remaining_quantity=Decimal("8"),
+            limit_price=Decimal("100"),
+            lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+        ),
+    )
+
+    result = await broker.cancel_order(41)
+
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    assert result.filled_quantity == Decimal("2")
 
 
 @pytest.mark.asyncio
