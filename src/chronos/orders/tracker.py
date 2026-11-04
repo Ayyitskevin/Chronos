@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from chronos.domain.enums import OrderLifecycle, TERMINAL_ORDER_LIFECYCLES
+from chronos.domain.enums import TERMINAL_ORDER_LIFECYCLES, OrderLifecycle
 from chronos.domain.models import ChronosModel
 from chronos.orders.state_machine import OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
