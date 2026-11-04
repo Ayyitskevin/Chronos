@@ -181,7 +181,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 58 at CPSRECUT-R1B (official_ibkr.py's completed-orders flight cleanup rotates its
     # generated source-inventory fingerprint).
     # 59 at CPSRECUT-R2 (official_ibkr.py's timeout-generation quarantine rotates it again).
-    assert len(historical_candidates) == 59
+    # 60 at CPSRECUT-R3 (official_ibkr.py's reconnect-only timeout taint rotates it again).
+    assert len(historical_candidates) == 60
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

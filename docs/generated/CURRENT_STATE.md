@@ -225,7 +225,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | src/chronos/api/autonomy_wiring.py | `29abdc7ac8a3a9487dc55d17f21d81a5bf68e97c771e5e84c17643b2afc57747` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `5fc99d52d4ce0360349e15c0d6db010e28ecd88e9149cc58a60f61b7cfb72396` |
-| src/chronos/broker/official_ibkr.py | `1761e898cf518bf6167853b9b055e024d125ee26a6a23537a560991445be2cdb` |
+| src/chronos/broker/official_ibkr.py | `54306482889c00418381783ea31ffbf2cb66dfadc39d91aeaf05daf7163365e1` |
 | src/chronos/broker/ibkr.py | `db77599924803d3c4a5faf59fb4238f901e509307b5d4895a43b39bcd28e50ae` |
 
 Machine-readable detail: [`capability-matrix.json`](capability-matrix.json).
