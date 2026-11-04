@@ -26,7 +26,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily, RiskCheckStatus
+from chronos.domain.enums import (
+    TERMINAL_ORDER_LIFECYCLES,
+    OrderLifecycle,
+    OrderSide,
+    ProductFamily,
+    RiskCheckStatus,
+)
 from chronos.persistence.repositories import _require_matching_account_scope
 from chronos.persistence.schema import (
     OrderConfirmationRow,
@@ -391,12 +397,12 @@ def _record_to_intent_row(record: OrderIntentRecord) -> OrderIntentRow:
 
 
 class RecordedFillsAdvanced(ValueError):
-    """LEGACY-5 r1: a write that carries FEWER fills than the intent's durable record was refused.
+    """A write that carries FEWER fills than the intent's durable record was refused.
 
-    Raised by :meth:`OrderTrackerRepository.record_transition` with
-    ``refuse_below_recorded_fills=True`` from INSIDE the transition's transaction, so the check and
-    the write are one atomic decision: nothing was written. A ``ValueError``, so an operator path
-    surfaces it through its existing refusal mapping.
+    Raised by :meth:`OrderTrackerRepository.record_transition` for every terminal lifecycle, or
+    for any lifecycle when ``refuse_below_recorded_fills=True``. The check runs INSIDE the
+    transition's transaction, so the check and the write are one atomic decision: nothing was
+    written. A ``ValueError``, so an operator path surfaces it through its existing refusal mapping.
     """
 
     def __init__(self, intent_id: str, *, recorded: Decimal, attempted: Decimal) -> None:
@@ -464,12 +470,12 @@ class OrderTrackerRepository:
         USER_CONFIRMED while gate evidence was being gathered can never be
         clobbered back into the submit path.
 
-        With ``refuse_below_recorded_fills=True`` (LEGACY-5 r1) the largest ``filled_quantity`` on
-        the intent's events is read inside this row's savepoint, after its INSERT took the
+        Every terminal lifecycle (FILLED, CANCELLED, REJECTED) enforces the recorded-fill floor
+        regardless of caller flags. ``refuse_below_recorded_fills=True`` additionally preserves
+        the explicit floor for any non-terminal write, as used by existing recovery callers. The
+        largest ``filled_quantity`` is read inside this row's savepoint, after its INSERT took the
         write lock; when this write's figure (a missing figure counts as zero) is below it,
-        :class:`RecordedFillsAdvanced` is raised, the savepoint rolls back and nothing is written
-        -- a fill recorded after the caller read the maximum cannot be overwritten by a lower
-        terminal figure.
+        :class:`RecordedFillsAdvanced` is raised, the savepoint rolls back and nothing is written.
         """
 
         with self._sessions.begin() as session:
@@ -506,7 +512,7 @@ class OrderTrackerRepository:
                 with session.begin_nested():
                     session.add(row)
                     session.flush()
-                    if refuse_below_recorded_fills:
+                    if refuse_below_recorded_fills or to_status in TERMINAL_ORDER_LIFECYCLES:
                         self._refuse_below_recorded_fills(session, row)
                     if enforce_from_status:
                         session.refresh(intent)  # the CAS read above ran before the lock

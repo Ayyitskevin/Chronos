@@ -192,10 +192,11 @@ class OrderTracker:
         observation raises the cumulative fill. Neither refinement advances the
         lifecycle.
 
-        ``fills_floor`` (LEGACY-5 r1; the legacy resolver's two callers): the recorded fills are a
-        floor for a TERMINAL update. One whose figure is below the largest recorded fill figure
-        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside
-        the transition's own transaction: the caller's earlier read of the maximum may be stale.
+        Every terminal update is checked against the largest recorded fill inside the repository's
+        transition transaction, regardless of caller flags. A terminal update below that floor
+        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the
+        caller's earlier read of the maximum may be stale. ``fills_floor`` retains its opt-in
+        behavior for non-terminal writes used by existing recovery callers.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -205,9 +206,9 @@ class OrderTracker:
         # The monotonic stale-fill guard applies ONLY to fill-progress updates:
         # a fill callback reporting a lower cumulative fill than already seen is
         # stale and ignored. Terminal/administrative transitions (CANCELLED,
-        # REJECTED, CANCEL_PENDING) must NOT be dropped for carrying a lower
-        # filled_quantity — the state machine decides their legality instead, so
-        # a real terminal resolution is applied (or a contradiction surfaces).
+        # REJECTED, CANCEL_PENDING) are not silently dropped here; lifecycle
+        # legality is checked below, and terminal fill regressions are refused
+        # atomically by the repository's structural fill floor.
         if update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}:
             prior_filled = self._latest_filled(update.intent_id, current_account_id)
             if update.filled_quantity < prior_filled:
