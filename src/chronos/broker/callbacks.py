@@ -194,13 +194,6 @@ class _SingleFlight:
 
 
 @dataclass(slots=True)
-class _CompletedOrdersFlight(_SingleFlight):
-    """One completed-orders stream, tagged with its connection-local request generation."""
-
-    generation: int = 0
-
-
-@dataclass(slots=True)
 class _MarketRuleFlight:
     """One consumable market-rule response for the current connection."""
 
@@ -381,9 +374,8 @@ class CallbackBridge:
         self._current_time: _SingleFlight | None = None
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None
-        self._completed_orders: _CompletedOrdersFlight | None = None
-        self._completed_orders_generation = 0
-        self._retired_completed_orders: deque[_CompletedOrdersFlight] = deque()
+        self._completed_orders: _SingleFlight | None = None
+        self._completed_orders_tainted = False
         self._order_acks: dict[int, _SingleFlight] = {}
         self.order_statuses: dict[int, tuple[str, float, float]] = {}
         self._quotes: dict[int, QuoteState] = {}
@@ -604,64 +596,58 @@ class CallbackBridge:
         if flight is not None:
             flight.done.set()
 
-    def start_completed_orders(self) -> _CompletedOrdersFlight:
+    def start_completed_orders(self) -> _SingleFlight:
         with self._lock:
+            if self._completed_orders_tainted:
+                raise BrokerDataError(
+                    "a completed-orders request timed out; reconnect before requesting "
+                    "completed orders again"
+                )
             if self._completed_orders is not None and not self._completed_orders.done.is_set():
                 raise BrokerDataError(
                     "a completed-orders request is already in flight; reconnect to reset the stream"
                 )
-            self._completed_orders_generation += 1
-            flight = _CompletedOrdersFlight(generation=self._completed_orders_generation)
+            flight = _SingleFlight()
             self._completed_orders = flight
             return flight
 
     def on_completed_order(self, contract: Any, order: Any, order_state: Any) -> None:
         with self._lock:
-            retired = self._retired_completed_orders[0] if self._retired_completed_orders else None
-            flight = None if retired is not None else self._completed_orders
+            flight = self._completed_orders
+            tainted = self._completed_orders_tainted
             if flight is not None and not flight.done.is_set():
                 flight.items.append((contract, order, order_state))
-        if retired is not None:
+        if flight is None and tainted:
             self._logger.warning(
-                "Late completed-orders row discarded for retired request generation %d",
-                retired.generation,
-                extra={
-                    "event": "late_completed_order_discarded",
-                    "request_generation": retired.generation,
-                },
+                "Completed-orders row discarded while the session requires reconnect",
+                extra={"event": "tainted_completed_order_discarded"},
             )
 
     def on_completed_orders_end(self) -> None:
         with self._lock:
-            retired = (
-                self._retired_completed_orders.popleft() if self._retired_completed_orders else None
-            )
-            flight = None if retired is not None else self._completed_orders
+            flight = self._completed_orders
+            tainted = self._completed_orders_tainted
             if flight is not None:
                 flight.done.set()
-        if retired is not None:
+        if flight is None and tainted:
             self._logger.warning(
-                "Late completed-orders end discarded for retired request generation %d",
-                retired.generation,
-                extra={
-                    "event": "late_completed_orders_end_discarded",
-                    "request_generation": retired.generation,
-                },
+                "Completed-orders end discarded while the session requires reconnect",
+                extra={"event": "tainted_completed_orders_end_discarded"},
             )
 
     def release_completed_orders(
         self,
-        flight: _CompletedOrdersFlight,
+        flight: _SingleFlight,
         *,
-        quarantine_late_callbacks: bool = True,
+        taint_if_incomplete: bool = True,
     ) -> None:
-        """Release one request and retain its generation when callbacks can still arrive."""
+        """Release one request and require reconnect when its stream can still answer."""
 
         with self._lock:
             if self._completed_orders is flight:
                 self._completed_orders = None
-                if quarantine_late_callbacks and not flight.done.is_set():
-                    self._retired_completed_orders.append(flight)
+                if taint_if_incomplete and not flight.done.is_set():
+                    self._completed_orders_tainted = True
 
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).
@@ -681,12 +667,11 @@ class CallbackBridge:
             self.next_valid_id = None
             self.order_statuses.clear()
             self._order_acks.clear()
-            # The completed-orders stream has no request id. Active and retired generations from
-            # the old session are dropped (not completed -- their waiters time out on their own),
-            # so a fresh session can ask again (Daybreak U-A r1 P3-1, CPSRECUT r2).
+            # The completed-orders stream has no request id. An unanswered old-session request is
+            # dropped (not completed -- its waiter times out on its own), and the timeout taint is
+            # cleared only for this fresh session (K-20261103-003, CPSRECUT r3).
             self._completed_orders = None
-            self._completed_orders_generation = 0
-            self._retired_completed_orders.clear()
+            self._completed_orders_tainted = False
             quote_request_ids = tuple(self._quotes)
             self._quotes.clear()
             for market_rule_flight in self._market_rule_flights.values():

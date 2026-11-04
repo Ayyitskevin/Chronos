@@ -1391,7 +1391,7 @@ class OfficialIBKRBroker:
         finally:
             self.bridge.release_completed_orders(
                 flight,
-                quarantine_late_callbacks=request_sent,
+                taint_if_incomplete=request_sent,
             )
 
     def _completed_record(self, contract: Any, order: Any, order_state: Any) -> BrokerOrder | None:
