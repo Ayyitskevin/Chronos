@@ -2,11 +2,17 @@
 
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from tests.integration import test_sim_order_lifecycle as sim
 from tests.support.settle_rig import NOW, PERM_ID, ScriptedVenue, make_rig, venue_order
 
+from chronos.api.auth import require_token
+from chronos.api.dependencies import require_writer
+from chronos.api.routes import orders as orders_route
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import CancellationResult
 from chronos.orders.mutations import OrderCancellationService
@@ -228,6 +234,77 @@ def test_repository_refuses_below_floor_for_every_terminal_status(
         rig.close()
 
 
+def test_first_terminal_figure_beyond_column_scale_is_not_refused_against_itself() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+
+        outcome = rig.tracker.ingest(
+            _pending_cancel_fill_update().model_copy(
+                update={
+                    "lifecycle": OrderLifecycle.CANCELLED,
+                    "filled_quantity": Decimal("0.123456789"),
+                }
+            ),
+            current_account_id=rig.account,
+        )
+
+        assert outcome.lifecycle_changed
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+    finally:
+        rig.close()
+
+
+def test_genuinely_lower_over_scale_terminal_figure_is_still_refused() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="0.12345679")
+        before = rig.events()
+
+        with pytest.raises(RecordedFillsAdvanced) as raised:
+            rig.tracker.ingest(
+                _pending_cancel_fill_update().model_copy(
+                    update={
+                        "lifecycle": OrderLifecycle.CANCELLED,
+                        "filled_quantity": Decimal("0.123456781"),
+                    }
+                ),
+                current_account_id=rig.account,
+            )
+
+        assert raised.value.recorded == Decimal("0.12345679")
+        assert raised.value.attempted == Decimal("0.123456781")
+        assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+        assert rig.events() == before
+    finally:
+        rig.close()
+
+
+def test_at_or_above_over_scale_terminal_figure_is_the_precision_control() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="0.12345678")
+
+        outcome = rig.tracker.ingest(
+            _pending_cancel_fill_update().model_copy(
+                update={
+                    "lifecycle": OrderLifecycle.CANCELLED,
+                    "filled_quantity": Decimal("0.123456789"),
+                }
+            ),
+            current_account_id=rig.account,
+        )
+
+        assert outcome.lifecycle_changed
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+    finally:
+        rig.close()
+
+
 def test_figureless_terminal_write_carries_the_recorded_fill_floor() -> None:
     rig = make_rig(ScriptedVenue())
     try:
@@ -288,6 +365,31 @@ def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
         assert rig.tracker.recorded_filled_quantity(
             "intent-1", current_account_id=rig.account
         ) == Decimal("3")
+    finally:
+        rig.close()
+
+
+def test_ingest_fills_floor_flag_still_refuses_a_lower_nonterminal_transition() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="3")
+        lower = _pending_cancel_fill_update().model_copy(
+            update={"filled_quantity": Decimal("2"), "remaining_quantity": Decimal("8")}
+        )
+        before = rig.events()
+
+        with pytest.raises(RecordedFillsAdvanced):
+            rig.tracker.ingest(lower, current_account_id=rig.account, fills_floor=True)
+
+        assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+        assert rig.events() == before
+
+        # The flag remains opt-in for non-terminal writes; the same evidence is
+        # accepted when the caller does not request the additional floor.
+        outcome = rig.tracker.ingest(lower, current_account_id=rig.account)
+        assert outcome.lifecycle_changed
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
     finally:
         rig.close()
 
@@ -439,5 +541,67 @@ def test_cancel_service_accepts_equal_or_higher_explicit_fill(
         assert rig.tracker.recorded_filled_quantity(
             "intent-1", current_account_id=rig.account
         ) == Decimal(expected_fill)
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    ("ack_fill", "expected_status"),
+    [("0", 409), ("5", 200)],
+    ids=["lower-explicit", "equal-control"],
+)
+def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
+    ack_fill: str, expected_status: int
+) -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="5")
+
+        async def cancel_order(broker_order_id: int) -> CancellationResult:
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=True,
+                lifecycle=OrderLifecycle.CANCELLED,
+                message="synthetic explicit cancel acknowledgement",
+                timestamp=NOW,
+                filled_quantity=Decimal(ack_fill),
+            )
+
+        rig.venue.cancel_order = cancel_order
+        service = OrderCancellationService(
+            connection=rig.connection,
+            intents=rig.intents,
+            tracker=rig.tracker,
+            tracker_repo=rig.repo,
+        )
+        management = SimpleNamespace(
+            cancel=lambda intent_id: service.cancel(
+                intent_id, current_account_id=rig.account, now=NOW
+            ),
+            get=lambda intent_id: rig.intents.get(
+                intent_id, current_account_id=rig.account
+            ),
+        )
+        state = SimpleNamespace(runtime=SimpleNamespace(order_management=management))
+        app = FastAPI()
+        app.include_router(orders_route.router)
+        app.dependency_overrides[require_writer] = lambda: state
+        app.dependency_overrides[require_token] = lambda: None
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/orders/intent-1/cancel")
+
+        assert response.status_code == expected_status
+        if ack_fill == "0":
+            detail = response.json()["detail"].lower()
+            assert "5" in detail and "0" in detail and "reconcile" in detail
+            assert rig.status() is OrderLifecycle.CANCEL_PENDING
+            assert rig.tracker.recorded_filled_quantity(
+                "intent-1", current_account_id=rig.account
+            ) == Decimal("5")
+        else:
+            assert rig.status() is OrderLifecycle.CANCELLED
+            assert rig.events()[-1].filled_quantity == Decimal("5")
     finally:
         rig.close()
