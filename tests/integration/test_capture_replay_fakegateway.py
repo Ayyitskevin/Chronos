@@ -20,6 +20,7 @@ import secrets
 import socket
 import subprocess
 import sys
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
@@ -262,19 +263,15 @@ def test_identifiers_and_the_account_are_pseudonymised_in_the_capture(captured: 
     assert all(e["account_id"].startswith("ACCT-") for e in executions)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U-F2-F1: capture_readonly.to_jsonable converts datetime but not date, so a bar's "
-        "session_date is written as the Python repr 'datetime.date(2026, 9, 14)', not an ISO date; "
-        "the fixture still replays byte-exactly, but the field is not data. Harness gap (the "
-        "campaign script), tests only here: not fixed."
-    ),
-)
 def test_a_bars_session_date_is_written_as_an_iso_date(captured: Captured) -> None:
     bars = captured.steps["symbol:AAPL:historical_bars_1d_30d"]["bars"]
     assert bars[0]["session_date"] == "2026-09-14"
+
+
+def test_datetime_jsonable_keeps_its_iso_timestamp() -> None:
+    capture = _load("capture_readonly")
+    value = datetime(2026, 9, 14, 13, 30, tzinfo=UTC)
+    assert capture.to_jsonable(value) == "2026-09-14T13:30:00+00:00"
 
 
 # --- replay: the checklist's EXIT condition --------------------------------------------------
@@ -325,16 +322,6 @@ def test_replay_refuses_a_fixture_that_drifted(captured: Captured, name: str) ->
     assert any(f"sha256 drift in {name}" in f for f in failures), failures
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=json.JSONDecodeError,
-    reason=(
-        "U-F2-F2: replay_check.check_session reports the sha256 drift of a capture.json that is "
-        "no longer JSON, then json.loads it and raises instead of returning the failure; the CLI "
-        "still exits non-zero (fail closed) but with a traceback, not its [FAIL] report. Harness "
-        "gap (the campaign script), tests only here: not fixed."
-    ),
-)
 def test_replay_reports_a_capture_that_is_no_longer_json_as_a_failure(
     captured: Captured,
 ) -> None:
@@ -342,6 +329,19 @@ def test_replay_reports_a_capture_that_is_no_longer_json_as_a_failure(
     path.write_bytes(path.read_bytes()[:-3])  # truncated mid-document
     failures = _load("replay_check").check_session(captured.out)
     assert any("sha256 drift in capture.json" in f for f in failures), failures
+    assert any("capture.json is not valid JSON" in f for f in failures), failures
+
+
+def test_replay_reports_valid_non_object_capture_as_a_failure(captured: Captured) -> None:
+    path = captured.out / "capture.json"
+    path.write_text("[]", encoding="utf-8")
+    manifest_path = captured.out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["capture.json"] = sha256(b"[]").hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    failures = _load("replay_check").check_session(captured.out, allow_demo=True)
+    assert failures == [f"{captured.out}: capture.json must be a JSON object"]
 
 
 def test_replay_refuses_a_hand_edited_capture_even_with_a_matching_manifest(
