@@ -151,6 +151,16 @@ IBKR smoke test (docs/TEST_PLAN.md).
 
 ## Running things
 
+Autonomy maintenance is ON by default for `make backend` / `scripts/run_backend.py`.
+The default backend provides read paths and reconciliation but reports
+`autonomy_maintenance` and NOT_READY (HTTP 503), including with no configured mandate.
+For an owner-approved normal foreground start, set `CHRONOS_AUTONOMY_MAINTENANCE=off`
+in its process environment and restart; a repo-root `.env` line does not lift it.
+For systemd, the source is the unit's discovered backend EnvironmentFile; follow
+`docs/SHADOW_CAMPAIGN.md` §3 and the ON/OFF pre-start proof in `docs/ops/N3-CUTOVER.md`.
+The cutover drop-in removes the variable last and remains required through step 8.
+Demo and read-only UI workflows may keep maintenance ON; readiness is then deliberately 503.
+
 Start the loopback wheel backend with `make backend`. Its machine probes are
 `http://127.0.0.1:8765/health/live` (process liveness) and `/health/ready`
 (operator-service readiness). Readiness returns HTTP 503 when that verdict is `STARTING` or

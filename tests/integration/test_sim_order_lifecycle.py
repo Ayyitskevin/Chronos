@@ -159,17 +159,6 @@ def official_transmit_settings(**overrides: object) -> Settings:
 #: (venue, case) -> (id, exception the venue raises instead, why). Strict xfails: the day
 #: the difference disappears, the case XPASSes and fails the suite until the row is removed.
 KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] = {
-    (
-        "official_fake",
-        "test_modify_when_the_sim_allows_it_reprices_the_working_order_and_reconciles",
-    ): (
-        "S2-D1",
-        BrokerRefusedBeforeSend,
-        "OfficialIBKRBroker.modify_order refuses modify-in-place before send BY DESIGN "
-        "(official_ibkr.py: 'not implemented for the official adapter in M7; cancel and "
-        "re-submit'); U1's contract pins that refusal. SimBroker's opt-in replace has no "
-        "counterpart in the adapter, so this sim-only capability case cannot pass there.",
-    ),
     ("official_fake", "test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order"): (
         "U0-D1",
         AssertionError,
@@ -794,9 +783,12 @@ def test_modify_is_refused_before_send_by_the_faithful_sim_and_changes_nothing(
         assert [u.lifecycle for u in report.applied_updates] == [OrderLifecycle.FILLED]
 
 
+@pytest.mark.parametrize("venue", ("sim",), indirect=True)
 def test_modify_when_the_sim_allows_it_reprices_the_working_order_and_reconciles(
     venue: _Venue,
 ) -> None:
+    # This opt-in replace is SimBroker-only: the official adapter refuses modify-in-place by
+    # design, and that refusal is covered by the sibling test and U1's contract test.
     # The opt-in replace. Fails if the MODIFIED evidence stops carrying the new price (the
     # reconciler would then see a limit mismatch and leave the intent unresolved), or if
     # the sim's fill rule stops using the replaced limit.

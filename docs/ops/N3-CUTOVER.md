@@ -57,6 +57,116 @@ nothing of yours — the four sentinel directories it leaves at the live names i
 `--restore-into` (N3-4, step 4); never calls the broker; has no `--force`. Every refusal is a typed
 `code` in its JSON and exit `2`; `--apply` writes nothing before every check has passed.
 
+## Backend autonomy maintenance — required before every cutover boot
+
+Autonomy maintenance is ON by default. Before the FIRST backend start in this cutover
+(including the restart after recovery acknowledgement), the Kevin-authorized operator must
+install a dedicated `chronos-backend.service.d/90-autonomy-maintenance.conf` drop-in:
+
+```ini
+# MAINT-R1 cutover drop-in
+[Service]
+UnsetEnvironment=CHRONOS_AUTONOMY_MAINTENANCE
+```
+
+Then `systemctl --user daemon-reload` and run the pre-start proof below. **Do not substitute
+`Environment=CHRONOS_AUTONOMY_MAINTENANCE=on`: `EnvironmentFile=` overrides `Environment=`.**
+`UnsetEnvironment=` is applied last and removes the variable from every systemd environment source, including an
+inherited or stale `off` in the private environment file. Absence invokes the backend's safe ON
+default before assembly. A later drop-in can clear that removal; the effective-property check
+below catches it before startup. The repo-root `.env` read by Settings does not set this switch;
+the unit's `chronos-backend.env` does become process environment. No key/token is part of the
+switch. This page authorizes no agent to edit a unit, reload it, restart a service or lift it.
+
+**Repeat this entire proof immediately before EVERY backend start/restart through step 8.**
+Replace `<PRIVATE_ENV_DIR>` with the absolute private directory discovered for this unit, as in
+the one-home check below, and `<ABSOLUTE_CHRONOS_CHECKOUT>` with the independently reviewed
+absolute checkout path. The expected command is the shipped unit's direct
+`.venv/bin/python scripts/run_backend.py`, with that checkout as its working directory; do not
+derive an expected command from an unreviewed override. The required file list must be exactly the shipped backend source;
+an empty, optional, additional or unexpected source, failed discovery, stale reload or missing
+final removal is a STOP. The ON branch never reads or prints private file contents. Run in Bash:
+
+```bash
+# MAINT-R1 pre-start proof
+(
+set -euo pipefail
+maintenance_expect=on
+backend_unit=chronos-backend.service
+expected_env_file='<PRIVATE_ENV_DIR>/chronos-backend.env'
+expected_checkout='<ABSOLUTE_CHRONOS_CHECKOUT>'
+stop_maintenance_proof() { printf 'STOP: %s\n' "$1" >&2; exit 1; }
+unit_property() { systemctl --user show "$backend_unit" --property="$1" --value; }
+case "$expected_env_file" in /*) ;; *) stop_maintenance_proof 'replace the private directory';; esac
+load_state=$(unit_property LoadState)
+[ "$load_state" = loaded ] || stop_maintenance_proof 'backend unit is not loaded'
+reload_needed=$(unit_property NeedDaemonReload)
+[ "$reload_needed" = no ] || stop_maintenance_proof 'reload the reviewed unit first'
+working_directory=$(unit_property WorkingDirectory)
+[ "$working_directory" = "$expected_checkout" ] ||
+  stop_maintenance_proof 'effective working directory differs from the reviewed checkout'
+exec_start=$(unit_property ExecStart)
+exec_identity=${exec_start%%' ; start_time='*}
+expected_exec_identity="{ path=$expected_checkout/.venv/bin/python ; argv[]=$expected_checkout/.venv/bin/python scripts/run_backend.py ; ignore_errors=no"
+[ "$exec_identity" = "$expected_exec_identity" ] ||
+  stop_maintenance_proof 'effective ExecStart differs from the reviewed direct command'
+exec_metadata=${exec_start#"$exec_identity ; "}
+exec_metadata_pattern='^start_time=[^;{}]* ; stop_time=[^;{}]* ; pid=[0-9]+ ; code=[^;{}]* ; status=[^;{}]* }$'
+[[ "$exec_metadata" =~ $exec_metadata_pattern ]] ||
+  stop_maintenance_proof 'unsupported or multiple ExecStart records'
+environment_files=$(unit_property EnvironmentFiles)
+[ "$environment_files" = "$expected_env_file (ignore_errors=no)" ] ||
+  stop_maintenance_proof 'effective backend environment files differ from the reviewed source'
+final_removals=$(unit_property UnsetEnvironment)
+case "$maintenance_expect" in
+  on)
+    case " $final_removals " in
+      *" CHRONOS_AUTONOMY_MAINTENANCE "*) ;;
+      *) stop_maintenance_proof 'final name-only maintenance removal is missing';;
+    esac
+    ;;
+  off)
+    case "$final_removals" in
+      *CHRONOS_AUTONOMY_MAINTENANCE*) stop_maintenance_proof 'maintenance removal is still effective';;
+    esac
+    counts=$(awk '
+      !/^[[:space:]]*#/ && index($0, "CHRONOS_AUTONOMY_MAINTENANCE") {
+        named++; if ($0 == "CHRONOS_AUTONOMY_MAINTENANCE=off") exact++
+      }
+      END {printf "%d %d", named, exact}
+    ' "$expected_env_file")
+    [ "$counts" = '1 1' ] || stop_maintenance_proof 'require one exact off assignment and no conflicts'
+    ;;
+  *) stop_maintenance_proof 'expected mode must be on or off';;
+esac
+printf 'maintenance pre-start proof: %s\n' "${maintenance_expect^^}"
+)
+```
+
+The successful ON readback is `maintenance pre-start proof: ON`. Do not start on any other
+result. These readbacks prove the loaded effective configuration and `NeedDaemonReload=no`,
+not that a `daemon-reload` command was executed; keep the explicit reload instruction above.
+The command check rejects lexically distinct prefixes, wrappers, arguments and working directories.
+Its single-command readback format was measured on systemd 259; unsupported serialization is
+a STOP. ON proves systemd's final environment removal and the reviewed lexical execution identity,
+not the rest of cutover readiness. It does not resolve symlinks or attest interpreter, script or
+imported-code bytes. A wrapper behind the expected interpreter symlink can change the child
+environment while this lexical check passes. Reviewing symlink resolution is part of the existing
+owner-user trust boundary. Keep the reviewed symlink resolution, interpreter/checkout, configuration
+and environment sources unchanged between proof and start; if anything changes, reload and repeat.
+This does not defend against an operator changing those inputs after the check.
+
+Keep it ON through step 8. Even a mandate already matching the newly keyed store then cannot
+activate or schedule a tick. `/health` must include `autonomy_maintenance`, the autonomy task
+must be NOT_EXPECTED, and the server emits a CRITICAL `autonomy_maintenance` event. Normal
+backend initialization and reconciliation continue. `/health/live` stays 200; `/health/ready`
+is 503 while this intentional startup inhibit is set. A diagnostic `/health` 200 alone is not
+proof. Preserve the existing mandate quarantine as an additional precaution, not a substitute
+for this backend guard. Lift only at step 9, on Kevin's explicit word, using the single-source
+OFF procedure there. There is no in-process or automatic lift. Even without a configured
+mandate, the default inhibit intentionally reports NOT_READY; do not lift it merely to silence
+a readiness check.
+
 ## Before you start
 
 - **Do not schedule or run the cutover until FIX-RT (restore-target hardening) AND N3-3 (`chronos.operations.backup_pruner`) have both merged to main.** **And do not schedule or run it until N3-4 (the self-cleaning restore drill, P2-4 = B) AND the recovery-key-only escrow change have merged to main too.** **And do not schedule or run it until C1-F (the step-8 and rollback fixes from the C1 rehearsal) has merged to main too.** The STOP at the top of this page says how to check. If any is
@@ -433,7 +543,8 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    ```
    Your hand, never the command's: it removes nothing. With the four names absent, the backend's
    startup creates a fresh database at the running schema (18) — `python -m chronos.cli
-   db-preflight` first, then `systemctl --user start chronos-backend` — and refuses to start
+   db-preflight` first, then repeat the ON pre-start proof above immediately before
+   `systemctl --user start chronos-backend` — and refuses to start
    without a well-formed `CHRONOS_PERSISTENCE_KEY` (demo included). `systemctl --user is-active
    chronos-backend` → `active`; `curl -fsS http://127.0.0.1:<port>/health`.
 
@@ -495,7 +606,7 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    It must print these four lines, then one log line whose message begins `This boot cannot
    prove it does not follow a restore (database_replaced)`:
    ```
-   startup_faults: recovery_unverified
+   startup_faults: autonomy_maintenance recovery_unverified
    reconciliation: PENDING
    tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=NOT_EXPECTED
    {"detail":"This backend booted under a recovery hold and is running read-only: the state directory names an installation this database has never witnessed; the database was replaced beneath surviving state files. Acknowledge it with a note at POST /live/recovery/acknowledge and restart."} HTTP 409
@@ -505,8 +616,9 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    **Anything else is not the cutover's state: stop the backend (`systemctl --user stop
    chronos-backend`), acknowledge nothing, and stop here.** That includes another reason in the
    log or the 409 (`state_directory_lost`, `marker_unreadable`, `installation_mismatch`,
-   `restore_pending`), another startup fault beside `recovery_unverified`, and no hold at all:
-   `startup_faults: none` here means the marker was not where the backend looks, so the
+   `restore_pending`), another startup fault besides `autonomy_maintenance` and `recovery_unverified`, and no hold at all:
+   `autonomy_maintenance` without `recovery_unverified` here means the marker was not where
+   the backend looks, so the
    live-safety state this host ran with is missing. `python -m chronos.cli campaign status` and
    `campaign preflight` cannot show this reason: until the restart after your acknowledgement they
    report the fresh store's missing `installation_identity` row as UNVERIFIED. That restart writes
@@ -528,26 +640,26 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    observation and takes effect at the next start, so this process stays held. It does not
    disengage the kill switch, arm, or activate a mandate.
 
-   **Restart, then prove the hold is gone, before step 8.** `systemctl --user restart
+   **Restart, then prove the hold is gone, before step 8.** Repeat the ON pre-start proof
+   above immediately before `systemctl --user restart
    chronos-backend`, then `systemctl --user is-active chronos-backend` → `active`, then the
    `/health` and `/autonomy/alerts` commands above again, but not the `grep`: the log still holds
    the held boot's `recovery_hold_engaged` line, which proves nothing now. They must print:
    ```
-   startup_faults: none
+   startup_faults: autonomy_maintenance
    reconciliation: RECONCILED
    tasks: autonomy=NOT_EXPECTED lease_heartbeat=RUNNING reconciliation=RUNNING
    [] HTTP 200
    ```
-   `startup_faults: none`: the hold is cleared. `HTTP 200`: writes are allowed (the body lists
-   unacknowledged alerts; it may hold the mandate alert below instead of `[]`).
+   `startup_faults: autonomy_maintenance`: only the deliberate autonomy inhibit remains;
+   the recovery hold is cleared. `HTTP 200`: the read succeeds; the body lists any
+   unacknowledged alerts instead of `[]`.
    `reconciliation: RECONCILED` with `reconciliation=RUNNING`: startup reconciliation ran and
    the refresher runs (`STARTING` in the first seconds: re-run). `autonomy=NOT_EXPECTED` is
-   right until step 9, for one of two reasons: no `AUTONOMY_MANDATE_FILE` is configured, or the
-   configured mandate still carries the unkeyed fingerprint. Then the log says `Persistent
-   mandate is scoped to a different account; autonomy stays inert`, and the alert list holds
-   `"kind":"autonomy.mandate_invalid"`. Step 9 re-authors the mandate; autonomy starts after it.
-   **Anything else (a startup fault, a 409, `reconciliation` not `RECONCILED`,
-   `autonomy=RUNNING`: a grant active before step 8 proved the key) means stop the backend and
+   required until step 9: maintenance blocks assembly even when a configured mandate already
+   matches the new keyed fingerprint. No mandate activation may be written during these boots.
+   **Anything else (a startup fault other than `autonomy_maintenance`, a 409,
+   `reconciliation` not `RECONCILED`, or `autonomy=RUNNING`) means stop the backend and
    stop here.** A bare `/health` 200 is not this proof. Steps 8 and 9 start only after it passes.
 
 8. **Bind — and prove the store bound under the ESCROWED key.** The first bound run writes the
@@ -638,7 +750,22 @@ nothing of yours — the four sentinel directories it leaves at the live names i
    `python -m chronos.cli mandate check --file <mandate> --account-id DU1234567` (the same id)
    must print `STATUS             VALID`, `[NOTE] account-match` and a SUMMARY line that begins
    `0 blocking` — a BLOCKING `account-mismatch` means the old fingerprint is still in the file.
-   Only then start the worker and enable autonomy per the shadow-campaign runbook.
+   Only after all preceding proofs pass and Kevin explicitly authorizes the lift, remove only
+   the dedicated `90-autonomy-maintenance.conf` drop-in, preserving all other unit controls.
+   In the one required backend EnvironmentFile discovered above, set exactly one uncommented
+   `CHRONOS_AUTONOMY_MAINTENANCE=off` line (one assignment per line, no quoting, `export`,
+   continuation or duplicate for this switch). Do not use an `Environment=` override or the
+   repo-root `.env` as the source. Reload with `systemctl --user daemon-reload`, then repeat
+   the entire pre-start proof with **`maintenance_expect=off`**. It must discover the same
+   reviewed lexical execution identity and required file, no maintenance removal, and one exact off assignment with no conflicts;
+   otherwise STOP before restarting. `maintenance pre-start proof: OFF` permits only this
+   explicitly authorized restart, not a grant or readiness claim. This verifies the loaded
+   effective state, not command history; the explicit daemon-reload instruction still applies.
+   A running process never
+   re-reads the switch. Restart the backend and verify
+   that `autonomy_maintenance` is absent from `/health`; any other fault/refusal remains a STOP.
+   The normal mandate/posture/recovery gates still decide whether autonomy can start. Only then
+   start the worker and enable autonomy per the shadow-campaign runbook.
 
 10. **Retention — 90 days.** The envelope under `--out` is a pre-cutover backup (its manifest
     says `schema_version:17`); the pruner deletes it after 90 days, as the ruling says. Run
