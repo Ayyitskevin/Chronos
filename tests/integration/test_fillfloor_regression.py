@@ -2,10 +2,14 @@
 
 from decimal import Decimal
 
+import pytest
 from tests.support.settle_rig import NOW, PERM_ID, ScriptedVenue, make_rig, venue_order
 
 from chronos.domain.enums import OrderLifecycle
+from chronos.domain.models import CancellationResult
+from chronos.orders.mutations import OrderCancellationService
 from chronos.orders.tracker import OrderStatusUpdate
+from chronos.persistence.order_repositories import RecordedFillsAdvanced
 
 
 def _pending_cancel_fill_update() -> OrderStatusUpdate:
@@ -115,5 +119,86 @@ def test_fill_between_replan_and_write_is_typed_and_keeps_cancel_pending() -> No
         assert len(report.unresolved) == 1
         assert report.unresolved[0].reason.startswith("fill_floor_conflict: RecordedFillsAdvanced:")
         assert "recorded fills advanced" in report.unresolved[0].reason
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [OrderLifecycle.FILLED, OrderLifecycle.CANCELLED, OrderLifecycle.REJECTED],
+)
+def test_repository_refuses_below_floor_for_every_terminal_status(
+    terminal_status: OrderLifecycle,
+) -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="3")
+        before = rig.events()
+
+        with pytest.raises(RecordedFillsAdvanced) as raised:
+            rig.repo.record_transition(
+                intent_id="intent-1",
+                event_key=f"terminal-below-floor:{terminal_status.value}",
+                source="TEST",
+                from_status=OrderLifecycle.PARTIALLY_FILLED,
+                to_status=terminal_status,
+                current_account_id=rig.account,
+                filled_quantity=Decimal("0"),
+                occurred_at=NOW,
+                enforce_from_status=True,
+            )
+
+        assert raised.value.recorded == Decimal("3")
+        assert raised.value.attempted == Decimal("0")
+        assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+        assert rig.events() == before
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("late_fill", [False, True], ids=["already-witnessed", "during-cancel"])
+def test_cancel_service_surfaces_typed_floor_refusal_and_keeps_order_unresolved(
+    late_fill: bool,
+) -> None:
+    venue = ScriptedVenue()
+    rig = make_rig(venue)
+    try:
+        rig.seed()
+        if not late_fill:
+            fill = _pending_cancel_fill_update().model_copy(
+                update={"lifecycle": OrderLifecycle.PARTIALLY_FILLED}
+            )
+            assert rig.tracker.ingest(fill, current_account_id=rig.account).lifecycle_changed
+
+        async def cancel_order(broker_order_id: int) -> CancellationResult:
+            if late_fill:
+                assert rig.tracker.ingest(
+                    _pending_cancel_fill_update(), current_account_id=rig.account
+                ).fill_progress_recorded
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=True,
+                lifecycle=OrderLifecycle.CANCELLED,
+                message="synthetic cancel",
+                timestamp=NOW,
+            )
+
+        venue.cancel_order = cancel_order
+        service = OrderCancellationService(
+            connection=rig.connection,
+            intents=rig.intents,
+            tracker=rig.tracker,
+            tracker_repo=rig.repo,
+        )
+
+        with pytest.raises(RecordedFillsAdvanced):
+            service.cancel("intent-1", current_account_id=rig.account, now=NOW)
+
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("1")
+        assert not any(event.to_status is OrderLifecycle.CANCELLED for event in rig.events())
     finally:
         rig.close()

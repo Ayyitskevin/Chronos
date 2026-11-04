@@ -352,14 +352,16 @@ def test_r2_the_maximum_is_per_intent(book: _Book) -> None:
     assert book.status("intent-2") is OrderLifecycle.CANCELLED
 
 
-def test_r2_ingest_without_the_keyword_keeps_todays_terminal_write(book: _Book) -> None:
-    """P3-2: ``fills_floor`` defaults off; every other ingest caller is unchanged."""
+def test_r2_ingest_without_the_keyword_still_enforces_terminal_fill_floor(book: _Book) -> None:
+    """A terminal write cannot bypass the shared floor by omitting ``fills_floor``."""
 
     book.seed(OrderLifecycle.PARTIALLY_FILLED)
-    outcome = book.a.tracker.ingest(
-        _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT
-    )
-    assert outcome.lifecycle_changed and book.status() is OrderLifecycle.CANCELLED
+    with pytest.raises(RecordedFillsAdvanced):
+        book.a.tracker.ingest(_update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT)
+
+    assert book.status() is OrderLifecycle.PARTIALLY_FILLED
+    assert book.max_recorded() == Decimal("3")
+    assert all(status is not OrderLifecycle.CANCELLED for status, _ in book.trail())
 
 
 def test_r2_the_floor_applies_to_terminal_updates_only(book: _Book) -> None:
