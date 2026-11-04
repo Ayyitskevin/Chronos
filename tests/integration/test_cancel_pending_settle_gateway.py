@@ -264,7 +264,8 @@ def test_P3_1_a_timed_out_completed_orders_read_requires_reconnect(
     report = _at(rig)
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
-    adapter.bridge.reset_for_reconnect()
+    rig.connection.disconnect()
+    rig.connection.connect()
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
 
@@ -287,3 +288,16 @@ def test_P3_1_a_reconnect_reset_releases_an_unanswered_completed_orders_flight()
     bridge.on_completed_order(object(), object(), object())
     bridge.on_completed_orders_end()
     assert fresh.done.is_set() and len(fresh.items) == 1 and stale.items == []
+
+
+def test_a_healthy_connect_does_not_clear_completed_order_timeout_taint(
+    world: tuple[Rig, OfficialIBKRBroker],
+) -> None:
+    rig, adapter = world
+    flight = adapter.bridge.start_completed_orders()
+    adapter.bridge.release_completed_orders(flight)
+
+    rig.connection.connect()
+
+    with pytest.raises(BrokerDataError, match="reconnect"):
+        adapter.bridge.start_completed_orders()
