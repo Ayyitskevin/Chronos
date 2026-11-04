@@ -226,6 +226,43 @@ def test_repository_refuses_below_floor_for_every_terminal_status(
         rig.close()
 
 
+def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        witnessed = _pending_cancel_fill_update().model_copy(
+            update={"filled_quantity": Decimal("3"), "remaining_quantity": Decimal("7")}
+        )
+        rig.tracker.ingest(witnessed, current_account_id=rig.account)
+        before = rig.events()
+
+        with pytest.raises(RecordedFillsAdvanced):
+            rig.tracker.record_planned_transition(
+                intent_id="intent-1",
+                current_account_id=rig.account,
+                from_status=OrderLifecycle.CANCEL_PENDING,
+                to_status=OrderLifecycle.PARTIALLY_FILLED,
+                event_key="planned:PARTIALLY_FILLED:2",
+                source="RECONCILE",
+                broker_order_id=9001,
+                permanent_id=PERM_ID,
+                client_id=17,
+                filled_quantity=Decimal("2"),
+                remaining_quantity=Decimal("8"),
+                evidence={"venue_fill_figure": "2"},
+                now=NOW,
+            )
+
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert rig.events() == before
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("3")
+    finally:
+        rig.close()
+
+
 @pytest.mark.parametrize("late_fill", [False, True], ids=["already-witnessed", "during-cancel"])
 def test_cancel_service_surfaces_typed_floor_refusal_and_keeps_order_unresolved(
     late_fill: bool,
