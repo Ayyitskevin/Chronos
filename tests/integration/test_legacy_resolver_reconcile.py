@@ -713,9 +713,9 @@ def test_r1_the_reconcile_report_path_refuses_the_same_stale_terminal_write(
 # --- LEGACY-5 r1: the repository's conditional write, directly ---------------------------------
 
 
-@pytest.mark.parametrize("attempted", ["0", "2", None], ids=["zero", "below", "missing"])
+@pytest.mark.parametrize("attempted", ["0", "2"], ids=["zero", "below"])
 def test_r1_record_transition_refuses_a_figure_below_the_recorded_maximum(
-    rig: _Rig, attempted: str | None
+    rig: _Rig, attempted: str
 ) -> None:
     from chronos.persistence.order_repositories import RecordedFillsAdvanced
 
@@ -730,14 +730,14 @@ def test_r1_record_transition_refuses_a_figure_below_the_recorded_maximum(
             from_status=OrderLifecycle.PARTIALLY_FILLED,
             to_status=OrderLifecycle.CANCELLED,
             current_account_id=ACCOUNT,
-            filled_quantity=None if attempted is None else Decimal(attempted),
+            filled_quantity=Decimal(attempted),
             occurred_at=NOW,
             enforce_from_status=True,
             refuse_below_recorded_fills=True,
         )
 
     assert refused.value.recorded == Decimal(3)
-    assert refused.value.attempted == Decimal(attempted or "0")
+    assert refused.value.attempted == Decimal(attempted)
     assert rig.repo.events("intent-1", current_account_id=ACCOUNT) == before  # nothing written
     assert rig.status() is OrderLifecycle.PARTIALLY_FILLED  # status untouched
 

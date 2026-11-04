@@ -226,6 +226,33 @@ def test_repository_refuses_below_floor_for_every_terminal_status(
         rig.close()
 
 
+def test_figureless_terminal_write_carries_the_recorded_fill_floor() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="3")
+
+        assert rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="terminal-figureless-cancelled",
+            source="CANCEL",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            to_status=OrderLifecycle.CANCELLED,
+            current_account_id=rig.account,
+            occurred_at=NOW,
+            enforce_from_status=True,
+        )
+
+        terminal_event = rig.events()[-1]
+        assert terminal_event.to_status is OrderLifecycle.CANCELLED
+        assert terminal_event.filled_quantity == Decimal("3")
+        assert rig.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=rig.account
+        ) == Decimal("3")
+    finally:
+        rig.close()
+
+
 def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
     rig = make_rig(ScriptedVenue())
     try:
@@ -264,7 +291,7 @@ def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
 
 
 @pytest.mark.parametrize("late_fill", [False, True], ids=["already-witnessed", "during-cancel"])
-def test_cancel_service_surfaces_typed_floor_refusal_and_keeps_order_unresolved(
+def test_cancel_service_carries_figureless_terminal_fill_forward(
     late_fill: bool,
 ) -> None:
     venue = ScriptedVenue()
@@ -298,13 +325,15 @@ def test_cancel_service_surfaces_typed_floor_refusal_and_keeps_order_unresolved(
             tracker_repo=rig.repo,
         )
 
-        with pytest.raises(RecordedFillsAdvanced):
-            service.cancel("intent-1", current_account_id=rig.account, now=NOW)
+        result = service.cancel("intent-1", current_account_id=rig.account, now=NOW)
 
-        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert result.lifecycle is OrderLifecycle.CANCELLED
+        assert rig.status() is OrderLifecycle.CANCELLED
         assert rig.tracker.recorded_filled_quantity(
             "intent-1", current_account_id=rig.account
         ) == Decimal("1")
-        assert not any(event.to_status is OrderLifecycle.CANCELLED for event in rig.events())
+        terminal_event = rig.events()[-1]
+        assert terminal_event.to_status is OrderLifecycle.CANCELLED
+        assert terminal_event.filled_quantity == Decimal("1")
     finally:
         rig.close()

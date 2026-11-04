@@ -473,9 +473,11 @@ class OrderTrackerRepository:
         Every terminal lifecycle (FILLED, CANCELLED, REJECTED) enforces the recorded-fill floor
         regardless of caller flags. ``refuse_below_recorded_fills=True`` additionally preserves
         the explicit floor for any non-terminal write, as used by existing recovery callers. The
-        largest ``filled_quantity`` is read inside this row's savepoint, after its INSERT took the
-        write lock; when this write's figure (a missing figure counts as zero) is below it,
-        :class:`RecordedFillsAdvanced` is raised, the savepoint rolls back and nothing is written.
+        largest ``filled_quantity`` is read inside this row's savepoint, after its INSERT took
+        the write lock. A terminal write without a figure inherits that recorded maximum when one
+        exists; if no fill figure is recorded, the terminal row remains figureless. An explicit
+        lower figure raises :class:`RecordedFillsAdvanced`, the savepoint rolls back, and nothing
+        is written.
         """
 
         with self._sessions.begin() as session:
@@ -512,6 +514,11 @@ class OrderTrackerRepository:
                 with session.begin_nested():
                     session.add(row)
                     session.flush()
+                    if to_status in TERMINAL_ORDER_LIFECYCLES and row.filled_quantity is None:
+                        recorded = self._max_recorded_fills(session, intent_id)
+                        if recorded is not None:
+                            row.filled_quantity = Decimal(recorded)
+                            session.flush()
                     if refuse_below_recorded_fills or to_status in TERMINAL_ORDER_LIFECYCLES:
                         self._refuse_below_recorded_fills(session, row)
                     if enforce_from_status:
@@ -540,10 +547,17 @@ class OrderTrackerRepository:
             return tuple(_event_row_to_record(row) for row in rows)
 
     @staticmethod
-    def _refuse_below_recorded_fills(session: Session, row: OrderEventRow) -> None:
-        """LEGACY-5 r1: raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than
-        the largest figure on the intent's events (``row`` itself included: its own figure is
-        never above itself, so it cannot change the answer).
+    def _max_recorded_fills(session: Session, intent_id: str) -> Decimal | None:
+        return session.scalar(
+            select(func.max(OrderEventRow.filled_quantity)).where(
+                OrderEventRow.intent_id == intent_id
+            )
+        )
+
+    @classmethod
+    def _refuse_below_recorded_fills(cls, session: Session, row: OrderEventRow) -> None:
+        """Raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than the
+        largest figure on the intent's events (``row`` itself included).
 
         Called inside the row's savepoint, after its flush: the INSERT took the write lock, so no
         other writer can commit between this read and the commit, and raising rolls the savepoint
@@ -551,11 +565,7 @@ class OrderTrackerRepository:
         transaction before the first statement, so a savepoint RELEASE would commit it).
         """
 
-        recorded = session.scalar(
-            select(func.max(OrderEventRow.filled_quantity)).where(
-                OrderEventRow.intent_id == row.intent_id
-            )
-        )
+        recorded = cls._max_recorded_fills(session, row.intent_id)
         attempted = row.filled_quantity if row.filled_quantity is not None else Decimal(0)
         if recorded is not None and attempted < recorded:
             raise RecordedFillsAdvanced(
