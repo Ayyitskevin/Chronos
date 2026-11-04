@@ -502,19 +502,10 @@ REGISTRY: dict[str, BrokerHarness] = _load_registry()
 # Findings and the strict-xfail table.
 # ---------------------------------------------------------------------------
 
-FINDINGS: dict[str, str] = {
-    "U1-F1": (
-        "DemoBroker.cancel_order reports CANCELLED but leaves the order in open_orders "
-        "(src/chronos/broker/demo.py:483-509 never touches self._orders). Demo is "
-        "display-only; a fix is a separate one-line src unit for Kevin to rule on "
-        "(SURVEY G2)."
-    ),
-}
+FINDINGS: dict[str, str] = {}
 
 #: (harness name, test function name) -> finding id. Each entry is a STRICT xfail.
-KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {
-    ("demo", "test_cancel_removes_a_cancelled_order_from_open_orders"): "U1-F1",
-}
+KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {}
 
 
 def _harness_name(request: pytest.FixtureRequest) -> str | None:
