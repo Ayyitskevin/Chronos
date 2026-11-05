@@ -39,6 +39,7 @@ from chronos.broker.base import (
     BrokerRefusedBeforeSend,
     BrokerSafetyError,
     BrokerSendGuard,
+    CompletedOrdersReconnectRequired,
     OptionChainResponse,
     OrderOwnershipLedger,
     VenueOrderIdentity,
@@ -1380,7 +1381,9 @@ class OfficialIBKRBroker:
             done = await asyncio.get_running_loop().run_in_executor(
                 None, flight.done.wait, _REQUEST_TIMEOUT_S
             )
-            if not done or self.bridge.connection_closed.is_set():
+            if not done:
+                raise CompletedOrdersReconnectRequired
+            if self.bridge.connection_closed.is_set():
                 raise BrokerConnectionError("completed-orders request did not complete")
             records: list[BrokerOrder] = []
             for contract, order, order_state in flight.items:

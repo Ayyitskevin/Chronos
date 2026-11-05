@@ -244,8 +244,8 @@ def _identity_conflict_reason(
                 )
             ):
                 return (
-                    "identity conflict: broker evidence reports the persisted permanent id "
-                    "under another order reference"
+                    f"identity conflict: broker {kind} evidence reports the persisted "
+                    "permanent id under another order reference"
                 )
             if (
                 observation.account_id != current_account_id
@@ -788,6 +788,7 @@ class OrderRestartReconciler:
         ] = []
         read_completed = self._completed_reader()
         for intent in working:
+            identities: PersistedIdentities | None = None
             persisted_broker_order_id = self._tracker.broker_order_id(
                 intent.intent_id,
                 current_account_id=current_account_id,
@@ -808,6 +809,15 @@ class OrderRestartReconciler:
                     self._tracker.single_broker_order_id(
                         intent.intent_id, current_account_id=current_account_id
                     )
+                    identities = self._tracker.persisted_identities(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
+                    if len(identities.broker_order_ids) > 1:
+                        raise OrderIdentityConflict(
+                            intent.intent_id,
+                            tuple(sorted(identities.broker_order_ids)),
+                            field="broker_order_id",
+                        )
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.
@@ -827,9 +837,7 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             if planned:
-                identities = self._tracker.persisted_identities(
-                    intent.intent_id, current_account_id=current_account_id
-                )
+                assert identities is not None
                 # the same planner, bound to this intent's persisted facts, re-runs over the
                 # confirming snapshot before any write (design §3.1; Daybreak U-A r1 P1-2)
                 planner = partial(

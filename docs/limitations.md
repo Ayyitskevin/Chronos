@@ -138,7 +138,8 @@ runbooks.
   late rows are discarded. The production runtime connects once during backend startup and has no
   in-process reconnect loop, so today the operator action that creates that fresh session is a
   backend restart. The restarted process remains unreconciled until a later startup, operator, or
-  periodic pass proves parity.
+  periodic pass proves parity. The refused read still counts as a failed broker call and freezes
+  other intents' planned writes until that restart.
 - The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
   basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance

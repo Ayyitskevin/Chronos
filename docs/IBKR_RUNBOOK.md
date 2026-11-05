@@ -98,6 +98,9 @@ a reconnect, the current operator action is to restart the backend after restori
 session. That restart creates the fresh broker session; it does not prove reconciliation or rearm
 either safety plane. Continue with every step below.
 
+For the generic identity conflict, a broker order-evidence row can be cleared by cancelling that
+open order in TWS; a broker execution-evidence row cannot be cleared by the operator.
+
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
    ```bash
