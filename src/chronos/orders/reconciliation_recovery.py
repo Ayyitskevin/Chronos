@@ -879,16 +879,21 @@ class OrderRestartReconciler:
                 continue
             try:
                 outcome = self._tracker.ingest(update, current_account_id=current_account_id)
-            except RecordedFillsAdvanced as refused:
+            except (RecordedFillsAdvanced, OrderLifecycleError) as refused:
                 # LEGACY-5: the terminal write was refused atomically because a concurrent writer
-                # advanced the recorded fill maximum after this pass read it.
+                # advanced the recorded fill maximum after this pass read it. A contradictory
+                # lifecycle likewise holds only this intent; other intents must still reconcile.
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
                         local_status=intent.status,
                         broker_status=update.lifecycle,
                         transition_applied=False,
-                        reason=str(refused),
+                        reason=(
+                            f"lifecycle conflict: {refused}"
+                            if isinstance(refused, OrderLifecycleError)
+                            else str(refused)
+                        ),
                     )
                 )
                 continue
