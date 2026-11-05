@@ -260,7 +260,10 @@ def _identity_conflict_reason(
                         observation.account_id != current_account_id
                         or observation.client_id != expected_broker_client_id
                     ):
-                        return f"identity conflict: broker {kind} evidence contradicts owned execution identity"
+                        return (
+                            f"identity conflict: broker {kind} evidence has "
+                            "conflicting account or economic identity"
+                        )
                     return (
                         f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
                         f"permId {observation.permanent_id} reports order reference "
@@ -362,10 +365,10 @@ def _snapshot_fill_witnesses(
 def _terminal_below_snapshot_fills(
     order: BrokerOrder, executions: tuple[BrokerExecution, ...]
 ) -> bool:
-    """A terminal row cannot undercut coherent owned executions in the same snapshot.
+    """A terminal row cannot undercut owned or row-bound executions in the same snapshot.
 
-    Call only after execution identity/coherence checks. The record-only fills store is not
-    evidence here: unlike that store, these executions belong to the snapshot being resolved.
+    Call after the existing ownership/coherence checks. Additional row-bound witnesses only add
+    refusals. The record-only fills store is not evidence here; no hold writes fill progress.
     """
 
     return order.lifecycle in TERMINAL_ORDER_LIFECYCLES and order.filled_quantity < sum(
@@ -470,7 +473,10 @@ def resolve_from_broker_evidence(
         if _terminal_below_snapshot_fills(
             order,
             _snapshot_fill_witnesses(
-                order, executions, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id
+                order,
+                executions,
+                order_ref=order_ref,
+                persisted_permanent_id=persisted_permanent_id,
             ),
         ):
             return None  # RECONFLOOR: terminal rows cannot erase this snapshot's executions

@@ -45,7 +45,10 @@ def test_blank_reference_executions_still_prevent_an_undercounted_terminal(
         rig.event(status, at=PRIOR)
     before = rig.events()
     rig.venue.open = [venue_order(L.CANCELLED, "0")]
-    rig.venue.execs = [venue_execution("blank-fill", "5", PRIOR, ref=None, perm=execution_perm)]
+    execution = venue_execution("blank-fill", "5", PRIOR, ref=None, perm=execution_perm)
+    if persisted_perm is None and execution_perm == PERM_ID:
+        execution = execution.model_copy(update={"broker_order_id": BROKER_ID + 9})
+    rig.venue.execs = [execution]
 
     report = rig.reconcile()
 
@@ -61,9 +64,7 @@ def test_own_execution_permid_reveals_conflicting_reference_without_persisted_pe
     rig.seed(permanent_id=None)
     before = rig.events()
     other_ref = "CHR-OTHER-SNAPSHOT"
-    rig.venue.open = [
-        venue_order(L.SUBMITTED, "0", ref=other_ref, client=CLIENT_ID + int(foreign))
-    ]
+    rig.venue.open = [venue_order(L.SUBMITTED, "0", ref=other_ref, client=CLIENT_ID + int(foreign))]
     rig.venue.execs = [venue_execution("own-full", "10", PRIOR)]
 
     report = rig.reconcile()
@@ -163,7 +164,9 @@ def test_contained_lifecycle_conflict_emits_one_classified_warning(
     assert rig.status() is L.PARTIALLY_FILLED and report.unresolved
     records = [r for r in caplog.records if r.name == "chronos.orders.reconciliation_recovery"]
     assert len(records) == 1 and records[0].levelno == logging.WARNING
-    assert all(value in records[0].getMessage() for value in ("intent-1", "PARTIALLY_FILLED", "SUBMITTED"))
+    assert all(
+        value in records[0].getMessage() for value in ("intent-1", "PARTIALLY_FILLED", "SUBMITTED")
+    )
     assert broker_text not in records[0].getMessage()
 
 
@@ -188,14 +191,19 @@ def test_two_persisted_broker_ids_refuse_full_execution_settlement(rig: Rig, sta
         rig.event(status, at=PRIOR)
     other_id = BROKER_ID + 77
     assert rig.repo.record_transition(
-        intent_id="intent-1", event_key="second-broker-id", source="TEST",
-        from_status=status, to_status=status, current_account_id=rig.account,
-        broker_order_id=other_id, occurred_at=PRIOR + timedelta(seconds=1),
+        intent_id="intent-1",
+        event_key="second-broker-id",
+        source="TEST",
+        from_status=status,
+        to_status=status,
+        current_account_id=rig.account,
+        broker_order_id=other_id,
+        occurred_at=PRIOR + timedelta(seconds=1),
     )
     before = rig.events()
-    rig.venue.execs = [venue_execution("full-latest", "10", PRIOR).model_copy(
-        update={"broker_order_id": other_id}
-    )]
+    rig.venue.execs = [
+        venue_execution("full-latest", "10", PRIOR).model_copy(update={"broker_order_id": other_id})
+    ]
 
     report = rig.reconcile()
 
@@ -217,14 +225,22 @@ def test_terminal_legacy_write_refuses_identity_history_changed_after_capture(
         rig.venue.execs = [venue_execution("own-full", "10", PRIOR)]
     original = rig.repo.record_transition
     before_write = []
-    values = {"broker_order_id": BROKER_ID + 77, "permanent_id": PERM_ID + 1, "client_id": CLIENT_ID + 1}
+    values = {
+        "broker_order_id": BROKER_ID + 77,
+        "permanent_id": PERM_ID + 1,
+        "client_id": CLIENT_ID + 1,
+    }
 
     def racing(**kwargs):
         if kwargs.get("source") == "RECONCILE":
             assert original(
-                intent_id="intent-1", event_key="late-identity", source="IDENTITY",
-                from_status=L.PARTIALLY_FILLED, to_status=L.PARTIALLY_FILLED,
-                current_account_id=rig.account, occurred_at=PRIOR + timedelta(seconds=1),
+                intent_id="intent-1",
+                event_key="late-identity",
+                source="IDENTITY",
+                from_status=L.PARTIALLY_FILLED,
+                to_status=L.PARTIALLY_FILLED,
+                current_account_id=rig.account,
+                occurred_at=PRIOR + timedelta(seconds=1),
                 **{field: values[field]},
             )
             before_write.append(rig.events())
@@ -254,3 +270,76 @@ def test_r6_own_reference_permid_refusal_survives_under_foreign_client(rig: Rig,
     assert rig.status() is status and rig.events() == before
     assert report.unresolved[0].reason.startswith("identity conflict:")
     assert all(value not in report.unresolved[0].reason for value in (REF, str(PERM_ID + 1)))
+
+
+@pytest.mark.parametrize("missing", ["permanent_id", "client_id", "neither"])
+def test_unchanged_captured_history_allows_a_valid_legacy_terminal_and_identity_refinement(
+    rig: Rig, missing: str
+) -> None:
+    rig.seed(
+        permanent_id=None if missing == "permanent_id" else PERM_ID,
+        client_id=None if missing == "client_id" else CLIENT_ID,
+    )
+    rig.event(L.PARTIALLY_FILLED, at=PRIOR, filled="5")
+    rig.venue.open = [venue_order(L.SUBMITTED, "10")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.FILLED
+    assert report.unresolved == () and len(report.applied_updates) == 1
+    assert rig.events()[-1].filled_quantity == Decimal("10")
+
+
+@pytest.mark.parametrize("foreign_field", ["account_id", "client_id"])
+def test_foreign_blank_reference_execution_does_not_become_an_own_row_witness(
+    rig: Rig, foreign_field: str
+) -> None:
+    rig.seed(permanent_id=None)
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    value = rig.account + "-OTHER" if foreign_field == "account_id" else CLIENT_ID + 1
+    rig.venue.execs = [
+        venue_execution("foreign-blank", "5", PRIOR, ref=None).model_copy(
+            update={foreign_field: value}
+        )
+    ]
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCELLED and report.unresolved == ()
+    assert len(report.applied_updates) == 1
+
+
+def test_terminal_noop_race_cannot_append_identity_from_a_stale_snapshot(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.seed()
+    rig.event(L.PARTIALLY_FILLED, at=PRIOR, filled="5")
+    rig.venue.open = [venue_order(L.SUBMITTED, "10")]
+    original = rig.tracker.ingest
+    before_write = []
+
+    def racing(update, **kwargs):
+        assert rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="competing-terminal",
+            source="TEST",
+            from_status=L.PARTIALLY_FILLED,
+            to_status=L.FILLED,
+            current_account_id=rig.account,
+            broker_order_id=BROKER_ID,
+            permanent_id=PERM_ID + 1,
+            client_id=CLIENT_ID,
+            filled_quantity=Decimal("10"),
+            remaining_quantity=Decimal("0"),
+            occurred_at=PRIOR + timedelta(seconds=1),
+        )
+        before_write.append(rig.events())
+        return original(update, **kwargs)
+
+    monkeypatch.setattr(rig.tracker, "ingest", racing)
+    report = rig.reconcile()
+
+    assert len(before_write) == 1 and rig.events() == before_write[0]
+    assert rig.status() is L.FILLED  # solely the competing writer's terminal result
+    assert report.applied_updates == () and report.unresolved
+    assert "identity history advanced" in report.unresolved[0].reason
