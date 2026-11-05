@@ -54,7 +54,7 @@ import hmac
 import json
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
@@ -189,6 +189,8 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):
         return str(value)

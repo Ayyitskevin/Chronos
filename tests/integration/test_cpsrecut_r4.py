@@ -23,6 +23,7 @@ from chronos.broker.base import BrokerDataError
 from chronos.broker.callbacks import CallbackBridge
 from chronos.broker.request_registry import RequestRegistry
 from chronos.domain.enums import OrderLifecycle
+from chronos.persistence.order_repositories import IdentityHistoryAdvanced, RecordedFillsAdvanced
 
 CP = OrderLifecycle.CANCEL_PENDING
 PF = OrderLifecycle.PARTIALLY_FILLED
@@ -162,6 +163,96 @@ def test_second_broker_id_landing_after_precheck_refuses_typed_identity_conflict
         assert reason.startswith("identity conflict:")
         assert "persisted broker order ids" in reason
         assert "not bound to this intent" not in reason
+    finally:
+        rig.close()
+
+
+def test_identity_advance_precedes_lower_fill_when_both_conflict_in_savepoint() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        rig.event(PF, at=PRIOR + timedelta(seconds=1), filled="3")
+        expected = rig.tracker.persisted_identities("intent-1", current_account_id=rig.account)
+        assert rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="land:second-broker-id",
+            source="TEST",
+            from_status=PF,
+            to_status=PF,
+            current_account_id=rig.account,
+            broker_order_id=OTHER_BROKER_ID,
+            filled_quantity=Decimal("3"),
+            remaining_quantity=Decimal("7"),
+            occurred_at=PRIOR + timedelta(seconds=2),
+        )
+        before = rig.events()
+
+        with pytest.raises(IdentityHistoryAdvanced):
+            rig.tracker.record_planned_transition(
+                intent_id="intent-1",
+                current_account_id=rig.account,
+                from_status=PF,
+                to_status=FILLED,
+                event_key="land:both-conflicts",
+                source="RECONCILE",
+                broker_order_id=BROKER_ID,
+                permanent_id=PERM_ID,
+                client_id=CLIENT_ID,
+                filled_quantity=Decimal("2"),
+                remaining_quantity=Decimal("8"),
+                evidence={"interaction": "identity-before-fill"},
+                now=NOW,
+                expected_identities=expected,
+            )
+
+        assert rig.status() is PF
+        assert rig.events() == before
+    finally:
+        rig.close()
+
+
+def test_matching_two_id_snapshot_still_exposes_typed_lower_fill_refusal() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+        rig.event(PF, at=PRIOR + timedelta(seconds=1), filled="3")
+        assert rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="land:known-second-broker-id",
+            source="TEST",
+            from_status=PF,
+            to_status=PF,
+            current_account_id=rig.account,
+            broker_order_id=OTHER_BROKER_ID,
+            filled_quantity=Decimal("3"),
+            remaining_quantity=Decimal("7"),
+            occurred_at=PRIOR + timedelta(seconds=2),
+        )
+        expected = rig.tracker.persisted_identities("intent-1", current_account_id=rig.account)
+        before = rig.events()
+
+        with pytest.raises(RecordedFillsAdvanced):
+            rig.tracker.record_planned_transition(
+                intent_id="intent-1",
+                current_account_id=rig.account,
+                from_status=PF,
+                to_status=FILLED,
+                event_key="land:fill-conflict-after-matching-identity",
+                source="RECONCILE",
+                broker_order_id=BROKER_ID,
+                permanent_id=PERM_ID,
+                client_id=CLIENT_ID,
+                filled_quantity=Decimal("2"),
+                remaining_quantity=Decimal("8"),
+                evidence={"interaction": "fill-after-identity-match"},
+                now=NOW,
+                expected_identities=expected,
+            )
+
+        assert rig.status() is PF
+        assert rig.events() == before
     finally:
         rig.close()
 

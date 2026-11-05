@@ -17,14 +17,47 @@ from chronos.domain.enums import (
     DemoProfile,
     OptionRight,
     OrderIntent,
+    OrderLifecycle,
     OrderSide,
     SecurityType,
 )
-from chronos.domain.models import CryptoContract, OptionContractSpec, OrderRequest
+from chronos.domain.models import (
+    BrokerOrder,
+    CryptoContract,
+    OptionContractSpec,
+    OrderRequest,
+    UnderlyingContract,
+)
 
 
 def test_demo_broker_satisfies_protocol(demo_broker: DemoBroker) -> None:
     assert isinstance(demo_broker, Broker)
+
+
+@pytest.mark.asyncio
+async def test_demo_cancel_result_carries_the_order_fill_figure() -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    await broker.connect()
+    broker._orders = (
+        BrokerOrder(
+            broker_order_id=41,
+            client_id=0,
+            account_id=DEMO_ACCOUNT_ID,
+            order_ref="CHR-demo-cancel",
+            contract=UnderlyingContract(con_id=1, symbol="AAPL"),
+            side=OrderSide.BUY,
+            quantity=Decimal("10"),
+            filled_quantity=Decimal("2"),
+            remaining_quantity=Decimal("8"),
+            limit_price=Decimal("100"),
+            lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+        ),
+    )
+
+    result = await broker.cancel_order(41)
+
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    assert result.filled_quantity == Decimal("2")
 
 
 @pytest.mark.asyncio
@@ -55,6 +88,36 @@ async def test_demo_snapshot_is_repeatable(demo_broker: DemoBroker) -> None:
     assert len(first.positions) == 5
     assert len(first.open_orders) == 1
     assert first.open_orders[0].filled_quantity == Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_demo_cancel_removes_only_the_owned_order_and_preserves_evidence(
+    demo_broker: DemoBroker,
+) -> None:
+    await demo_broker.connect()
+    (owned,) = await demo_broker.open_orders()
+    foreign = owned.model_copy(update={"broker_order_id": 7002, "order_ref": "MANUAL"})
+    demo_broker._orders = (owned, foreign)
+    before = await demo_broker.snapshot()
+
+    with pytest.raises(BrokerSafetyError, match="does not own"):
+        await demo_broker.cancel_order(foreign.broker_order_id)
+    unknown = await demo_broker.cancel_order(999999)
+    assert unknown.requested is False
+    assert unknown.lifecycle is OrderLifecycle.REJECTED
+    assert await demo_broker.open_orders() == (owned, foreign)
+
+    result = await demo_broker.cancel_order(owned.broker_order_id)
+    assert result.requested is True
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    after = await demo_broker.snapshot()
+    assert after.open_orders == (foreign,)
+    assert after.positions == before.positions
+    assert after.executions == before.executions
+    repeated = await demo_broker.cancel_order(owned.broker_order_id)
+    assert repeated.requested is False
+    assert repeated.lifecycle is OrderLifecycle.REJECTED
+    assert await demo_broker.open_orders() == (foreign,)
 
 
 @pytest.mark.asyncio

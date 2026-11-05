@@ -63,6 +63,7 @@ from chronos.orders.callback_consumer import (
     JournalVerdict,
 )
 from chronos.orders.ownership import PersistedOrderOwnershipLedger
+from chronos.orders.tracker import OrderStatusUpdate
 from chronos.persistence.database import Database
 from chronos.persistence.execution_repository import ExecutionRepository
 from chronos.persistence.schema import ApplicationEventRow, CommissionRow, FillRow
@@ -739,6 +740,122 @@ def test_5e_a_late_working_status_after_fill_never_regresses_the_lifecycle(rig: 
         CallbackOutcome.APPLIED.value,
         CallbackOutcome.NO_CHANGE.value,
     ]
+
+
+def test_5e_a_same_status_fill_increase_is_recorded_as_fill_progress(rig: _Rig) -> None:
+    rig.status(_ORDER, "PendingCancel", 0, 10, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+    rig.status(_ORDER, "PendingCancel", 1, 9, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert rig.intent_status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.harness.tracker.recorded_filled_quantity(
+        "intent-1", current_account_id=PAPER_ACCOUNT
+    ) == Decimal("1")
+    assert _outcomes(rig.harness) == [
+        CallbackOutcome.APPLIED.value,
+        CallbackOutcome.FILL_PROGRESS_RECORDED.value,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("terminal_filled", "expected_outcome", "expected_status"),
+    [
+        (3, CallbackOutcome.FILL_FLOOR_CONFLICT.value, OrderLifecycle.PARTIALLY_FILLED),
+        (5, CallbackOutcome.APPLIED.value, OrderLifecycle.FILLED),
+    ],
+    ids=["lower-explicit", "equal-control"],
+)
+def test_5e_a_lower_filled_terminal_callback_reaches_the_fill_floor(
+    rig: _Rig,
+    terminal_filled: int,
+    expected_outcome: str,
+    expected_status: OrderLifecycle,
+) -> None:
+    rig.status(_ORDER, "Submitted", 5, 5, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+    assert rig.intent_status() is OrderLifecycle.PARTIALLY_FILLED
+
+    rig.status(_ORDER, "Filled", terminal_filled, 0, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert rig.intent_status() is expected_status
+    assert _outcomes(rig.harness)[-1] == expected_outcome
+    if terminal_filled == 3:
+        assert rig.harness.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=PAPER_ACCOUNT
+        ) == Decimal("5")
+        assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
+    else:
+        assert rig.harness.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=PAPER_ACCOUNT
+        ) == Decimal("5")
+        assert rig.invalidations == []
+
+
+def test_5e_a_lower_partially_filled_callback_remains_a_stale_noop(rig: _Rig) -> None:
+    rig.status(_ORDER, "Submitted", 5, 5, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+    before = rig.events()
+
+    rig.status(_ORDER, "Submitted", 3, 7, 1.25, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert rig.intent_status() is OrderLifecycle.PARTIALLY_FILLED
+    assert rig.events() == before
+    assert _outcomes(rig.harness)[-1] == CallbackOutcome.NO_CHANGE.value
+    assert rig.invalidations == []
+
+
+@pytest.mark.parametrize("late_fill", [False, True], ids=["already-witnessed", "during-write"])
+def test_5e_a_terminal_callback_below_witnessed_fill_is_refused_and_invalidates_readiness(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch, late_fill: bool
+) -> None:
+    rig.status(_ORDER, "PendingCancel", 0, 10, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    def record_late_fill() -> None:
+        outcome = rig.harness.tracker.ingest(
+            OrderStatusUpdate(
+                intent_id="intent-1",
+                broker_order_id=_ORDER,
+                permanent_id=_PERM,
+                client_id=_CLIENT,
+                lifecycle=OrderLifecycle.CANCEL_PENDING,
+                filled_quantity=Decimal("1"),
+                remaining_quantity=Decimal("9"),
+                occurred_at=FIXED_NOW,
+            ),
+            current_account_id=PAPER_ACCOUNT,
+        )
+        assert outcome.fill_progress_recorded
+
+    if late_fill:
+        original = rig.harness.tracker_repo.record_transition
+        injected = False
+
+        def interleave(**kwargs: Any) -> Any:
+            nonlocal injected
+            if kwargs.get("to_status") is OrderLifecycle.CANCELLED and not injected:
+                injected = True
+                record_late_fill()
+            return original(**kwargs)
+
+        monkeypatch.setattr(rig.harness.tracker_repo, "record_transition", interleave)
+    else:
+        rig.status(_ORDER, "PendingCancel", 1, 9, 1.25, _PERM, _CLIENT)
+        rig.consumer.drain()
+
+    rig.status(_ORDER, "Cancelled", 0, 0, 0.0, _PERM, _CLIENT)
+    rig.consumer.drain()
+
+    assert rig.intent_status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.harness.tracker.recorded_filled_quantity(
+        "intent-1", current_account_id=PAPER_ACCOUNT
+    ) == Decimal("1")
+    assert not any(event.to_status is OrderLifecycle.CANCELLED for event in rig.events())
+    assert _outcomes(rig.harness)[-1] == "fill_floor_conflict"
+    assert rig.invalidations == [UNPROVEN_CALLBACK_REASON]
 
 
 def test_5e_a_contradicting_terminal_is_typed_never_a_no_op(rig: _Rig) -> None:

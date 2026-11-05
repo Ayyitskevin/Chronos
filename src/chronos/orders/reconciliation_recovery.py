@@ -27,11 +27,10 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.base import CompletedOrderEvidence, CompletedOrdersReconnectRequired
 from chronos.broker.connection import BrokerConnectionManager
-from chronos.domain.enums import ConnectionState, OrderLifecycle
+from chronos.domain.enums import TERMINAL_ORDER_LIFECYCLES, ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.state_machine import (
-    TERMINAL_ORDER_LIFECYCLES,
     OrderLifecycleError,
     OrderLifecycleMachine,
 )
@@ -901,12 +900,10 @@ class OrderRestartReconciler:
                 )
                 continue
             try:
-                outcome = self._tracker.ingest(
-                    update, current_account_id=current_account_id, fills_floor=True
-                )
+                outcome = self._tracker.ingest(update, current_account_id=current_account_id)
             except RecordedFillsAdvanced as refused:
-                # LEGACY-5 r1: a fill was recorded after this pass read the maximum (another
-                # writer); the terminal write was refused atomically and the intent stays locked.
+                # LEGACY-5: the terminal write was refused atomically because a concurrent writer
+                # advanced the recorded fill maximum after this pass read it.
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
@@ -929,7 +926,9 @@ class OrderRestartReconciler:
                     broker_status=update.lifecycle,
                     transition_applied=outcome.lifecycle_changed,
                     reason=(
-                        "identity evidence refined; lifecycle unchanged"
+                        "fill progress recorded; lifecycle unchanged"
+                        if outcome.fill_progress_recorded and not outcome.lifecycle_changed
+                        else "identity evidence refined; lifecycle unchanged"
                         if outcome.identity_refined and not outcome.lifecycle_changed
                         else "matching broker order or execution observed"
                     ),
@@ -1211,7 +1210,7 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
-            if figure < witnessed:
+            if figure.quantize(Decimal("0.00000001")) < witnessed:
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
@@ -1516,30 +1515,44 @@ class OrderRestartReconciler:
                 continue
             history_refusal: IdentityHistoryAdvanced | None = None
             won = False
-            with self._epochs_held(plan.epochs) as current:
-                if current:
-                    try:
-                        won = self._tracker.record_planned_transition(
-                            intent_id=intent.intent_id,
-                            current_account_id=current_account_id,
-                            from_status=intent.status,
-                            to_status=plan.to_status,
-                            event_key=plan.event_key,
-                            source=plan.source
-                            or (
-                                "FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"
-                            ),
-                            broker_order_id=plan.broker_order_id,
-                            permanent_id=plan.permanent_id,
-                            client_id=plan.client_id,
-                            filled_quantity=plan.filled,
-                            remaining_quantity=plan.remaining,
-                            evidence=dict(plan.evidence),
-                            now=now,
-                            expected_identities=identities,
-                        )
-                    except IdentityHistoryAdvanced as refused:
-                        history_refusal = refused
+            try:
+                with self._epochs_held(plan.epochs) as current:
+                    if current:
+                        try:
+                            won = self._tracker.record_planned_transition(
+                                intent_id=intent.intent_id,
+                                current_account_id=current_account_id,
+                                from_status=intent.status,
+                                to_status=plan.to_status,
+                                event_key=plan.event_key,
+                                source=plan.source
+                                or (
+                                    "FILL_PROGRESS"
+                                    if plan.to_status is intent.status
+                                    else "RECONCILE"
+                                ),
+                                broker_order_id=plan.broker_order_id,
+                                permanent_id=plan.permanent_id,
+                                client_id=plan.client_id,
+                                filled_quantity=plan.filled,
+                                remaining_quantity=plan.remaining,
+                                evidence=dict(plan.evidence),
+                                now=now,
+                                expected_identities=identities,
+                            )
+                        except IdentityHistoryAdvanced as refused:
+                            history_refusal = refused
+            except RecordedFillsAdvanced as refused:
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=plan.to_status,
+                        transition_applied=False,
+                        reason=f"fill_floor_conflict: RecordedFillsAdvanced: {refused}",
+                    )
+                )
+                continue
             if not current:
                 unresolved.append(
                     RestartOrderObservation(
@@ -1716,9 +1729,8 @@ class OrderRestartReconciler:
         if update is not None:
             # The broker DOES know this order — apply truth, refuse the manual
             # rejection (the operator was about to resolve against evidence).
-            # LEGACY-5 r1: the maximum read above may be stale by now; the terminal write re-checks
-            # it atomically and a RecordedFillsAdvanced (a ValueError) refuses, writing nothing.
-            self._tracker.ingest(update, current_account_id=current_account_id, fills_floor=True)
+            # LEGACY-5: a terminal write re-checks a potentially stale maximum atomically.
+            self._tracker.ingest(update, current_account_id=current_account_id)
             return False
         matching_executions = tuple(
             execution for execution in executions if execution.order_ref == intent.order_ref

@@ -226,9 +226,7 @@ def test_r2_a_refused_write_leaves_neither_the_event_nor_the_status(book: _Book)
     trail = book.trail()
 
     with pytest.raises(RecordedFillsAdvanced):
-        book.a.tracker.ingest(
-            _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT, fills_floor=True
-        )
+        book.a.tracker.ingest(_update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT)
 
     assert book.trail() == trail
     assert book.status() is OrderLifecycle.PARTIALLY_FILLED
@@ -259,7 +257,7 @@ def test_r2_a_fill_landing_at_the_old_split_cannot_coexist_with_terminal_zero(
     )
 
     outcome = book.a.tracker.ingest(
-        _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT, fills_floor=True
+        _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT
     )
 
     assert fired == [True] and outcome.lifecycle_changed
@@ -286,9 +284,7 @@ def test_r2_a_fill_landing_before_the_terminal_savepoint_is_a_typed_refusal(book
     )
 
     with pytest.raises(RecordedFillsAdvanced, match="5 filled on record"):
-        book.a.tracker.ingest(
-            _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT, fills_floor=True
-        )
+        book.a.tracker.ingest(_update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT)
 
     assert fired == [True]
     assert book.status() is OrderLifecycle.PARTIALLY_FILLED
@@ -346,28 +342,30 @@ def test_r2_the_maximum_is_per_intent(book: _Book) -> None:
     book.seed(OrderLifecycle.SUBMISSION_UNKNOWN, intent_id="intent-2")  # nothing recorded
     update = _update(OrderLifecycle.CANCELLED, "0").model_copy(update={"intent_id": "intent-2"})
 
-    outcome = book.a.tracker.ingest(update, current_account_id=ACCOUNT, fills_floor=True)
+    outcome = book.a.tracker.ingest(update, current_account_id=ACCOUNT)
 
     assert outcome.lifecycle_changed
     assert book.status("intent-2") is OrderLifecycle.CANCELLED
 
 
-def test_r2_ingest_without_the_keyword_keeps_todays_terminal_write(book: _Book) -> None:
-    """P3-2: ``fills_floor`` defaults off; every other ingest caller is unchanged."""
+def test_r2_ingest_always_enforces_terminal_fill_floor(book: _Book) -> None:
+    """The structural terminal floor holds on every tracker path."""
 
     book.seed(OrderLifecycle.PARTIALLY_FILLED)
-    outcome = book.a.tracker.ingest(
-        _update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT
-    )
-    assert outcome.lifecycle_changed and book.status() is OrderLifecycle.CANCELLED
+    with pytest.raises(RecordedFillsAdvanced):
+        book.a.tracker.ingest(_update(OrderLifecycle.CANCELLED, "0"), current_account_id=ACCOUNT)
+
+    assert book.status() is OrderLifecycle.PARTIALLY_FILLED
+    assert book.max_recorded() == Decimal("3")
+    assert all(status is not OrderLifecycle.CANCELLED for status, _ in book.trail())
 
 
 def test_r2_the_floor_applies_to_terminal_updates_only(book: _Book) -> None:
-    """P3-3: a non-terminal update below the maximum (CANCEL_PENDING at 0 with 3 recorded) is
-    written as before, even with ``fills_floor`` on."""
+    """Main's rule allows a lower nonterminal observation while retaining the recorded maximum."""
 
     book.seed(OrderLifecycle.PARTIALLY_FILLED)
-    outcome = book.a.tracker.ingest(
-        _update(OrderLifecycle.CANCEL_PENDING, "0"), current_account_id=ACCOUNT, fills_floor=True
-    )
+    lower = _update(OrderLifecycle.CANCEL_PENDING, "0")
+
+    outcome = book.a.tracker.ingest(lower, current_account_id=ACCOUNT)
     assert outcome.lifecycle_changed and book.status() is OrderLifecycle.CANCEL_PENDING
+    assert book.max_recorded() == Decimal("3")
