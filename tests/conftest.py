@@ -11,6 +11,17 @@ from chronos.broker.demo import DemoBroker
 FIXED_NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _ordinary_startup_explicitly_lifts_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise ordinary startup; maintenance tests delete/override this explicit opt-out.
+
+    Production's missing/invalid switch is ON. Do not let that safe default hide
+    existing tests of mandate validation, runtime construction or activation.
+    """
+
+    monkeypatch.setenv("CHRONOS_AUTONOMY_MAINTENANCE", "off")
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Register the file-backed sqlite lane (see ``tests/safety/conftest.py``).
 

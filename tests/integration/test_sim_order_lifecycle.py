@@ -158,49 +158,7 @@ def official_transmit_settings(**overrides: object) -> Settings:
 
 #: (venue, case) -> (id, exception the venue raises instead, why). Strict xfails: the day
 #: the difference disappears, the case XPASSes and fails the suite until the row is removed.
-KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] = {
-    (
-        "official_fake",
-        "test_modify_when_the_sim_allows_it_reprices_the_working_order_and_reconciles",
-    ): (
-        "S2-D1",
-        BrokerRefusedBeforeSend,
-        "OfficialIBKRBroker.modify_order refuses modify-in-place before send BY DESIGN "
-        "(official_ibkr.py: 'not implemented for the official adapter in M7; cancel and "
-        "re-submit'); U1's contract pins that refusal. SimBroker's opt-in replace has no "
-        "counterpart in the adapter, so this sim-only capability case cannot pass there.",
-    ),
-    ("official_fake", "test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order"): (
-        "U0-D1",
-        AssertionError,
-        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
-        "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
-        "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
-        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
-        "when #302 landed, and its pin is now the passing "
-        "test_a_two_step_cancel_settles_after_reconciliation in "
-        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
-        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
-        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
-        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
-    ),
-    ("official_fake", "test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal"): (
-        "U0-D1",
-        AssertionError,
-        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
-        "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
-        "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
-        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
-        "when #302 landed, and its pin is now the passing "
-        "test_a_two_step_cancel_settles_after_reconciliation in "
-        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
-        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
-        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
-        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
-    ),
-}
+KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] = {}
 
 
 @pytest.fixture(autouse=True)
@@ -445,6 +403,7 @@ class _SimHarness:
                 intents=self.intents,
                 tracker=self.tracker,
                 tracker_repo=self.tracker_repo,
+                reconciliation_readiness=self.readiness,
             ),
             tracker=self.tracker,
             tracker_repo=self.tracker_repo,
@@ -794,9 +753,12 @@ def test_modify_is_refused_before_send_by_the_faithful_sim_and_changes_nothing(
         assert [u.lifecycle for u in report.applied_updates] == [OrderLifecycle.FILLED]
 
 
+@pytest.mark.parametrize("venue", ("sim",), indirect=True)
 def test_modify_when_the_sim_allows_it_reprices_the_working_order_and_reconciles(
     venue: _Venue,
 ) -> None:
+    # This opt-in replace is SimBroker-only: the official adapter refuses modify-in-place by
+    # design, and that refusal is covered by the sibling test and U1's contract test.
     # The opt-in replace. Fails if the MODIFIED evidence stops carrying the new price (the
     # reconciler would then see a limit mismatch and leave the intent unresolved), or if
     # the sim's fill rule stops using the replaced limit.
@@ -847,7 +809,19 @@ def test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order(venue: _
         result = h.service.cancel("intent-1", now=h.now)
 
         assert result.requested is True
-        assert result.lifecycle is OrderLifecycle.CANCELLED
+        expected_ack = (
+            OrderLifecycle.CANCEL_PENDING
+            if venue.kind == "official_fake"
+            else OrderLifecycle.CANCELLED
+        )
+        assert result.lifecycle is expected_ack
+        if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
+            assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
+            report = h.service.reconcile_on_restart_report(now=h.now)
+            assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
         statuses = [
             e.to_status for e in h.tracker_repo.events("intent-1", current_account_id=h.account)
@@ -875,8 +849,23 @@ def test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal(venue: _Ve
 
         result = h.service.cancel("intent-1", now=h.now)
 
-        assert result.lifecycle is OrderLifecycle.CANCELLED
+        expected_ack = (
+            OrderLifecycle.CANCEL_PENDING
+            if venue.kind == "official_fake"
+            else OrderLifecycle.CANCELLED
+        )
+        assert result.lifecycle is expected_ack
+        if result.lifecycle is OrderLifecycle.CANCEL_PENDING:
+            assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
+            assert isinstance(h.broker, OfficialIBKRBroker)
+            h.broker._app.wait_dispatched()
+            assert h.broker.bridge.order_statuses[h.first_id][0] == "Cancelled"
+            report = h.service.reconcile_on_restart_report(now=h.now)
+            assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
+        terminal_event = h.tracker_repo.events("intent-1", current_account_id=h.account)[-1]
+        assert terminal_event.to_status is OrderLifecycle.CANCELLED
+        assert terminal_event.filled_quantity == Decimal("5")
         assert h.sim_open_order_ids() == set()
         assert h.sim_position() == Decimal("5")
         assert len(h.connection.run(h.broker.executions())) == 1
@@ -965,23 +954,9 @@ def test_an_ambiguous_send_persists_submission_unknown_then_recovers_without_res
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U3-F1: daily opening cap counts the intent under evaluation (finding, RED, awaiting Kevin)"
-    ),
-)
 def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill(venue: _Venue) -> None:
-    # SURVEY: "the opening cap after N fills". Fails if the real evidence provider stops
-    # counting today's opening intents from the repository (R-25), or if the cap stops
-    # refusing at the limit. At 306efd5 it fails EARLIER, inside _fill_ten: the cap counts
-    # the intent under evaluation, so the FIRST opening of the day is refused (U3-F1) —
-    # the strict xfail above absorbs exactly that AssertionError. Against the fix it must
-    # XPASS, so (r2) the second opening is economically distinct (an identical order would
-    # be refused as a duplicate idempotency key, a ValueError, not the cap) and readiness
-    # is re-armed after the fill (a send consumes it; see case 2), leaving the cap as the
-    # only check that can fail.
+    # The first persisted candidate is counted once; the next distinct opening
+    # must fail only the cap after readiness is re-armed following the fill.
     with harness(venue, settings=_cap_of_one(venue)) as h:
         _fill_ten(h)
         h.rearm_readiness("U3: operator re-reconciled after the fill")
@@ -994,6 +969,30 @@ def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill(venue: _Ven
         assert "2 would exceed the 1 daily cap" in failed["max_opening_orders_per_day"]
         assert h.status("intent-2") is OrderLifecycle.REJECTED
         assert h.sent_order_count == 1
+
+
+def test_daily_opening_cap_boundaries_through_propose(venue: _Venue) -> None:
+    # U3F1 r1, adapted from builder-opus55's review probe: exercise persist ->
+    # gather -> evaluate, not the provider/engine's private count-check seams.
+    # Prior counts 2/3/4 are limit-1/limit/limit+1. The fifth must still count
+    # the rejected fourth. Dropping evaluated_intent or filtering REJECTED kills this.
+    settings_factory = paper_settings if venue.kind == "sim" else official_transmit_settings
+    with harness(venue, settings=settings_factory(max_opening_orders_per_day=3)) as h:
+        for number, letter in enumerate("ABCDE", start=1):
+            intent_id = f"boundary-intent-{number}"
+            result = h.propose(h.buy(quantity=number, ref=_ref(letter), intent_id=intent_id))
+            failed = {c.name: c.detail for c in result.risk.checks if c.status.value != "PASS"}
+
+            assert result.risk.approved is (number <= 3), (number, failed)
+            if number <= 3:
+                assert failed == {}
+            else:
+                assert set(failed) == {"max_opening_orders_per_day"}
+                assert (
+                    f"{number} would exceed the 3 daily cap" in failed["max_opening_orders_per_day"]
+                )
+                assert h.status(intent_id) is OrderLifecycle.REJECTED
+            assert h.sent_order_count == 0
 
 
 def test_a_buy_the_sim_account_cannot_fund_is_refused_by_risk(venue: _Venue) -> None:

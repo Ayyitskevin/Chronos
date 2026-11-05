@@ -78,8 +78,9 @@ autonomy mandate.
 
 4. Inspect the intended broker mode, environment, account scope, database URL,
    transmission flags, and authority files without printing tokens or credentials.
-   A backend start can open the configured broker adapter and can auto-activate a
-   valid, unrevoked `AUTONOMY_MANDATE_FILE`.
+   A backend start can open the configured broker adapter. A valid, unrevoked
+   `AUTONOMY_MANDATE_FILE` can activate only after maintenance is explicitly lifted
+   and all remaining startup gates pass.
 5. Keep IBKR/TWS/Gateway disconnected unless the requested operation explicitly
    needs it and the owner has approved that boundary. Before any first gateway
    session, follow `chronos-real-gateway-campaign` and `docs/IBKR_RUNBOOK.md`.
@@ -107,11 +108,21 @@ side effect of an ordinary run request.
 
 ### Choosing a start path
 
+Autonomy maintenance is ON by default for the backend: inspection and reconciliation
+work, but no autonomy runtime starts and readiness is NOT_READY, even with no mandate.
+Only for owner-approved normal operation, set `CHRONOS_AUTONOMY_MAINTENANCE=off` in
+the foreground process environment and restart; repo-root `.env` does not set it.
+For a systemd campaign, use the discovered backend EnvironmentFile and the ON/OFF
+pre-start proof in `docs/ops/N3-CUTOVER.md` / `docs/SHADOW_CAMPAIGN.md` §3. The
+cutover's final environment-removal drop-in and ON proof must remain through step 8;
+only Kevin's step-9 word permits a lift. Demo/UI use does not require lifting autonomy.
+
 - For an offline demonstration, use `scripts/run_demo.py`; do not infer safety
   from the target name `make demo`, because that target aliases the backend-driven
   UI and does not rewrite the environment.
 - For the current backend/UI path, run `make backend` in one foreground terminal,
-  wait for a healthy loopback startup, then run `make ui` or open `/terminal/app`.
+  verify loopback liveness and the expected maintenance/readiness state, then run
+  `make ui` or open `/terminal/app`. Diagnostic health 200 alone is not readiness.
 - For the deterministic platform loop, inspect `python -m chronos.service --help`,
   pass the intended mode and capital inputs explicitly, and keep the process in the
   foreground. Its service loop is separate from the backend live order plane.
@@ -238,7 +249,8 @@ place to force acceptance.
 Use `docs/BACKUP_AND_RECOVERY.md` as the canonical file inventory and exact SQLite
 procedure. Pay particular attention to the live kill-switch file and any
 `AUTONOMY_MANDATE_FILE`: the first has a permissive missing-file default, while a
-valid unrevoked mandate can activate at backend boot.
+valid unrevoked mandate can activate at backend boot after maintenance is explicitly
+lifted and the other startup gates pass. A restart alone never lifts maintenance.
 
 Restore procedure:
 

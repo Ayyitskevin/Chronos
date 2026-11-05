@@ -22,15 +22,7 @@ Legality rules:
 
 from __future__ import annotations
 
-from chronos.domain.enums import OrderLifecycle
-
-TERMINAL_ORDER_LIFECYCLES: frozenset[OrderLifecycle] = frozenset(
-    {
-        OrderLifecycle.FILLED,
-        OrderLifecycle.CANCELLED,
-        OrderLifecycle.REJECTED,
-    }
-)
+from chronos.domain.enums import TERMINAL_ORDER_LIFECYCLES, OrderLifecycle
 
 # Statuses that may legally follow themselves (successive partial fills only).
 _SELF_TRANSITION_ALLOWED: frozenset[OrderLifecycle] = frozenset({OrderLifecycle.PARTIALLY_FILLED})

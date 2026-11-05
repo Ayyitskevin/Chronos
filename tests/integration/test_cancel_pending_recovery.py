@@ -556,14 +556,18 @@ def test_S_R3_a_recovered_submitted_with_no_terminal_record_is_as_today(world: W
     assert any("absent from the broker" in r for r in issues(report)), issues(report)
 
 
-def test_S_R3_an_inconsistent_late_record_is_as_today(world: World) -> None:
+def test_S_R3_an_inconsistent_late_record_stays_held_with_the_planner_reason(world: World) -> None:
     _recovered_submitted(world)
     world.venue.open = []
     world.venue.completed = [venue_order(FILLED, "7")]  # Filled that does not fill: not proof
+    before = world.rig.events()
     report = world.at(2)
     assert world.rig.status() is SUBMITTED
-    # "as today": the existing resolver's reason, not the planner's typed refusal (U21)
-    assert any("absent from the broker" in r for r in issues(report)), issues(report)
+    assert world.rig.events() == before and report.applied_updates == ()
+    # RECONFLOOR-R3 preserves the hold and reports why the observed terminal row is not proof.
+    assert any("terminal record does not fill the order" in r for r in issues(report)), issues(
+        report
+    )
 
 
 def test_D7_P1_a_late_cancelled_record_after_a_partial_recovery_settles_once(world: World) -> None:

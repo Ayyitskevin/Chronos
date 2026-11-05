@@ -1330,10 +1330,16 @@ class FakeGateway:
                     client, adapter_id, CODE_CANCEL_NOT_FOUND, "Order to be cancelled is not found"
                 )
                 return
+            known_order = self._working().get(sim_id)
             result = self._run(self.sim.cancel_order(sim_id))
             if not result.requested:
                 self._error(client, adapter_id, CODE_CANNOT_CANCEL, "Order cannot be cancelled")
                 return
+            if known_order is None or result.filled_quantity is None:
+                raise AssertionError("SimBroker cancellation must retain the known order fill")
+            remaining_quantity = known_order.quantity - result.filled_quantity
+            if remaining_quantity < 0:
+                raise AssertionError("SimBroker cancellation fill exceeds the order quantity")
             # IB reports PendingCancel before Cancelled (assumed, verify at K4; fable r1 P3-2).
             statuses = ["PendingCancel"]
             if result.lifecycle is OrderLifecycle.CANCELLED:
@@ -1343,8 +1349,8 @@ class FakeGateway:
                     "orderStatus",
                     adapter_id,
                     status,
-                    0.0,
-                    0.0,
+                    float(result.filled_quantity),
+                    float(remaining_quantity),
                     0.0,
                     0,
                     0,
