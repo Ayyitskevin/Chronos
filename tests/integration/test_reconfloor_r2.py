@@ -8,7 +8,6 @@ from decimal import Decimal
 import pytest
 from tests.support.settle_rig import (
     BROKER_ID,
-    CLIENT_ID,
     NOW,
     PERM_ID,
     PRIOR,
@@ -46,7 +45,9 @@ def test_planned_terminal_cannot_drop_row_bound_snapshot_executions(
     else:
         rig.event(status, at=PRIOR)
     before = rig.events()
-    row = venue_order(L.CANCELLED, figure, broker_id=0 if source == "completed-zero-id" else BROKER_ID)
+    row = venue_order(
+        L.CANCELLED, figure, broker_id=0 if source == "completed-zero-id" else BROKER_ID
+    )
     if source == "listed":
         rig.venue.open = [row]
     else:
@@ -71,16 +72,21 @@ def test_planned_terminal_cannot_drop_row_bound_snapshot_executions(
     assert report.applied_updates == () and not report.permits_new_opening_order
     assert report.unresolved[0].reason
     if status is L.CANCEL_PENDING or source == "completed-zero-id":
-        assert any(plan.kind == "refuse" and plan.reason.startswith("snapshot fill conflict:") for plan in plans)
+        assert any(
+            plan.kind == "refuse" and plan.reason.startswith("snapshot fill conflict:")
+            for plan in plans
+        )
 
 
-@pytest.mark.parametrize("kind", ["foreign-reference", "other-contract", "other-side", "other-permid"])
+@pytest.mark.parametrize(
+    "kind", ["foreign-reference", "other-contract", "other-side", "other-permid"]
+)
 def test_reused_broker_id_does_not_count_another_orders_execution(rig: Rig, kind: str) -> None:
     rig.seed()
     rig.venue.open = [venue_order(L.CANCELLED, "0")]
     execution = venue_execution("unrelated", "5", PRIOR, ref=None, perm=None)
     changes = {
-        "foreign-reference": {"order_ref": "CHR-OTHER", "permanent_id": PERM_ID + 1},
+        "foreign-reference": {"order_ref": "CHR-OTHER"},
         "other-contract": {"contract": contract(con_id=999001, symbol="OTHER")},
         "other-side": {"side": OrderSide.SELL},
         "other-permid": {"permanent_id": PERM_ID + 1},
@@ -132,21 +138,32 @@ def test_operator_unknown_resolution_refuses_two_persisted_broker_ids(
     rig.event(L.SUBMISSION_UNKNOWN, at=NOW)
     other_id = BROKER_ID + 77
     assert rig.repo.record_transition(
-        intent_id="intent-1", event_key="other-broker", source="TEST",
-        from_status=L.SUBMISSION_UNKNOWN, to_status=L.SUBMISSION_UNKNOWN,
-        current_account_id=rig.account, broker_order_id=other_id, occurred_at=NOW,
+        intent_id="intent-1",
+        event_key="other-broker",
+        source="TEST",
+        from_status=L.SUBMISSION_UNKNOWN,
+        to_status=L.SUBMISSION_UNKNOWN,
+        current_account_id=rig.account,
+        broker_order_id=other_id,
+        occurred_at=NOW,
     )
     before = rig.events()
     if evidence == "executions":
-        rig.venue.execs = [venue_execution("latest-full", "10", PRIOR).model_copy(
-            update={"broker_order_id": other_id}
-        )]
+        rig.venue.execs = [
+            venue_execution("latest-full", "10", PRIOR).model_copy(
+                update={"broker_order_id": other_id}
+            )
+        ]
     else:
         rig.venue.open = [venue_order(L.CANCELLED, "0", broker_id=other_id)]
 
-    with pytest.raises(ValueError, match="persisted order identity is contradictory.*broker order ids"):
+    with pytest.raises(
+        ValueError, match=r"persisted order identity is contradictory.*broker order ids"
+    ):
         rig.reconciler.operator_resolve(
-            "intent-1", operator_note="synthetic verification", current_account_id=rig.account,
+            "intent-1",
+            operator_note="synthetic verification",
+            current_account_id=rig.account,
             now=NOW + timedelta(seconds=5),
         )
     assert rig.status() is L.SUBMISSION_UNKNOWN and rig.events() == before
@@ -166,9 +183,14 @@ def test_first_permid_after_row_read_cannot_be_folded_into_the_captured_snapshot
         if not after_race:
             assert value is None
             assert rig.repo.record_transition(
-                intent_id="intent-1", event_key="first-permid", source="IDENTITY",
-                from_status=L.PARTIALLY_FILLED, to_status=L.PARTIALLY_FILLED,
-                current_account_id=rig.account, permanent_id=PERM_ID + 1, occurred_at=PRIOR,
+                intent_id="intent-1",
+                event_key="first-permid",
+                source="IDENTITY",
+                from_status=L.PARTIALLY_FILLED,
+                to_status=L.PARTIALLY_FILLED,
+                current_account_id=rig.account,
+                permanent_id=PERM_ID + 1,
+                occurred_at=PRIOR,
             )
             after_race.append(rig.events())
         return value
@@ -189,9 +211,11 @@ def test_scope_n6_another_intents_reference_never_seeds_our_inferred_permid_set(
         venue_order(L.CANCELLED, "0"),
         venue_order(L.SUBMITTED, "0", ref=other_ref, broker_id=BROKER_ID + 1, perm=PERM_ID + 1),
     ]
-    rig.venue.execs = [venue_execution("other-five", "5", PRIOR, ref=other_ref, perm=PERM_ID + 1).model_copy(
-        update={"broker_order_id": BROKER_ID + 1}
-    )]
+    rig.venue.execs = [
+        venue_execution("other-five", "5", PRIOR, ref=other_ref, perm=PERM_ID + 1).model_copy(
+            update={"broker_order_id": BROKER_ID + 1}
+        )
+    ]
 
     report = rig.reconcile()
 
@@ -209,9 +233,15 @@ def test_lifecycle_warning_uses_current_terminal_status_after_a_race(
 
     def racing(update, **kwargs):
         assert rig.repo.record_transition(
-            intent_id="intent-1", event_key="late-cancel", source="TEST",
-            from_status=L.SUBMITTED, to_status=L.CANCELLED, current_account_id=rig.account,
-            filled_quantity=Decimal("0"), remaining_quantity=Decimal("10"), occurred_at=PRIOR,
+            intent_id="intent-1",
+            event_key="late-cancel",
+            source="TEST",
+            from_status=L.SUBMITTED,
+            to_status=L.CANCELLED,
+            current_account_id=rig.account,
+            filled_quantity=Decimal("0"),
+            remaining_quantity=Decimal("10"),
+            occurred_at=PRIOR,
         )
         return original(update, **kwargs)
 
@@ -241,3 +271,30 @@ def test_unplanned_status_keeps_no_identity_snapshot_and_can_learn_first_ids(
     report = rig.reconcile()
 
     assert rig.status() is L.CANCELLED and report.unresolved == ()
+
+
+@pytest.mark.parametrize("source", ["listed", "completed-zero-id"])
+@pytest.mark.parametrize("figure", ["0", "5"])
+def test_planner_clean_or_equal_row_bound_terminal_still_settles(
+    rig: Rig, source: str, figure: str
+) -> None:
+    rig.seed()
+    rig.pending()
+    row = venue_order(
+        L.CANCELLED, figure, broker_id=0 if source == "completed-zero-id" else BROKER_ID
+    )
+    if source == "listed":
+        rig.venue.open = [row]
+    else:
+        rig.venue.completed = [row]
+    if figure == "5":
+        rig.venue.execs = [
+            venue_execution("blank-3", "3", PRIOR, ref=None, perm=None),
+            venue_execution("blank-2", "2", PRIOR, ref=None, perm=None),
+        ]
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCELLED and report.unresolved == ()
+    assert rig.events()[-1].filled_quantity == Decimal(figure)
+    assert len(report.applied_updates) == 1

@@ -356,7 +356,13 @@ def _snapshot_fill_witnesses(
             and execution.client_id == order.client_id
             and (
                 (order.permanent_id is not None and execution.permanent_id == order.permanent_id)
-                or execution.broker_order_id == order.broker_order_id
+                or (
+                    not execution.order_ref
+                    and execution.permanent_id in (None, order.permanent_id)
+                    and execution.broker_order_id == order.broker_order_id
+                    and execution.side is order.side
+                    and execution.contract == order.contract
+                )
             )
         )
     )
@@ -907,12 +913,20 @@ class OrderRestartReconciler:
         ] = []
         read_completed = self._completed_reader()
         for intent in working:
-            identities: PersistedIdentities | None = None
-            persisted_broker_order_id = self._tracker.broker_order_id(
-                intent.intent_id,
-                current_account_id=current_account_id,
+            planned = intent.status in _SETTLE_STATUSES or self._recovered(
+                intent, current_account_id=current_account_id
             )
+            identities: PersistedIdentities | None = None
             try:
+                # Planned identity history must precede the individual identity reads. Otherwise
+                # a first identity arriving between them can be mistaken for captured evidence.
+                if planned:
+                    identities = self._tracker.persisted_identities(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
+                persisted_broker_order_id = self._tracker.broker_order_id(
+                    intent.intent_id, current_account_id=current_account_id
+                )
                 persisted_permanent_id = self._tracker.permanent_id(
                     intent.intent_id,
                     current_account_id=current_account_id,
@@ -923,13 +937,8 @@ class OrderRestartReconciler:
                 self._tracker.single_broker_order_id(
                     intent.intent_id, current_account_id=current_account_id
                 )
-                planned = intent.status in _SETTLE_STATUSES or self._recovered(
-                    intent, current_account_id=current_account_id
-                )
                 if planned:
-                    identities = self._tracker.persisted_identities(
-                        intent.intent_id, current_account_id=current_account_id
-                    )
+                    assert identities is not None
                     if len(identities.broker_order_ids) > 1:
                         raise OrderIdentityConflict(
                             intent.intent_id,
@@ -1031,10 +1040,13 @@ class OrderRestartReconciler:
                 # advanced the recorded fill maximum after this pass read it. A contradictory
                 # lifecycle likewise holds only this intent; other intents must still reconcile.
                 if isinstance(refused, OrderLifecycleError):
+                    current = self._intents.get(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
                     logger.warning(
                         "reconciliation lifecycle conflict: intent=%s local=%s observed=%s",
                         intent.intent_id,
-                        intent.status.value,
+                        current.status.value if current is not None else "UNKNOWN",
                         update.lifecycle.value,
                     )
                 unresolved.append(
@@ -1352,6 +1364,32 @@ class OrderRestartReconciler:
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
                 )
+            if record is not None:
+                row = (
+                    record
+                    if record.broker_order_id
+                    else record.model_copy(
+                        update={"broker_order_id": persisted_broker_order_id or 0}
+                    )
+                )
+                row_bound = sum(
+                    (
+                        execution.quantity
+                        for execution in _snapshot_fill_witnesses(
+                            row,
+                            executions,
+                            order_ref=order_ref,
+                            persisted_permanent_id=persisted_permanent_id,
+                        )
+                    ),
+                    Decimal("0"),
+                )
+                if figure.quantize(Decimal("0.00000001")) < row_bound:
+                    return _SettlePlan(
+                        "refuse",
+                        f"snapshot fill conflict: venue fill figure {figure} is below the "
+                        f"witnessed lower bound {row_bound} from row-bound snapshot executions",
+                    )
             try:
                 OrderLifecycleMachine(intent.status).apply(target)
             except OrderLifecycleError as error:
@@ -1839,6 +1877,9 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+            self._tracker.single_broker_order_id(
+                intent.intent_id, current_account_id=current_account_id
+            )
         except OrderIdentityConflict as conflict:
             raise ValueError(f"persisted order identity is contradictory: {conflict}") from conflict
         update = resolve_from_broker_evidence(
