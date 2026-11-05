@@ -15,6 +15,7 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 
 from __future__ import annotations
 
+import logging
 import time as _time_module
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
@@ -47,6 +48,8 @@ from chronos.persistence.order_repositories import (
     RecordedFillsAdvanced,
 )
 from chronos.utils.identifiers import PersistenceKey, account_fingerprint
+
+logger = logging.getLogger(__name__)
 
 # Intent statuses whose true broker state must be re-derived on restart.
 _UNRESOLVED_STATUSES = frozenset(
@@ -230,6 +233,42 @@ def _identity_conflict_reason(
     """The typed reason for a snapshot that contradicts the persisted identity (R-f)."""
 
     if persisted_permanent_id is None:
+        # No ACK permId yet: owned executions can still expose contradictory row identity.
+        # This witness only refuses; it never grants ownership or settlement authority.
+        owned_permanent_ids = {
+            execution.permanent_id
+            for execution in executions
+            if execution.order_ref == order_ref
+            and execution.account_id == current_account_id
+            and execution.client_id == expected_broker_client_id
+            and execution.permanent_id is not None
+        }
+        for kind, observations in (("order", open_orders), ("execution", executions)):
+            for observation in observations:
+                if observation.permanent_id is not None and (
+                    (
+                        bool(observation.order_ref)
+                        and observation.order_ref != order_ref
+                        and observation.permanent_id in owned_permanent_ids
+                    )
+                    or (
+                        observation.order_ref == order_ref
+                        and any(value != observation.permanent_id for value in owned_permanent_ids)
+                    )
+                ):
+                    if (
+                        observation.account_id != current_account_id
+                        or observation.client_id != expected_broker_client_id
+                    ):
+                        return (
+                            f"identity conflict: broker {kind} evidence has "
+                            "conflicting account or economic identity"
+                        )
+                    return (
+                        f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
+                        f"permId {observation.permanent_id} reports order reference "
+                        f"{observation.order_ref!r}, contradicting owned execution identity"
+                    )
         return None
     for kind, observations in (("order", open_orders), ("execution", executions)):
         for observation in observations:
@@ -295,6 +334,64 @@ def _terminal_below_recorded_fills(order: BrokerOrder, recorded: Decimal | None)
     )
 
 
+def _snapshot_fill_witnesses(
+    order: BrokerOrder,
+    executions: tuple[BrokerExecution, ...],
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+    persisted_broker_order_id: int | None = None,
+) -> tuple[BrokerExecution, ...]:
+    """Additional row-bound executions are witnesses for refusal only, never settlement.
+
+    A missing reference or unpersisted ACK permId must not erase a snapshot fill. Account and
+    client scope still bind the additional witnesses; unrelated intents' executions do not count.
+    """
+
+    return tuple(
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        or (
+            execution.account_id == order.account_id
+            and execution.client_id == order.client_id
+            and (
+                (order.permanent_id is not None and execution.permanent_id == order.permanent_id)
+                or (
+                    not execution.order_ref
+                    and not _permid_contradicts(execution.permanent_id, order.permanent_id)
+                    and not _permid_contradicts(execution.permanent_id, persisted_permanent_id)
+                    and (
+                        execution.broker_order_id == order.broker_order_id
+                        or (
+                            order.broker_order_id == 0
+                            and persisted_broker_order_id is not None
+                            and execution.broker_order_id == persisted_broker_order_id
+                        )
+                    )
+                    and execution.side is order.side
+                    and execution.contract.con_id == order.contract.con_id
+                    and execution.contract.symbol == order.contract.symbol
+                )
+            )
+        )
+    )
+
+
+def _terminal_below_snapshot_fills(
+    order: BrokerOrder, executions: tuple[BrokerExecution, ...]
+) -> bool:
+    """A terminal row cannot undercut owned or row-bound executions in the same snapshot.
+
+    Call after the existing ownership/coherence checks. Additional row-bound witnesses only add
+    refusals. The record-only fills store is not evidence here; no hold writes fill progress.
+    """
+
+    return order.lifecycle in TERMINAL_ORDER_LIFECYCLES and order.filled_quantity < sum(
+        (execution.quantity for execution in executions), Decimal("0")
+    )
+
+
 def resolve_from_broker_evidence(
     intent: OrderIntentRecord,
     *,
@@ -330,6 +427,18 @@ def resolve_from_broker_evidence(
     order_ref = intent.order_ref
     if not order_ref:
         return None
+    if (
+        _identity_conflict_reason(
+            order_ref=order_ref,
+            persisted_permanent_id=persisted_permanent_id,
+            current_account_id=current_account_id,
+            expected_broker_client_id=expected_broker_client_id,
+            open_orders=open_orders,
+            executions=executions,
+        )
+        is not None
+    ):
+        return None  # RECONFLOOR: full own fills cannot override a conflicting snapshot identity
     working = [
         order
         for order in open_orders
@@ -377,6 +486,16 @@ def resolve_from_broker_evidence(
             return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
         if _terminal_below_recorded_fills(order, recorded_filled_quantity):
             return None  # LEGACY-5: a terminal row cannot lower the fills already recorded
+        if _terminal_below_snapshot_fills(
+            order,
+            _snapshot_fill_witnesses(
+                order,
+                executions,
+                order_ref=order_ref,
+                persisted_permanent_id=persisted_permanent_id,
+            ),
+        ):
+            return None  # RECONFLOOR: terminal rows cannot erase this snapshot's executions
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
         # value through the raw-IBKR-string mapper. Refine only by fill quantity
         # (the working lifecycles and a typed FILLED row, per the guard above).
@@ -528,6 +647,16 @@ def _unresolved_evidence_reason(
             f"below the {recorded} filled already recorded: a terminal write "
             "would drop recorded fills, the intent stays locked"
         )
+    for order in matching_orders:
+        witnesses = _snapshot_fill_witnesses(
+            order, executions, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id
+        )
+        if _terminal_below_snapshot_fills(order, witnesses):
+            witnessed = sum((execution.quantity for execution in witnesses), Decimal("0"))
+            return (
+                "snapshot fill conflict: terminal venue figure is below the witnessed lower bound "
+                f"{witnessed} from row-bound snapshot executions, the intent stays locked"
+            )
     if any(not order.order_ref for order in matching_orders) or any(
         not execution.order_ref for execution in matching_executions
     ):
@@ -794,30 +923,32 @@ class OrderRestartReconciler:
         ] = []
         read_completed = self._completed_reader()
         for intent in working:
-            identities: PersistedIdentities | None = None
-            persisted_broker_order_id = self._tracker.broker_order_id(
-                intent.intent_id,
-                current_account_id=current_account_id,
+            planned = intent.status in _SETTLE_STATUSES or self._recovered(
+                intent, current_account_id=current_account_id
             )
+            identities: PersistedIdentities | None = None
             try:
+                # Planned identity history must precede the individual identity reads. Otherwise
+                # a first identity arriving between them can be mistaken for captured evidence.
+                if planned:
+                    identities = self._tracker.persisted_identities(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
+                persisted_broker_order_id = self._tracker.broker_order_id(
+                    intent.intent_id, current_account_id=current_account_id
+                )
                 persisted_permanent_id = self._tracker.permanent_id(
                     intent.intent_id,
                     current_account_id=current_account_id,
                 )
                 # a divergent client id is the same contradiction (R-e, r2): fail closed
                 self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
-                planned = intent.status in _SETTLE_STATUSES or self._recovered(
-                    intent, current_account_id=current_account_id
+                # Every sent status refuses contradictory broker-id history, including legacy.
+                self._tracker.single_broker_order_id(
+                    intent.intent_id, current_account_id=current_account_id
                 )
                 if planned:
-                    # A settle path requires exactly one broker order id across the full event
-                    # history. The latest id is not a substitute for that proof.
-                    self._tracker.single_broker_order_id(
-                        intent.intent_id, current_account_id=current_account_id
-                    )
-                    identities = self._tracker.persisted_identities(
-                        intent.intent_id, current_account_id=current_account_id
-                    )
+                    assert identities is not None
                     if len(identities.broker_order_ids) > 1:
                         raise OrderIdentityConflict(
                             intent.intent_id,
@@ -842,6 +973,7 @@ class OrderRestartReconciler:
                 original_limit_price=intent.limit_price,
                 current_account_id=current_account_id,
             )
+            legacy_refusal_reason: str | None = None
             if planned:
                 assert identities is not None
                 # the same planner, bound to this intent's persisted facts, re-runs over the
@@ -866,6 +998,8 @@ class OrderRestartReconciler:
                 )
                 # S-R3: a recovered SUBMITTED that the planner cannot settle is "as today"
                 as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
+                if as_today and plan.kind == "refuse":
+                    legacy_refusal_reason = plan.reason
                 if plan.kind != "legacy" and not as_today:
                     settle_plans.append((intent, plan, planner, identities))
                     continue
@@ -892,7 +1026,8 @@ class OrderRestartReconciler:
                         local_status=intent.status,
                         broker_status=None,
                         transition_applied=False,
-                        reason=_unresolved_evidence_reason(
+                        reason=legacy_refusal_reason
+                        or _unresolved_evidence_reason(
                             intent,
                             open_orders=open_orders,
                             executions=executions,
@@ -907,17 +1042,38 @@ class OrderRestartReconciler:
                 )
                 continue
             try:
-                outcome = self._tracker.ingest(update, current_account_id=current_account_id)
-            except RecordedFillsAdvanced as refused:
+                outcome = self._tracker.ingest(
+                    update,
+                    current_account_id=current_account_id,
+                    expected_identities=(
+                        identities if update.lifecycle in TERMINAL_ORDER_LIFECYCLES else None
+                    ),
+                )
+            except (RecordedFillsAdvanced, OrderLifecycleError, IdentityHistoryAdvanced) as refused:
                 # LEGACY-5: the terminal write was refused atomically because a concurrent writer
-                # advanced the recorded fill maximum after this pass read it.
+                # advanced the recorded fill maximum after this pass read it. A contradictory
+                # lifecycle likewise holds only this intent; other intents must still reconcile.
+                if isinstance(refused, OrderLifecycleError):
+                    current = self._intents.get(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
+                    logger.warning(
+                        "reconciliation lifecycle conflict: intent=%s local=%s observed=%s",
+                        intent.intent_id,
+                        current.status.value if current is not None else "UNKNOWN",
+                        update.lifecycle.value,
+                    )
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
                         local_status=intent.status,
                         broker_status=update.lifecycle,
                         transition_applied=False,
-                        reason=str(refused),
+                        reason=(
+                            f"lifecycle conflict: {refused}"
+                            if isinstance(refused, OrderLifecycleError)
+                            else str(refused)
+                        ),
                     )
                 )
                 continue
@@ -1222,6 +1378,28 @@ class OrderRestartReconciler:
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
                 )
+            if record is not None:
+                row_bound = sum(
+                    (
+                        execution.quantity
+                        for execution in _snapshot_fill_witnesses(
+                            record,
+                            executions,
+                            order_ref=order_ref,
+                            persisted_permanent_id=persisted_permanent_id,
+                            persisted_broker_order_id=persisted_broker_order_id,
+                        )
+                    ),
+                    Decimal("0"),
+                )
+                if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
+                    Decimal("0.00000001")
+                ):
+                    return _SettlePlan(
+                        "refuse",
+                        f"snapshot fill conflict: venue fill figure {figure} is below the "
+                        f"witnessed lower bound {row_bound} from row-bound snapshot executions",
+                    )
             try:
                 OrderLifecycleMachine(intent.status).apply(target)
             except OrderLifecycleError as error:
@@ -1709,6 +1887,9 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+            self._tracker.single_broker_order_id(
+                intent.intent_id, current_account_id=current_account_id
+            )
         except OrderIdentityConflict as conflict:
             raise ValueError(f"persisted order identity is contradictory: {conflict}") from conflict
         update = resolve_from_broker_evidence(

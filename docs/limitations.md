@@ -169,6 +169,8 @@ runbooks.
   layer. Dividend, borrow, and corporate-action inputs are optional because the broker port
   does not provide them yet.
 
+The reconciler's snapshot fill hold keeps no memory between passes. It compares a terminal row with the executions in the current broker snapshot only, so if an execution leaves the snapshot while the terminal row stays listed, a later pass can settle below the fills seen earlier (for example CANCELLED@0), and nothing records that they were seen. Whether a real gateway can produce that sequence is unverified (K4).
+
 ## Persistence and migrations
 
 - Fresh databases are built with SQLAlchemy `create_all` (always the current models); the Alembic
