@@ -389,7 +389,7 @@ class OrderTracker:
         remaining_quantity: Decimal,
         evidence: dict[str, object],
         now: datetime,
-        expected_identities: PersistedIdentities | None = None,
+        expected_identities: PersistedIdentities,
     ) -> bool:
         """One lifecycle CAS planned by the reconciler from proven broker evidence.
 
@@ -416,13 +416,9 @@ class OrderTracker:
             enforce_from_status=True,
             refuse_below_recorded_fills=True,
             expected_identity_sets=(
-                (
-                    expected_identities.permanent_ids,
-                    expected_identities.client_ids,
-                    expected_identities.broker_order_ids,
-                )
-                if expected_identities is not None
-                else None
+                expected_identities.permanent_ids,
+                expected_identities.client_ids,
+                expected_identities.broker_order_ids,
             ),
         )
 

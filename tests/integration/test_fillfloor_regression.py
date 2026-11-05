@@ -437,6 +437,9 @@ def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
                 remaining_quantity=Decimal("8"),
                 evidence={"venue_fill_figure": "2"},
                 now=NOW,
+                expected_identities=rig.tracker.persisted_identities(
+                    "intent-1", current_account_id=rig.account
+                ),
             )
 
         assert rig.status() is OrderLifecycle.CANCEL_PENDING

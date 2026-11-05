@@ -250,6 +250,13 @@ def _identity_conflict_reason(
                 observation.account_id != current_account_id
                 or observation.client_id != expected_broker_client_id
             ):
+                if observation.order_ref == order_ref and _permid_contradicts(
+                    observation.permanent_id, persisted_permanent_id
+                ):
+                    return (
+                        f"identity conflict: broker {kind} evidence reports the owned order "
+                        "reference with a contradicting permanent id"
+                    )
                 continue
             if (
                 observation.order_ref
