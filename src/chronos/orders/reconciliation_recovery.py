@@ -230,6 +230,39 @@ def _identity_conflict_reason(
     """The typed reason for a snapshot that contradicts the persisted identity (R-f)."""
 
     if persisted_permanent_id is None:
+        # No ACK permId yet: owned executions can still expose contradictory row identity.
+        # This witness only refuses; it never grants ownership or settlement authority.
+        owned_permanent_ids = {
+            execution.permanent_id
+            for execution in executions
+            if execution.order_ref == order_ref
+            and execution.account_id == current_account_id
+            and execution.client_id == expected_broker_client_id
+            and execution.permanent_id is not None
+        }
+        for kind, observations in (("order", open_orders), ("execution", executions)):
+            for observation in observations:
+                if observation.permanent_id is not None and (
+                    (
+                        bool(observation.order_ref)
+                        and observation.order_ref != order_ref
+                        and observation.permanent_id in owned_permanent_ids
+                    )
+                    or (
+                        observation.order_ref == order_ref
+                        and any(value != observation.permanent_id for value in owned_permanent_ids)
+                    )
+                ):
+                    if (
+                        observation.account_id != current_account_id
+                        or observation.client_id != expected_broker_client_id
+                    ):
+                        return f"identity conflict: broker {kind} evidence contradicts owned execution identity"
+                    return (
+                        f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
+                        f"permId {observation.permanent_id} reports order reference "
+                        f"{observation.order_ref!r}, contradicting owned execution identity"
+                    )
         return None
     for kind, observations in (("order", open_orders), ("execution", executions)):
         for observation in observations:
@@ -292,6 +325,34 @@ def _terminal_below_recorded_fills(order: BrokerOrder, recorded: Decimal | None)
         recorded is not None
         and order.lifecycle in TERMINAL_ORDER_LIFECYCLES
         and order.filled_quantity < recorded
+    )
+
+
+def _snapshot_fill_witnesses(
+    order: BrokerOrder,
+    executions: tuple[BrokerExecution, ...],
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+) -> tuple[BrokerExecution, ...]:
+    """Additional row-bound executions are witnesses for refusal only, never settlement.
+
+    A missing reference or unpersisted ACK permId must not erase a snapshot fill. Account and
+    client scope still bind the additional witnesses; unrelated intents' executions do not count.
+    """
+
+    return tuple(
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        or (
+            execution.account_id == order.account_id
+            and execution.client_id == order.client_id
+            and (
+                (order.permanent_id is not None and execution.permanent_id == order.permanent_id)
+                or execution.broker_order_id == order.broker_order_id
+            )
+        )
     )
 
 
@@ -403,7 +464,12 @@ def resolve_from_broker_evidence(
             return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
         if _terminal_below_recorded_fills(order, recorded_filled_quantity):
             return None  # LEGACY-5: a terminal row cannot lower the fills already recorded
-        if _terminal_below_snapshot_fills(order, tuple(fills)):
+        if _terminal_below_snapshot_fills(
+            order,
+            _snapshot_fill_witnesses(
+                order, executions, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id
+            ),
+        ):
             return None  # RECONFLOOR: terminal rows cannot erase this snapshot's executions
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
         # value through the raw-IBKR-string mapper. Refine only by fill quantity
@@ -556,12 +622,16 @@ def _unresolved_evidence_reason(
             f"below the {recorded} filled already recorded: a terminal write "
             "would drop recorded fills, the intent stays locked"
         )
-    if any(_terminal_below_snapshot_fills(order, matching_executions) for order in matching_orders):
-        witnessed = sum((execution.quantity for execution in matching_executions), Decimal("0"))
-        return (
-            "snapshot fill conflict: terminal venue figure is below the witnessed lower bound "
-            f"{witnessed} from owned snapshot executions, the intent stays locked"
+    for order in matching_orders:
+        witnesses = _snapshot_fill_witnesses(
+            order, executions, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id
         )
+        if _terminal_below_snapshot_fills(order, witnesses):
+            witnessed = sum((execution.quantity for execution in witnesses), Decimal("0"))
+            return (
+                "snapshot fill conflict: terminal venue figure is below the witnessed lower bound "
+                f"{witnessed} from row-bound snapshot executions, the intent stays locked"
+            )
     if any(not order.order_ref for order in matching_orders) or any(
         not execution.order_ref for execution in matching_executions
     ):
