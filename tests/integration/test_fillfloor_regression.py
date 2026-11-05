@@ -448,6 +448,32 @@ def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
         rig.close()
 
 
+def test_planned_transition_requires_an_identity_snapshot() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.pending()
+
+        with pytest.raises(TypeError, match="expected_identities"):
+            rig.tracker.record_planned_transition(  # type: ignore[call-arg]
+                intent_id="intent-1",
+                current_account_id=rig.account,
+                from_status=OrderLifecycle.CANCEL_PENDING,
+                to_status=OrderLifecycle.PARTIALLY_FILLED,
+                event_key="planned:missing-identity-snapshot",
+                source="RECONCILE",
+                broker_order_id=9001,
+                permanent_id=PERM_ID,
+                client_id=17,
+                filled_quantity=Decimal("1"),
+                remaining_quantity=Decimal("9"),
+                evidence={"contract": "snapshot-is-required"},
+                now=NOW,
+            )
+    finally:
+        rig.close()
+
+
 def test_ingest_accepts_equal_same_status_identity_evidence() -> None:
     rig = make_rig(ScriptedVenue())
     try:

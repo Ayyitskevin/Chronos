@@ -11,6 +11,7 @@ from tests.support.settle_rig import (
     NOW,
     PERM_ID,
     PRIOR,
+    REF,
     Rig,
     ScriptedVenue,
     issues,
@@ -253,6 +254,107 @@ def test_matching_two_id_snapshot_still_exposes_typed_lower_fill_refusal() -> No
 
         assert rig.status() is PF
         assert rig.events() == before
+    finally:
+        rig.close()
+
+
+def test_candidate_row_is_excluded_when_it_adds_the_first_client_id() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed(client_id=None)
+        rig.pending()
+        expected = rig.tracker.persisted_identities("intent-1", current_account_id=rig.account)
+        assert expected.client_ids == frozenset()
+        before = rig.events()
+
+        assert rig.tracker.record_planned_transition(
+            intent_id="intent-1",
+            current_account_id=rig.account,
+            from_status=CP,
+            to_status=FILLED,
+            event_key="r6:first-client-id-on-candidate",
+            source="RECONCILE",
+            broker_order_id=BROKER_ID,
+            permanent_id=PERM_ID,
+            client_id=CLIENT_ID,
+            filled_quantity=Decimal("10"),
+            remaining_quantity=Decimal("0"),
+            evidence={"candidate_row": "must_be_excluded"},
+            now=NOW,
+            expected_identities=expected,
+        )
+
+        assert rig.status() is FILLED
+        assert len(rig.events()) == len(before) + 1
+        assert rig.events()[-1].client_id == CLIENT_ID
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("kind", ("order", "execution"))
+@pytest.mark.parametrize("contradicts", (True, False))
+def test_foreign_session_own_reference_permid_conflict_is_typed_and_narrow(
+    kind: str,
+    contradicts: bool,
+) -> None:
+    venue = ScriptedVenue()
+    rig = make_rig(venue)
+    try:
+        rig.seed()
+        rig.pending()
+        foreign_account = "DU7654321"
+        foreign_client = CLIENT_ID + 1
+        foreign_broker_id = BROKER_ID + 987
+        foreign_permanent_id = PERM_ID + 987
+        evidence_ref = REF if contradicts else "CHR-UNRELATED-R6-987654321"
+        if kind == "order":
+            venue.open = [
+                venue_order(
+                    OrderLifecycle.SUBMITTED,
+                    "0",
+                    account=foreign_account,
+                    client=foreign_client,
+                    ref=evidence_ref,
+                    perm=foreign_permanent_id,
+                    broker_id=foreign_broker_id,
+                )
+            ]
+        else:
+            venue.execs = [
+                venue_execution(
+                    "FOREIGN-R6-EXECUTION-987654321",
+                    "1",
+                    NOW - timedelta(minutes=5),
+                    ref=evidence_ref,
+                    perm=foreign_permanent_id,
+                ).model_copy(
+                    update={
+                        "account_id": foreign_account,
+                        "client_id": foreign_client,
+                        "broker_order_id": foreign_broker_id,
+                    }
+                )
+            ]
+        venue.completed = [venue_order(OrderLifecycle.CANCELLED, "5")]
+
+        report = rig.reconcile()
+
+        if contradicts:
+            assert rig.status() is CP
+            assert len(report.unresolved) == 1
+            assert report.unresolved[0].reason == (
+                f"identity conflict: broker {kind} evidence reports the owned order reference "
+                "with a contradicting permanent id"
+            )
+            reason = report.unresolved[0].reason
+            assert foreign_account not in reason
+            assert str(foreign_client) not in reason
+            assert str(foreign_broker_id) not in reason
+            assert str(foreign_permanent_id) not in reason
+        else:
+            assert report.unresolved == ()
+            assert rig.status() is OrderLifecycle.CANCELLED
+            assert rig.events()[-1].filled_quantity == Decimal("5")
     finally:
         rig.close()
 
