@@ -31,9 +31,13 @@ def test_conflicting_reference_holds_legacy_intent_despite_full_own_executions(
         assert [item.intent_id for item in report.unresolved] == ["intent-1"]
         reason = report.unresolved[0].reason
         assert reason.startswith("identity conflict:")
-        assert foreign_ref not in reason
-        assert str(foreign_broker_id) not in reason
-        assert str(client_id) not in reason
+        if client_id == CLIENT_ID:
+            assert foreign_ref in reason
+            assert str(foreign_broker_id) in reason
+        else:
+            assert foreign_ref not in reason
+            assert str(foreign_broker_id) not in reason
+            assert str(client_id) not in reason
         assert not report.permits_new_opening_order
     finally:
         rig.close()

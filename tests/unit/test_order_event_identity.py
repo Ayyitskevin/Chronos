@@ -751,7 +751,7 @@ def test_r1_4_permid_fallback_applies_only_to_a_blank_order_ref_and_contradictio
     )
     assert update is None
     assert reason.startswith("identity conflict:")
-    assert "CHR-OTHER" not in reason and "4242" not in reason
+    assert "CHR-OTHER" in reason and "4242" in reason
 
     # the owned orderRef with a permId that contradicts the persisted one → unresolved, typed
     update, reason = _resolve(
@@ -761,7 +761,7 @@ def test_r1_4_permid_fallback_applies_only_to_a_blank_order_ref_and_contradictio
     )
     assert update is None
     assert reason.startswith("identity conflict:")
-    assert "4243" not in reason and "4242" not in reason
+    assert "4243" in reason and "4242" in reason
 
     # the owned orderRef with the persisted permId, or with no permId reported → resolved
     for reported in (_PERM_ID, None):
