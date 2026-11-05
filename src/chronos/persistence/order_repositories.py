@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -41,6 +41,10 @@ from chronos.persistence.schema import (
     RiskCheckResultRow,
     RiskDecisionRow,
 )
+
+if TYPE_CHECKING:
+    from chronos.orders.intent import WheelOrderIntent
+
 
 # Intent statuses that mean the order is still working (not yet terminal) and
 # therefore still encumbers cash/shares for the next order's risk evaluation.
@@ -293,7 +297,13 @@ class OrderIntentRepository:
             )
             return tuple(_intent_row_to_record(row) for row in rows)
 
-    def count_opening_since(self, *, current_account_id: str, since: datetime) -> int:
+    def count_opening_since(
+        self,
+        *,
+        current_account_id: str,
+        since: datetime,
+        evaluated_intent: WheelOrderIntent | None = None,
+    ) -> int:
         """Count opening intents created on/after ``since``, whatever their side.
 
         **The side filter this used to carry was a bug (R-25).** It matched
@@ -312,20 +322,52 @@ class OrderIntentRepository:
         moving the counter would be bounded by nothing at all. Counting
         *attempts to open* is the conservative reading and the one that matches
         what the limit is for.
+
+        U3F1: exclude only the persisted candidate whose immutable economic fields
+        match the supplied evaluation. An id alone is not authority to subtract a
+        row. A mismatch refuses; an unpersisted candidate subtracts nothing. The
+        scope check, identity read and count share this session. No lifecycle
+        filter is applied: rejected prior attempts still consume the limit.
         """
 
         with self._sessions() as session:
             fingerprint = _require_matching_account_scope(
                 session, current_account_id
             ).account_fingerprint
-            count = session.scalar(
+            excluded_id = None
+            if evaluated_intent is not None:
+                if evaluated_intent.account_id != current_account_id:
+                    raise ValueError("Evaluated intent account does not match the count scope")
+                row = session.get(OrderIntentRow, evaluated_intent.intent_id)
+                if row is not None:
+                    expected = (
+                        fingerprint,
+                        str(evaluated_intent.product_family),
+                        evaluated_intent.symbol,
+                        getattr(evaluated_intent.contract, "con_id", None),
+                        str(evaluated_intent.side),
+                        evaluated_intent.open_close_effect,
+                        evaluated_intent.quantity,
+                        evaluated_intent.limit_price,
+                        evaluated_intent.order_type,
+                        evaluated_intent.time_in_force,
+                        evaluated_intent.outside_rth,
+                        row.environment,
+                        evaluated_intent.correlation_id,
+                    )
+                    if _economic_signature(row) != expected:
+                        raise ValueError("Evaluated intent does not match its persisted identity")
+                    excluded_id = row.intent_id
+            query = (
                 select(func.count())
                 .select_from(OrderIntentRow)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
                 .where(OrderIntentRow.open_close_effect == "OPEN")
                 .where(OrderIntentRow.created_at >= since)
             )
-            return int(count or 0)
+            if excluded_id is not None:
+                query = query.where(OrderIntentRow.intent_id != excluded_id)
+            return int(session.scalar(query) or 0)
 
     def set_status(
         self,

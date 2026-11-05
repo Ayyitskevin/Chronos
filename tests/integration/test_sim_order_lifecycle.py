@@ -954,23 +954,9 @@ def test_an_ambiguous_send_persists_submission_unknown_then_recovers_without_res
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U3-F1: daily opening cap counts the intent under evaluation (finding, RED, awaiting Kevin)"
-    ),
-)
 def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill(venue: _Venue) -> None:
-    # SURVEY: "the opening cap after N fills". Fails if the real evidence provider stops
-    # counting today's opening intents from the repository (R-25), or if the cap stops
-    # refusing at the limit. At 306efd5 it fails EARLIER, inside _fill_ten: the cap counts
-    # the intent under evaluation, so the FIRST opening of the day is refused (U3-F1) —
-    # the strict xfail above absorbs exactly that AssertionError. Against the fix it must
-    # XPASS, so (r2) the second opening is economically distinct (an identical order would
-    # be refused as a duplicate idempotency key, a ValueError, not the cap) and readiness
-    # is re-armed after the fill (a send consumes it; see case 2), leaving the cap as the
-    # only check that can fail.
+    # The first persisted candidate is counted once; the next distinct opening
+    # must fail only the cap after readiness is re-armed following the fill.
     with harness(venue, settings=_cap_of_one(venue)) as h:
         _fill_ten(h)
         h.rearm_readiness("U3: operator re-reconciled after the fill")
@@ -983,6 +969,30 @@ def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill(venue: _Ven
         assert "2 would exceed the 1 daily cap" in failed["max_opening_orders_per_day"]
         assert h.status("intent-2") is OrderLifecycle.REJECTED
         assert h.sent_order_count == 1
+
+
+def test_daily_opening_cap_boundaries_through_propose(venue: _Venue) -> None:
+    # U3F1 r1, adapted from builder-opus55's review probe: exercise persist ->
+    # gather -> evaluate, not the provider/engine's private count-check seams.
+    # Prior counts 2/3/4 are limit-1/limit/limit+1. The fifth must still count
+    # the rejected fourth. Dropping evaluated_intent or filtering REJECTED kills this.
+    settings_factory = paper_settings if venue.kind == "sim" else official_transmit_settings
+    with harness(venue, settings=settings_factory(max_opening_orders_per_day=3)) as h:
+        for number, letter in enumerate("ABCDE", start=1):
+            intent_id = f"boundary-intent-{number}"
+            result = h.propose(h.buy(quantity=number, ref=_ref(letter), intent_id=intent_id))
+            failed = {c.name: c.detail for c in result.risk.checks if c.status.value != "PASS"}
+
+            assert result.risk.approved is (number <= 3), (number, failed)
+            if number <= 3:
+                assert failed == {}
+            else:
+                assert set(failed) == {"max_opening_orders_per_day"}
+                assert (
+                    f"{number} would exceed the 3 daily cap" in failed["max_opening_orders_per_day"]
+                )
+                assert h.status(intent_id) is OrderLifecycle.REJECTED
+            assert h.sent_order_count == 0
 
 
 def test_a_buy_the_sim_account_cannot_fund_is_refused_by_risk(venue: _Venue) -> None:
