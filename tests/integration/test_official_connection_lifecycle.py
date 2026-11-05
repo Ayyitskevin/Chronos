@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.integration.test_sim_order_lifecycle import CROSSING, _ref, _Venue, harness
+from tests.integration.test_sim_order_lifecycle import CROSSING, FillPlan, _ref, _Venue, harness
 from tests.support import fake_ibapi
 from tests.support.order_fakes import option_contract
 
@@ -726,3 +726,46 @@ def test_a_two_step_cancel_settles_after_reconciliation(
         if h.sim_open_order_ids() != set():  # preconditions raise, never AssertionError
             raise RuntimeError("precondition: the venue still holds the order")
         assert h.service.reconcile_on_restart_report(now=h.now).remaining_active == ()
+
+
+def test_partial_fill_cancel_forwards_known_fill_and_remaining_through_official_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    venue = _Venue(
+        kind="official_fake",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+    with harness(venue, plans={_ref("A"): FillPlan(partial_fraction=(1, 2))}) as h:
+        intent = h.buy(ref=_ref("A"), intent_id="intent-1")
+        h.confirm(intent)
+        assert h.submit(intent).submitted
+        h.bar(**CROSSING)  # 5 of 10
+        h.service.reconcile_on_restart_report(now=h.now)
+        assert h.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=h.account
+        ) == Decimal("5")
+
+        callbacks: list[tuple[str, Decimal, Decimal]] = []
+        original = h.broker.bridge.on_order_status
+
+        def observe(*args: Any) -> None:
+            if args[1] in {"PendingCancel", "Cancelled"}:
+                callbacks.append((args[1], Decimal(str(args[2])), Decimal(str(args[3]))))
+            original(*args)
+
+        monkeypatch.setattr(h.broker.bridge, "on_order_status", observe)
+        result = h.service.cancel("intent-1", now=h.now)
+
+        assert result.lifecycle is OrderLifecycle.CANCEL_PENDING
+        assert result.filled_quantity == Decimal("5")
+        assert callbacks == [
+            ("PendingCancel", Decimal("5"), Decimal("5")),
+            ("Cancelled", Decimal("5"), Decimal("5")),
+        ]
+        assert h.service.reconcile_on_restart_report(now=h.now).remaining_active == ()
+        assert h.status("intent-1") is OrderLifecycle.CANCELLED
+        assert h.tracker.recorded_filled_quantity(
+            "intent-1", current_account_id=h.account
+        ) == Decimal("5")
+        assert h.sim_position() == Decimal("5")

@@ -85,7 +85,7 @@ from chronos.orders.tracker import (
     OrderTracker,
     broker_status_to_lifecycle,
 )
-from chronos.persistence.order_repositories import OrderIntentRepository
+from chronos.persistence.order_repositories import OrderIntentRepository, RecordedFillsAdvanced
 from chronos.persistence.repositories import (
     _reject_raw_account_event_data,
     _require_matching_account_scope,
@@ -148,6 +148,7 @@ class CallbackOutcome(StrEnum):
 
     APPLIED = "applied"
     IDENTITY_REFINED = "identity_refined"
+    FILL_PROGRESS_RECORDED = "fill_progress_recorded"
     NO_CHANGE = "no_change"
     ALREADY_RECORDED = "already_recorded"
     PAIRED = "paired"
@@ -159,6 +160,7 @@ class CallbackOutcome(StrEnum):
     IDENTITY_CONFLICT = "identity_conflict"
     OWNERSHIP_UNPROVEN = "ownership_unproven"
     LIFECYCLE_CONTRADICTION = "lifecycle_contradiction"
+    FILL_FLOOR_CONFLICT = "fill_floor_conflict"
     UNRECOGNIZED_STATUS = "unrecognized_status"
     DEFERRED_TO_RECONCILER = "deferred_to_reconciler"
     UNKNOWN_EXECUTION = "unknown_execution"
@@ -199,6 +201,7 @@ _INVALIDATING = frozenset(
         CallbackOutcome.IDENTITY_CONFLICT,
         CallbackOutcome.OWNERSHIP_UNPROVEN,
         CallbackOutcome.LIFECYCLE_CONTRADICTION,
+        CallbackOutcome.FILL_FLOOR_CONFLICT,
         CallbackOutcome.UNRECOGNIZED_STATUS,
         CallbackOutcome.EXECUTION_CONFLICT,
         CallbackOutcome.EXECUTION_REFUSED,
@@ -1198,10 +1201,21 @@ class CallbackConsumer:
         self._require_write_authority()
         try:
             result = self._tracker.ingest(update, current_account_id=self._account_id)
+        except RecordedFillsAdvanced as conflict:
+            return CallbackOutcome.FILL_FLOOR_CONFLICT, {
+                "lifecycle": lifecycle.value,
+                "recorded_filled_quantity": str(conflict.recorded),
+                "attempted_filled_quantity": str(conflict.attempted),
+            }
         except OrderLifecycleError:
             return CallbackOutcome.LIFECYCLE_CONTRADICTION, {"lifecycle": lifecycle.value}
         if result.lifecycle_changed:
             return CallbackOutcome.APPLIED, {"lifecycle": lifecycle.value}
+        if result.fill_progress_recorded:
+            return CallbackOutcome.FILL_PROGRESS_RECORDED, {
+                "lifecycle": lifecycle.value,
+                "identity_refined": result.identity_refined,
+            }
         if result.identity_refined:
             return CallbackOutcome.IDENTITY_REFINED, {"lifecycle": lifecycle.value}
         if self._tracker_intent_status(intent_id) is not intent:

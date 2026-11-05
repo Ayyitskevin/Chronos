@@ -137,7 +137,7 @@ class _Rig:
             **fields,  # type: ignore[arg-type]
         )
 
-    def seed(self, local: OrderLifecycle) -> None:
+    def seed(self, local: OrderLifecycle, *, permanent_id: int | None = PERM_ID) -> None:
         """One 10-share BUY intent whose persisted ids are the ones the real path writes."""
 
         record = OrderIntentRecord(
@@ -185,7 +185,7 @@ class _Rig:
             source="SUBMIT",
             from_status=OrderLifecycle.USER_CONFIRMED,
             broker_order_id=BROKER_ID,
-            permanent_id=PERM_ID,
+            permanent_id=permanent_id,
             client_id=CLIENT_ID,
             filled_quantity=Decimal(0),
             remaining_quantity=QUANTITY,
@@ -380,6 +380,105 @@ def test_no_evidence_leaves_the_intent_locked_with_the_absence_reason(
     assert report.permits_new_opening_order is False
     (item,) = report.unresolved
     assert "absent from the broker order and execution snapshots" in item.reason
+
+
+def test_reconcile_writes_pending_cancel_below_a_recorded_partial_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    rig._record(
+        OrderLifecycle.PARTIALLY_FILLED,
+        "witness-five",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.CANCEL_PENDING, "0")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_reconcile_writes_pending_cancel_below_a_recorded_submitted_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMITTED)
+    rig._record(
+        OrderLifecycle.SUBMITTED,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMITTED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.CANCEL_PENDING, "0")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_reconcile_refines_identity_below_a_recorded_submitted_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMITTED, permanent_id=None)
+    rig._record(
+        OrderLifecycle.SUBMITTED,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMITTED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.SUBMITTED, "0")]
+
+    report = rig.reconcile()
+
+    identity_event = rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1]
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert identity_event.source == "IDENTITY"
+    assert identity_event.permanent_id == PERM_ID
+    assert identity_event.filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def _unknown_with_five_recorded(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
+    rig._record(
+        OrderLifecycle.SUBMISSION_UNKNOWN,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.SUBMITTED, "0")]
+
+
+def test_reconcile_resolves_unknown_to_submitted_below_its_recorded_fill(rig: _Rig) -> None:
+    _unknown_with_five_recorded(rig)
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_operator_resolve_applies_submitted_row_below_unknown_recorded_fill(rig: _Rig) -> None:
+    _unknown_with_five_recorded(rig)
+
+    assert (
+        rig.reconciler.operator_resolve(
+            "intent-1",
+            operator_note="checked the TWS order list",
+            current_account_id=ACCOUNT,
+            now=NOW,
+        )
+        is False
+    )
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
 
 
 # --- LEGACY-5 (reader P2-2, Muse option B): a terminal row below the recorded fills settles nothing
@@ -713,9 +812,9 @@ def test_r1_the_reconcile_report_path_refuses_the_same_stale_terminal_write(
 # --- LEGACY-5 r1: the repository's conditional write, directly ---------------------------------
 
 
-@pytest.mark.parametrize("attempted", ["0", "2", None], ids=["zero", "below", "missing"])
+@pytest.mark.parametrize("attempted", ["0", "2"], ids=["zero", "below"])
 def test_r1_record_transition_refuses_a_figure_below_the_recorded_maximum(
-    rig: _Rig, attempted: str | None
+    rig: _Rig, attempted: str
 ) -> None:
     from chronos.persistence.order_repositories import RecordedFillsAdvanced
 
@@ -730,14 +829,14 @@ def test_r1_record_transition_refuses_a_figure_below_the_recorded_maximum(
             from_status=OrderLifecycle.PARTIALLY_FILLED,
             to_status=OrderLifecycle.CANCELLED,
             current_account_id=ACCOUNT,
-            filled_quantity=None if attempted is None else Decimal(attempted),
+            filled_quantity=Decimal(attempted),
             occurred_at=NOW,
             enforce_from_status=True,
             refuse_below_recorded_fills=True,
         )
 
     assert refused.value.recorded == Decimal(3)
-    assert refused.value.attempted == Decimal(attempted or "0")
+    assert refused.value.attempted == Decimal(attempted)
     assert rig.repo.events("intent-1", current_account_id=ACCOUNT) == before  # nothing written
     assert rig.status() is OrderLifecycle.PARTIALLY_FILLED  # status untouched
 
@@ -757,23 +856,48 @@ def test_r1_record_transition_writes_a_figure_at_or_above_the_recorded_maximum(
         filled_quantity=Decimal(attempted),
         occurred_at=NOW,
         enforce_from_status=True,
-        refuse_below_recorded_fills=True,
     )
     assert rig.status() is OrderLifecycle.CANCELLED
 
 
-def test_r1_the_guard_is_opt_in_other_writers_are_unchanged(rig: _Rig) -> None:
-    """Every other ``record_transition`` caller keeps today's behaviour (the default is False)."""
+def test_r1_unflagged_terminal_write_below_fill_floor_is_refused(rig: _Rig) -> None:
+    """D-67 / Kevin K-20261103-002: every terminal write observes the fill floor without opt-in."""
+
+    from chronos.persistence.order_repositories import RecordedFillsAdvanced
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    before = rig.repo.events("intent-1", current_account_id=ACCOUNT)
+
+    with pytest.raises(RecordedFillsAdvanced) as refused:
+        rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="intent-1:cancel-default-below-floor",
+            source="CANCEL",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            to_status=OrderLifecycle.CANCELLED,
+            current_account_id=ACCOUNT,
+            filled_quantity=Decimal(0),
+            occurred_at=NOW,
+        )
+
+    assert refused.value.recorded == Decimal(3)
+    assert refused.value.attempted == Decimal(0)
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT) == before
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+
+
+def test_r1_default_nonterminal_transition_keeps_existing_behavior(rig: _Rig) -> None:
+    """The structural floor is terminal-only; the default nonterminal write still succeeds."""
 
     rig.seed(OrderLifecycle.PARTIALLY_FILLED)
     assert rig.repo.record_transition(
         intent_id="intent-1",
-        event_key="intent-1:cancel-default",
+        event_key="intent-1:cancel-pending-default",
         source="CANCEL",
         from_status=OrderLifecycle.PARTIALLY_FILLED,
-        to_status=OrderLifecycle.CANCELLED,
+        to_status=OrderLifecycle.CANCEL_PENDING,
         current_account_id=ACCOUNT,
         filled_quantity=Decimal(0),
         occurred_at=NOW,
     )
-    assert rig.status() is OrderLifecycle.CANCELLED
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING

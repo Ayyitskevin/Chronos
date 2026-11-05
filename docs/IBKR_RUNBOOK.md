@@ -92,6 +92,22 @@ Plan around it: this platform trades daily bars; nothing needs to run overnight.
 
 The order is fixed. Do not skip steps.
 
+The production runtime connects to the broker once during backend startup; it does not run an
+in-process reconnect loop. Therefore, when Chronos reports that a completed-orders timeout requires
+a reconnect, the current operator action is to restart the backend after restoring the gateway
+session. That restart creates the fresh broker session; it does not prove reconciliation or rearm
+either safety plane. Continue with every step below.
+
+For the generic identity conflict, a broker order-evidence row can be cleared by cancelling that
+open order in TWS; a broker execution-evidence row cannot be cleared by the operator.
+
+A `snapshot fill conflict` holds an intent when a terminal row reports fewer fills than its
+current snapshot executions. Verify the figures in TWS and reconcile again; the hold itself
+records no fill progress and retains no witness between passes. Two persisted broker order IDs
+are a local history conflict, also refused by SUBMISSION_UNKNOWN operator resolution. Investigate
+both IDs in TWS, preserve the event history, and keep the intent held for owner review; cancelling
+a venue row does not erase that persisted conflict.
+
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
    ```bash

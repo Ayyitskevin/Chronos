@@ -49,6 +49,16 @@ true, so they are enforced rather than asserted:
 
 ## Using them
 
+Autonomy maintenance is ON by default: the backend serves inspection and reconciliation,
+but no autonomy runtime is built and `/health/ready` returns 503, even without a mandate.
+For owner-approved normal SHADOW operation, use exactly one
+`CHRONOS_AUTONOMY_MAINTENANCE=off` assignment in the **effective backend EnvironmentFile**,
+not the repo-root `.env` or an `Environment=` override, and restart. Discover that source and
+verify the loaded unit with the ON/OFF pre-start proof in `N3-CUTOVER.md`, “Backend autonomy
+maintenance”. A cutover uses the final `UnsetEnvironment=` drop-in and the ON proof before
+every boot; only Kevin's step-9 authorization permits its removal and the OFF proof. The
+ordinary service template does not silently lift maintenance or install that cutover drop-in.
+
 ```bash
 mkdir -p ~/.config/systemd/user
 cp docs/ops/chronos-backend.service docs/ops/chronos-worker.service ~/.config/systemd/user/

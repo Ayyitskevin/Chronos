@@ -1097,7 +1097,7 @@ def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_in
             found[f"{path.relative_to(_ROOT)}:{node.lineno}"] = labels[0]
     assert sorted(found.values()) == ["operator", "periodic", "startup"], found
     assert set(found) == {
-        "src/chronos/api/main.py:330",
+        "src/chronos/api/main.py:343",
         "src/chronos/api/reconciliation_loop.py:102",
         "src/chronos/api/routes/orders.py:216",
     }, found

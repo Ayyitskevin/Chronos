@@ -11,6 +11,7 @@ from decimal import Decimal
 from chronos.broker.base import (
     BrokerConnectionError,
     BrokerDataError,
+    BrokerRefusedBeforeSend,
     BrokerSafetyError,
     BrokerSendGuard,
     OptionChainResponse,
@@ -487,13 +488,11 @@ class DemoBroker:
         send_guard: BrokerSendGuard | None = None,
     ) -> OrderSubmission:
         del request, send_guard
-        self._require_connection()
-        raise BrokerSafetyError("DemoBroker cannot submit orders")
+        raise BrokerRefusedBeforeSend("DemoBroker cannot submit orders")
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission:
         del request
-        self._require_connection()
-        raise BrokerSafetyError("DemoBroker cannot modify orders")
+        raise BrokerRefusedBeforeSend("DemoBroker cannot modify orders")
 
     async def cancel_order(self, broker_order_id: int) -> CancellationResult:
         self._require_connection()
@@ -515,12 +514,16 @@ class DemoBroker:
             )
         if not (order.order_ref or "").startswith("CHR-"):
             raise BrokerSafetyError("Chronos will not cancel an order it does not own")
+        self._orders = tuple(
+            item for item in self._orders if item.broker_order_id != broker_order_id
+        )
         return CancellationResult(
             broker_order_id=broker_order_id,
             requested=True,
             lifecycle=OrderLifecycle.CANCELLED,
             message="Deterministic cancellation accepted.",
             timestamp=self._clock().astimezone(UTC),
+            filled_quantity=order.filled_quantity,
         )
 
     async def snapshot(self) -> BrokerSnapshot:
