@@ -311,6 +311,16 @@ def resolve_from_broker_evidence(
     order_ref = intent.order_ref
     if not order_ref:
         return None
+    if (
+        _identity_conflict_reason(
+            order_ref=order_ref,
+            persisted_permanent_id=persisted_permanent_id,
+            open_orders=open_orders,
+            executions=executions,
+        )
+        is not None
+    ):
+        return None  # RECONFLOOR: full own fills cannot override a conflicting snapshot identity
     working = [
         order
         for order in open_orders
@@ -439,7 +449,7 @@ def _unresolved_evidence_reason(
         executions=executions,
     )
     if conflict is not None:
-        return conflict
+        return "identity conflict: broker snapshot contradicts persisted order identity"
     matching_orders = tuple(
         order
         for order in open_orders
