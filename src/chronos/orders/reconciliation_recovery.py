@@ -913,15 +913,14 @@ class OrderRestartReconciler:
                 )
                 # a divergent client id is the same contradiction (R-e, r2): fail closed
                 self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+                # Every sent status refuses contradictory broker-id history, including legacy.
+                self._tracker.single_broker_order_id(
+                    intent.intent_id, current_account_id=current_account_id
+                )
                 planned = intent.status in _SETTLE_STATUSES or self._recovered(
                     intent, current_account_id=current_account_id
                 )
                 if planned:
-                    # A settle path requires exactly one broker order id across the full event
-                    # history. The latest id is not a substitute for that proof.
-                    self._tracker.single_broker_order_id(
-                        intent.intent_id, current_account_id=current_account_id
-                    )
                     identities = self._tracker.persisted_identities(
                         intent.intent_id, current_account_id=current_account_id
                     )
@@ -1014,8 +1013,14 @@ class OrderRestartReconciler:
                 )
                 continue
             try:
-                outcome = self._tracker.ingest(update, current_account_id=current_account_id)
-            except (RecordedFillsAdvanced, OrderLifecycleError) as refused:
+                outcome = self._tracker.ingest(
+                    update,
+                    current_account_id=current_account_id,
+                    expected_identities=(
+                        identities if update.lifecycle in TERMINAL_ORDER_LIFECYCLES else None
+                    ),
+                )
+            except (RecordedFillsAdvanced, OrderLifecycleError, IdentityHistoryAdvanced) as refused:
                 # LEGACY-5: the terminal write was refused atomically because a concurrent writer
                 # advanced the recorded fill maximum after this pass read it. A contradictory
                 # lifecycle likewise holds only this intent; other intents must still reconcile.

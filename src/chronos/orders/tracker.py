@@ -191,6 +191,7 @@ class OrderTracker:
         update: OrderStatusUpdate,
         *,
         current_account_id: str,
+        expected_identities: PersistedIdentities | None = None,
     ) -> IngestOutcome:
         """Apply one broker observation.
 
@@ -204,6 +205,9 @@ class OrderTracker:
         transition transaction. A terminal update below that floor raises
         :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the caller's
         earlier read of the maximum may be stale.
+
+        A reconciler terminal write may carry captured ``expected_identities``. The repository
+        compares them atomically before committing any event; callbacks carry no such snapshot.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -229,6 +233,7 @@ class OrderTracker:
                 update,
                 intent.status,
                 current_account_id,
+                expected_identities=expected_identities,
             )
 
         event_key = (
@@ -255,6 +260,15 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
+            expected_identity_sets=(
+                (
+                    expected_identities.permanent_ids,
+                    expected_identities.client_ids,
+                    expected_identities.broker_order_ids,
+                )
+                if expected_identities is not None
+                else None
+            ),
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
@@ -263,6 +277,8 @@ class OrderTracker:
         update: OrderStatusUpdate,
         status: OrderLifecycle,
         current_account_id: str,
+        *,
+        expected_identities: PersistedIdentities | None,
     ) -> IngestOutcome:
         """Append new same-status identity or cumulative-fill evidence.
 
@@ -331,6 +347,15 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
+            expected_identity_sets=(
+                (
+                    expected_identities.permanent_ids,
+                    expected_identities.client_ids,
+                    expected_identities.broker_order_ids,
+                )
+                if expected_identities is not None
+                else None
+            ),
         )
         return IngestOutcome(
             lifecycle_changed=False,
