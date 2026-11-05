@@ -20,6 +20,7 @@ import pytest
 from tests.support import fake_ibapi
 from tests.support.settle_rig import NOW, Rig, issues, make_rig
 
+from chronos.broker.base import BrokerDataError
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.domain.enums import OrderLifecycle
 
@@ -237,17 +238,15 @@ def test_a_second_pass_after_the_settle_changes_nothing(
     assert rig.events() == before
 
 
-# --- Daybreak P3-1: an unanswered completed-orders read must not poison later passes ----------
+# --- Daybreak P3-1: an unanswered completed-orders read taints until reconnect -----------------
 
 
-def test_P3_1_a_timed_out_completed_orders_read_is_a_typed_hold_until_reconnect(
+def test_P3_1_a_timed_out_completed_orders_read_requires_reconnect(
     world: tuple[Rig, OfficialIBKRBroker],
     gateway: fake_ibapi.FakeGateway,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stream has no request id, so the unanswered flight is never overlapped: every later
-    pass on the same connection holds with the typed reason (it used to raise RuntimeError out
-    of the whole pass); a reconnect clears it and the next pass settles."""
+    """K-20261103-003: timeout holds CANCEL_PENDING and refuses reads until reconnect."""
 
     from chronos.broker import official_ibkr as official_ibkr_module
 
@@ -256,16 +255,18 @@ def test_P3_1_a_timed_out_completed_orders_read_is_a_typed_hold_until_reconnect(
     _cancel(rig, adapter)
     answer = gateway.completed_orders
     monkeypatch.setattr(gateway, "completed_orders", lambda client, api_only: None)  # silent
-    for _ in range(2):
-        report = _at(rig)
-        assert rig.status() is CP
-        assert any("completed-orders evidence is not available" in r for r in issues(report))
-    monkeypatch.setattr(gateway, "completed_orders", answer)
-    report = _at(rig)  # same connection: the old flight is still outstanding
+    report = _at(rig)
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
-    rig.connection.run(adapter.disconnect())
-    rig.connection.run(adapter.connect())
+    assert any("reconnect is required" in r for r in issues(report))
+    monkeypatch.setattr(gateway, "completed_orders", answer)
+    with pytest.raises(BrokerDataError, match="reconnect"):
+        rig.connection.run(adapter.completed_orders())
+    report = _at(rig)
+    assert rig.status() is CP
+    assert any("completed-orders evidence is not available" in r for r in issues(report))
+    rig.connection.disconnect()
+    rig.connection.connect()
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
 
@@ -288,3 +289,16 @@ def test_P3_1_a_reconnect_reset_releases_an_unanswered_completed_orders_flight()
     bridge.on_completed_order(object(), object(), object())
     bridge.on_completed_orders_end()
     assert fresh.done.is_set() and len(fresh.items) == 1 and stale.items == []
+
+
+def test_a_healthy_connect_does_not_clear_completed_order_timeout_taint(
+    world: tuple[Rig, OfficialIBKRBroker],
+) -> None:
+    rig, adapter = world
+    flight = adapter.bridge.start_completed_orders()
+    adapter.bridge.release_completed_orders(flight)
+
+    rig.connection.connect()
+
+    with pytest.raises(BrokerDataError, match="reconnect"):
+        adapter.bridge.start_completed_orders()

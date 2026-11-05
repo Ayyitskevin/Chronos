@@ -29,6 +29,7 @@ import json
 import sys
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 sys.dont_write_bytecode = True  # keep the skill dir cache-free (no __pycache__ from this import)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,25 +60,38 @@ def check_session(directory: Path, *, allow_demo: bool = False) -> list[str]:
 
     capture_path = directory / "capture.json"
     derived_path = directory / "derived_liquid_hours.json"
+    capture: Any = None
+    capture_loaded = False
+    if capture_path.is_file():
+        try:
+            capture = json.loads(capture_path.read_text(encoding="utf-8"))
+        except ValueError:
+            failures.append(f"{directory}: capture.json is not valid JSON")
+        else:
+            if isinstance(capture, dict):
+                capture_loaded = True
+            else:
+                failures.append(f"{directory}: capture.json must be a JSON object")
+
     if capture_path.is_file() and derived_path.is_file():
-        capture = json.loads(capture_path.read_text(encoding="utf-8"))
-        recomputed = canonical_json(derive_liquid_hours(capture))
-        stored = derived_path.read_text(encoding="utf-8")
-        if recomputed != stored:
-            failures.append(
-                f"{directory}: derived_liquid_hours.json does NOT replay byte-exactly "
-                "(repo parser output changed, or the fixture was hand-edited; "
-                "record the divergence — do not edit the fixture to match)"
-            )
-        for step_name in capture.get("steps", {}):
-            if any(token in step_name for token in _MUTATION_TOKENS):
-                failures.append(f"{directory}: mutation-shaped step in capture: {step_name}")
+        if capture_loaded:
+            recomputed = canonical_json(derive_liquid_hours(capture))
+            stored = derived_path.read_text(encoding="utf-8")
+            if recomputed != stored:
+                failures.append(
+                    f"{directory}: derived_liquid_hours.json does NOT replay byte-exactly "
+                    "(repo parser output changed, or the fixture was hand-edited; "
+                    "record the divergence — do not edit the fixture to match)"
+                )
+            for step_name in capture.get("steps", {}):
+                if any(token in step_name for token in _MUTATION_TOKENS):
+                    failures.append(f"{directory}: mutation-shaped step in capture: {step_name}")
     else:
         failures.append(f"{directory}: capture.json or derived_liquid_hours.json missing")
 
     claimed = manifest.get("gateway_evidence", False)
-    if capture_path.is_file():
-        meta = json.loads(capture_path.read_text(encoding="utf-8")).get("meta", {})
+    if capture_loaded:
+        meta = capture.get("meta", {})
         if bool(meta.get("gateway_evidence", False)) != bool(claimed):
             failures.append(
                 f"{directory}: manifest gateway_evidence={claimed} disagrees with the capture's "

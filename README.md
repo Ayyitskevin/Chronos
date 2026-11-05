@@ -20,11 +20,22 @@ owner-directed maximal-autonomy supersession of parts of ADR-0016), and
 and wired — contracts (M1), gateway/admission/sizing (M2), durable state (M3), the
 compiler and queue (M4), session counters (M5), alert delivery (M6), the tick runtime
 (M7), and the app-plane wiring (M7.5/ADR-0017). A backend booted with a valid
-`AUTONOMY_MANDATE_FILE` auto-activates it and drives the autonomy tick; proposals
+`AUTONOMY_MANDATE_FILE`, explicitly lifted maintenance and passing startup gates can
+activate it and drive the autonomy tick; proposals
 arriving over the ingress are judged, sized, compiled, and handed to the same
 propose → preview → confirm → submit pipeline every human order walks. With **no**
 mandate file configured, autonomy is inert and the pipeline is the human-confirmed
 one described below.
+
+**Autonomy maintenance is ON by default.** `make backend` / `scripts/run_backend.py`
+still serve inspection and reconciliation, but no autonomy runtime starts and readiness is
+503, even with no mandate. For an owner-approved normal foreground start, explicitly set
+`CHRONOS_AUTONOMY_MAINTENANCE=off` in that process environment and restart; repo-root `.env`
+does not set it. For a systemd SHADOW campaign, use the discovered backend EnvironmentFile
+and the pre-start source proof in [docs/SHADOW_CAMPAIGN.md](docs/SHADOW_CAMPAIGN.md) §3.
+During cutover, keep the final environment-removal drop-in and ON proof through step 8;
+lift only on Kevin's step-9 word. Demo/UI use does not require lifting autonomy, and a
+diagnostic `/health` 200 is compatible with intentional NOT_READY.
 
 The repository contains two subsystems:
 
@@ -166,7 +177,8 @@ Bullets marked **[contract]** are structural guarantees of the contract types.
 - **[enforced] Demo is the default** and needs no brokerage account; paper and live are
   opt-in config. **[enforced]** With no `AUTONOMY_MANDATE_FILE` configured, autonomy is
   inert — no runtime is constructed at all. With one configured, ADR-0017 supersedes the
-  old env-var rule: a valid, account-matching mandate file **auto-activates on boot**
+  old activation flag: a valid, account-matching mandate file can activate on boot only
+  after maintenance is explicitly lifted and the remaining startup gates pass
   (digest-stamped, so the audit trail records which text granted authority). A revoked
   mandate stays revoked across restart; an invalid or wrong-account file boots inert with
   a CRITICAL alert.

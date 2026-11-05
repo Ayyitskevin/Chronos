@@ -178,9 +178,26 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 55 at D54-FIX5 (api/autonomy_wiring.py: the covered-call residual pointer supersedes FIX4's).
     # 56 at E-0 (runtime.py: the typed readiness blocker union supersedes its source fingerprint).
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
-    # 58 at XFIX-C (official_ibkr.py: empty LIVE quote and handshake notice checks).
-    # 59 at XFIX-C-R1 (official_ibkr.py: bounded current-session handshake notice codes).
-    assert len(historical_candidates) == 59
+    # 58 at CPSRECUT-R1B (official_ibkr.py's completed-orders flight cleanup rotates its
+    # generated source-inventory fingerprint).
+    # 59 at CPSRECUT-R2 (official_ibkr.py's timeout-generation quarantine rotates it again).
+    # 60 at CPSRECUT-R3 (official_ibkr.py's reconnect-only timeout taint rotates it again).
+    # 61 at CPSRECUT-R5 (official_ibkr.py's typed first-timeout refusal rotates it again).
+    # Main-side history:
+    # 58 at XFIX-D (demo.py: typed pre-send refusals supersede its CB-1 source fingerprint).
+    # 59 at XFIX-D r1 (demo.py: disconnected refusals supersede its initial XFIX-D fingerprint).
+    # 60 at U1-F1 (demo.py: removing a cancelled order supersedes XFIX-D r1's fingerprint).
+    # Branch-side history:
+    # 58 at FILLFLOOR r3 (the regenerated capability matrix's source-inventory fingerprint).
+    # 59 at FILLFLOOR r6 (the superseded capability-matrix fingerprint moved to history).
+    # 60 and 61 at FILLFLOOR r7 (stale generated demo and official adapter fingerprints).
+    # 62 at FILLFLOOR r8-1 (the superseded runtime.py source-inventory fingerprint).
+    # 66 at LAND: merged 62/60 histories plus two superseded demo fingerprints.
+    # 71 at CPSRECUT-LAND-1: remove the duplicate identity shared by both merge parents.
+    # XFIX-C branch-side history: 58 and 59 at XFIX-C and XFIX-C-R1 (official_ibkr.py).
+    # 74 at the XFIX-C/main merge: main's 71 plus three official_ibkr.py fingerprints the merged
+    # file supersedes (main's, XFIX-C's and XFIX-C-R1's); XFIX-C's other entry was already on main.
+    assert len(historical_candidates) == 74
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
