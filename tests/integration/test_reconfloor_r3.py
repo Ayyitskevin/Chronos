@@ -34,16 +34,27 @@ def rig() -> Iterator[Rig]:
 
 def _contract(**changes: object) -> SimpleNamespace:
     fields = dict(
-        secType="STK", symbol=SYMBOL, conId=CON_ID, currency="USD", exchange="SMART",
-        primaryExchange="", lastTradeDateOrContractMonth="20261120", right="C", strike=150.0,
-        multiplier="100", localSymbol="AAPL  261120C00150000", tradingClass="AAPL",
+        secType="STK",
+        symbol=SYMBOL,
+        conId=CON_ID,
+        currency="USD",
+        exchange="SMART",
+        primaryExchange="",
+        lastTradeDateOrContractMonth="20261120",
+        right="C",
+        strike=150.0,
+        multiplier="100",
+        localSymbol="AAPL  261120C00150000",
+        tradingClass="AAPL",
     )
     fields.update(changes)
     return SimpleNamespace(**fields)
 
 
 @pytest.mark.parametrize("route", ["legacy", "planner-listed", "planner-completed"])
-@pytest.mark.parametrize("shape", ["stock-exchange", "blank-stock-detail", "option-exchange", "option-blank-detail"])
+@pytest.mark.parametrize(
+    "shape", ["stock-exchange", "blank-stock-detail", "option-exchange", "option-blank-detail"]
+)
 def test_adapter_contract_detail_cannot_hide_an_own_blank_reference_execution(
     rig: Rig, route: str, shape: str
 ) -> None:
@@ -65,11 +76,19 @@ def test_adapter_contract_detail_cannot_hide_an_own_blank_reference_execution(
     execution = execution_from_pair(
         _contract(**execution_fields),
         SimpleNamespace(
-            execId="mapped-fill", acctNumber=ACCOUNT, orderId=BROKER_ID, permId=0,
-            clientId=CLIENT_ID, orderRef="", side="BOT", shares=5.0, price=150.0,
+            execId="mapped-fill",
+            acctNumber=ACCOUNT,
+            orderId=BROKER_ID,
+            permId=0,
+            clientId=CLIENT_ID,
+            orderRef="",
+            side="BOT",
+            shares=5.0,
+            price=150.0,
             time="20261009 11:00:00",
         ),
-        commission=None, commission_currency=None,
+        commission=None,
+        commission_currency=None,
     )
     assert execution.contract != row_contract  # prove the venue-detail difference reaches the test
     assert execution.contract.con_id == row_contract.con_id
@@ -134,7 +153,9 @@ def test_planner_compares_both_snapshot_figures_at_the_same_eight_place_scale(
 
     report = rig.reconcile()
 
-    assert Decimal(figure).quantize(Decimal("0.00000001")) == Decimal(bound).quantize(Decimal("0.00000001"))
+    assert Decimal(figure).quantize(Decimal("0.00000001")) == Decimal(bound).quantize(
+        Decimal("0.00000001")
+    )
     assert rig.status() is L.CANCELLED and report.unresolved == ()
     assert len(report.applied_updates) == 1
 
@@ -147,9 +168,11 @@ def test_completed_zero_id_counts_blank_zero_id_executions_with_or_without_persi
     rig.pending()
     before = rig.events()
     rig.venue.completed = [venue_order(L.CANCELLED, "0", broker_id=0)]
-    rig.venue.execs = [venue_execution("zero-id-fill", "5", PRIOR, ref=None, perm=None).model_copy(
-        update={"broker_order_id": 0}
-    )]
+    rig.venue.execs = [
+        venue_execution("zero-id-fill", "5", PRIOR, ref=None, perm=None).model_copy(
+            update={"broker_order_id": 0}
+        )
+    ]
 
     report = rig.reconcile()
 
@@ -158,7 +181,9 @@ def test_completed_zero_id_counts_blank_zero_id_executions_with_or_without_persi
 
 
 @pytest.mark.parametrize("route", ["legacy", "planner-listed", "planner-completed"])
-def test_blank_execution_on_another_broker_id_does_not_hold_this_intent(rig: Rig, route: str) -> None:
+def test_blank_execution_on_another_broker_id_does_not_hold_this_intent(
+    rig: Rig, route: str
+) -> None:
     rig.seed()
     if route != "legacy":
         rig.pending()
@@ -167,9 +192,32 @@ def test_blank_execution_on_another_broker_id_does_not_hold_this_intent(rig: Rig
         rig.venue.completed = [row]
     else:
         rig.venue.open = [row]
-    rig.venue.execs = [venue_execution("other-id", "5", PRIOR, ref=None, perm=None).model_copy(
-        update={"broker_order_id": BROKER_ID + 77}
-    )]
+    rig.venue.execs = [
+        venue_execution("other-id", "5", PRIOR, ref=None, perm=None).model_copy(
+            update={"broker_order_id": BROKER_ID + 77}
+        )
+    ]
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCELLED and report.unresolved == ()
+
+
+@pytest.mark.parametrize("different", ["con-id", "symbol"])
+def test_a_genuinely_different_contract_stays_excluded(rig: Rig, different: str) -> None:
+    rig.seed()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    mapped = instrument_from_contract(
+        _contract(
+            conId=CON_ID + 1 if different == "con-id" else CON_ID,
+            symbol="OTHER" if different == "symbol" else SYMBOL,
+        )
+    )
+    rig.venue.execs = [
+        venue_execution("other-contract", "5", PRIOR, ref=None, perm=None).model_copy(
+            update={"contract": mapped}
+        )
+    ]
 
     report = rig.reconcile()
 

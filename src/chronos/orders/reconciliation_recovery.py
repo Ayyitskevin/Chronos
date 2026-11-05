@@ -340,6 +340,7 @@ def _snapshot_fill_witnesses(
     *,
     order_ref: str,
     persisted_permanent_id: int | None,
+    persisted_broker_order_id: int | None = None,
 ) -> tuple[BrokerExecution, ...]:
     """Additional row-bound executions are witnesses for refusal only, never settlement.
 
@@ -358,10 +359,19 @@ def _snapshot_fill_witnesses(
                 (order.permanent_id is not None and execution.permanent_id == order.permanent_id)
                 or (
                     not execution.order_ref
-                    and execution.permanent_id in (None, order.permanent_id)
-                    and execution.broker_order_id == order.broker_order_id
+                    and not _permid_contradicts(execution.permanent_id, order.permanent_id)
+                    and not _permid_contradicts(execution.permanent_id, persisted_permanent_id)
+                    and (
+                        execution.broker_order_id == order.broker_order_id
+                        or (
+                            order.broker_order_id == 0
+                            and persisted_broker_order_id is not None
+                            and execution.broker_order_id == persisted_broker_order_id
+                        )
+                    )
                     and execution.side is order.side
-                    and execution.contract == order.contract
+                    and execution.contract.con_id == order.contract.con_id
+                    and execution.contract.symbol == order.contract.symbol
                 )
             )
         )
@@ -963,6 +973,7 @@ class OrderRestartReconciler:
                 original_limit_price=intent.limit_price,
                 current_account_id=current_account_id,
             )
+            legacy_refusal_reason: str | None = None
             if planned:
                 assert identities is not None
                 # the same planner, bound to this intent's persisted facts, re-runs over the
@@ -987,6 +998,8 @@ class OrderRestartReconciler:
                 )
                 # S-R3: a recovered SUBMITTED that the planner cannot settle is "as today"
                 as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
+                if as_today and plan.kind == "refuse":
+                    legacy_refusal_reason = plan.reason
                 if plan.kind != "legacy" and not as_today:
                     settle_plans.append((intent, plan, planner, identities))
                     continue
@@ -1013,7 +1026,8 @@ class OrderRestartReconciler:
                         local_status=intent.status,
                         broker_status=None,
                         transition_applied=False,
-                        reason=_unresolved_evidence_reason(
+                        reason=legacy_refusal_reason
+                        or _unresolved_evidence_reason(
                             intent,
                             open_orders=open_orders,
                             executions=executions,
@@ -1365,26 +1379,22 @@ class OrderRestartReconciler:
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
                 )
             if record is not None:
-                row = (
-                    record
-                    if record.broker_order_id
-                    else record.model_copy(
-                        update={"broker_order_id": persisted_broker_order_id or 0}
-                    )
-                )
                 row_bound = sum(
                     (
                         execution.quantity
                         for execution in _snapshot_fill_witnesses(
-                            row,
+                            record,
                             executions,
                             order_ref=order_ref,
                             persisted_permanent_id=persisted_permanent_id,
+                            persisted_broker_order_id=persisted_broker_order_id,
                         )
                     ),
                     Decimal("0"),
                 )
-                if figure.quantize(Decimal("0.00000001")) < row_bound:
+                if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
+                    Decimal("0.00000001")
+                ):
                     return _SettlePlan(
                         "refuse",
                         f"snapshot fill conflict: venue fill figure {figure} is below the "
