@@ -7,7 +7,8 @@ from decimal import Decimal
 
 import pytest
 
-from chronos.domain.enums import IBEnvironment, OrderLifecycle, RiskCheckStatus
+from chronos.domain.enums import IBEnvironment, OrderIntent, OrderLifecycle, RiskCheckStatus
+from chronos.domain.models import UnderlyingContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.persistence.order_repositories import OrderIntentRepository
 from tests.safety.test_opening_cap_exercised import (
@@ -74,6 +75,11 @@ def test_one_opening_is_allowed_at_a_cap_of_one() -> None:
         ("limit_price", Decimal("401")),
         ("correlation_id", "CHR-ORD-OTHER"),
         ("outside_rth", True),
+        # Derived identity fields: alter only one compared value per case.
+        pytest.param("contract", UnderlyingContract(con_id=756733, symbol="QQQ"), id="symbol"),
+        pytest.param("intent", OrderIntent.OPEN_SHORT_PUT, id="side"),
+        pytest.param("intent", OrderIntent.CLOSE_SHORT_OPTION, id="open_close_effect"),
+        pytest.param("contract", UnderlyingContract(con_id=756734, symbol="SPY"), id="con_id"),
     ],
 )
 def test_reused_id_with_different_economics_is_not_excluded(field: str, value: object) -> None:
