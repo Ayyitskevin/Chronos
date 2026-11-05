@@ -12,6 +12,7 @@ own intents ever reach these services.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 
@@ -36,6 +37,7 @@ from chronos.persistence.order_repositories import (
 
 _MODIFIABLE_STATUSES = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
 _CANCELLABLE_STATUSES = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
+logger = logging.getLogger(__name__)
 
 
 class OrderMutationError(RuntimeError):
@@ -133,7 +135,7 @@ class OrderCancellationService:
         intents: OrderIntentRepository,
         tracker: OrderTracker,
         tracker_repo: OrderTrackerRepository,
-        reconciliation_readiness: ReconciliationReadiness | None = None,
+        reconciliation_readiness: ReconciliationReadiness,
     ) -> None:
         self._connection = connection
         self._intents = intents
@@ -243,10 +245,14 @@ class OrderCancellationService:
                 f"cancel acknowledgement reports {attempted} filled, below the {recorded} "
                 "already recorded; the order remains unresolved; reconcile before acting"
             )
-            if self._reconciliation_readiness is not None:
-                self._reconciliation_readiness.invalidate(
-                    f"cancel acknowledgement fill floor conflict: {attempted} below {recorded}"
-                )
+            logger.warning(
+                "cancel acknowledgement fill floor conflict: attempted=%s recorded=%s",
+                attempted,
+                recorded,
+            )
+            self._reconciliation_readiness.invalidate(
+                f"cancel acknowledgement fill floor conflict: {attempted} below {recorded}"
+            )
             raise OrderMutationError(reason) from conflict
         if written:
             return

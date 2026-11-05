@@ -560,9 +560,9 @@ class OrderTrackerRepository:
     @classmethod
     def _refuse_below_recorded_fills(cls, session: Session, row: OrderEventRow) -> None:
         """Raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than the
-        largest figure on the intent's prior events, excluding ``row``. The persisted column may
-        round the new row to eight decimal places, so comparing the unrounded attempt with its own
-        rounded value would create a false conflict.
+        largest figure on the intent's prior events, excluding ``row``. The column stores eight
+        decimal places, so compare at that scale while retaining the original attempted figure in
+        the typed refusal.
 
         Called inside the row's savepoint, after its flush: the INSERT took the write lock, so no
         other writer can commit between this read and the commit, and raising rolls the savepoint
@@ -572,7 +572,8 @@ class OrderTrackerRepository:
 
         recorded = cls._max_recorded_fills(session, row.intent_id, excluding_event_id=row.id)
         attempted = row.filled_quantity if row.filled_quantity is not None else Decimal(0)
-        if recorded is not None and attempted < recorded:
+        stored_scale_attempt = attempted.quantize(Decimal("0.00000001"))
+        if recorded is not None and stored_scale_attempt < recorded:
             raise RecordedFillsAdvanced(
                 row.intent_id, recorded=Decimal(recorded), attempted=Decimal(attempted)
             )

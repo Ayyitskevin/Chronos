@@ -445,6 +445,7 @@ class _SimHarness:
                 intents=self.intents,
                 tracker=self.tracker,
                 tracker_repo=self.tracker_repo,
+                reconciliation_readiness=self.readiness,
             ),
             tracker=self.tracker,
             tracker_repo=self.tracker_repo,

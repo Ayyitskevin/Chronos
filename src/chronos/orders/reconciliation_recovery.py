@@ -856,12 +856,10 @@ class OrderRestartReconciler:
                 )
                 continue
             try:
-                outcome = self._tracker.ingest(
-                    update, current_account_id=current_account_id, fills_floor=True
-                )
+                outcome = self._tracker.ingest(update, current_account_id=current_account_id)
             except RecordedFillsAdvanced as refused:
-                # LEGACY-5 r1: a fill was recorded after this pass read the maximum (another
-                # writer); the terminal write was refused atomically and the intent stays locked.
+                # LEGACY-5: the terminal write was refused atomically because a concurrent writer
+                # advanced the recorded fill maximum after this pass read it.
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
@@ -1164,7 +1162,7 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
-            if figure < witnessed:
+            if figure.quantize(Decimal("0.00000001")) < witnessed:
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
@@ -1656,9 +1654,8 @@ class OrderRestartReconciler:
         if update is not None:
             # The broker DOES know this order — apply truth, refuse the manual
             # rejection (the operator was about to resolve against evidence).
-            # LEGACY-5 r1: the maximum read above may be stale by now; the terminal write re-checks
-            # it atomically and a RecordedFillsAdvanced (a ValueError) refuses, writing nothing.
-            self._tracker.ingest(update, current_account_id=current_account_id, fills_floor=True)
+            # LEGACY-5: a terminal write re-checks a potentially stale maximum atomically.
+            self._tracker.ingest(update, current_account_id=current_account_id)
             return False
         matching_executions = tuple(
             execution for execution in executions if execution.order_ref == intent.order_ref

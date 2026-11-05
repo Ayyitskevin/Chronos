@@ -182,7 +182,6 @@ class OrderTracker:
         update: OrderStatusUpdate,
         *,
         current_account_id: str,
-        fills_floor: bool = False,
     ) -> IngestOutcome:
         """Apply one broker observation.
 
@@ -193,10 +192,9 @@ class OrderTracker:
         lifecycle.
 
         Every terminal update is checked against the largest recorded fill inside the repository's
-        transition transaction, regardless of caller flags. A terminal update below that floor
-        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the
-        caller's earlier read of the maximum may be stale. ``fills_floor`` also requests that
-        atomic floor for non-terminal writes used by existing recovery callers.
+        transition transaction. A terminal update below that floor raises
+        :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the caller's
+        earlier read of the maximum may be stale.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -222,7 +220,6 @@ class OrderTracker:
                 update,
                 intent.status,
                 current_account_id,
-                fills_floor=fills_floor,
             )
 
         event_key = (
@@ -249,7 +246,6 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
-            refuse_below_recorded_fills=fills_floor,
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
@@ -258,8 +254,6 @@ class OrderTracker:
         update: OrderStatusUpdate,
         status: OrderLifecycle,
         current_account_id: str,
-        *,
-        fills_floor: bool,
     ) -> IngestOutcome:
         """Append new same-status identity or cumulative-fill evidence.
 
@@ -328,7 +322,6 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
-            refuse_below_recorded_fills=fills_floor,
         )
         return IngestOutcome(
             lifecycle_changed=False,

@@ -328,9 +328,9 @@ def test_settle_planner_accepts_the_same_over_scale_fill_it_witnessed() -> None:
 
         report = rig.reconcile()
 
+        assert report.unresolved == (), report.unresolved
         assert rig.status() is OrderLifecycle.CANCELLED
         assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
-        assert report.unresolved == ()
     finally:
         rig.close()
 
@@ -448,61 +448,7 @@ def test_planned_nonterminal_transition_keeps_its_explicit_fill_floor() -> None:
         rig.close()
 
 
-def test_ingest_fills_floor_flag_still_refuses_a_lower_nonterminal_transition() -> None:
-    rig = make_rig(ScriptedVenue())
-    try:
-        rig.seed()
-        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="3")
-        lower = _pending_cancel_fill_update().model_copy(
-            update={"filled_quantity": Decimal("2"), "remaining_quantity": Decimal("8")}
-        )
-        before = rig.events()
-
-        with pytest.raises(RecordedFillsAdvanced):
-            rig.tracker.ingest(lower, current_account_id=rig.account, fills_floor=True)
-
-        assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
-        assert rig.events() == before
-
-        # The flag remains opt-in for non-terminal writes; the same evidence is
-        # accepted when the caller does not request the additional floor.
-        outcome = rig.tracker.ingest(lower, current_account_id=rig.account)
-        assert outcome.lifecycle_changed
-        assert rig.status() is OrderLifecycle.CANCEL_PENDING
-    finally:
-        rig.close()
-
-
-def test_ingest_fills_floor_flag_refuses_lower_same_status_identity_evidence() -> None:
-    rig = make_rig(ScriptedVenue())
-    try:
-        rig.seed()
-        rig.pending()
-        higher = _pending_cancel_fill_update().model_copy(
-            update={"filled_quantity": Decimal("3"), "remaining_quantity": Decimal("7")}
-        )
-        assert rig.tracker.ingest(higher, current_account_id=rig.account).fill_progress_recorded
-        before = rig.events()
-        lower_identity = higher.model_copy(
-            update={
-                "filled_quantity": Decimal("2"),
-                "remaining_quantity": Decimal("8"),
-                "permanent_id": PERM_ID + 1,
-            }
-        )
-
-        with pytest.raises(RecordedFillsAdvanced) as raised:
-            rig.tracker.ingest(lower_identity, current_account_id=rig.account, fills_floor=True)
-
-        assert raised.value.recorded == Decimal("3")
-        assert raised.value.attempted == Decimal("2")
-        assert rig.status() is OrderLifecycle.CANCEL_PENDING
-        assert rig.events() == before
-    finally:
-        rig.close()
-
-
-def test_ingest_fills_floor_flag_accepts_equal_same_status_identity_evidence() -> None:
+def test_ingest_accepts_equal_same_status_identity_evidence() -> None:
     rig = make_rig(ScriptedVenue())
     try:
         rig.seed()
@@ -513,9 +459,7 @@ def test_ingest_fills_floor_flag_accepts_equal_same_status_identity_evidence() -
         assert rig.tracker.ingest(higher, current_account_id=rig.account).fill_progress_recorded
         equal_identity = higher.model_copy(update={"permanent_id": PERM_ID + 1})
 
-        outcome = rig.tracker.ingest(
-            equal_identity, current_account_id=rig.account, fills_floor=True
-        )
+        outcome = rig.tracker.ingest(equal_identity, current_account_id=rig.account)
 
         assert outcome.identity_refined
         assert rig.status() is OrderLifecycle.CANCEL_PENDING
@@ -557,6 +501,7 @@ def test_cancel_service_carries_figureless_terminal_fill_forward(
             intents=rig.intents,
             tracker=rig.tracker,
             tracker_repo=rig.repo,
+            reconciliation_readiness=rig.readiness,
         )
 
         result = service.cancel("intent-1", current_account_id=rig.account, now=NOW)
@@ -663,6 +608,7 @@ def test_cancel_service_accepts_equal_or_higher_explicit_fill(
             intents=rig.intents,
             tracker=rig.tracker,
             tracker_repo=rig.repo,
+            reconciliation_readiness=rig.readiness,
         )
 
         result = service.cancel("intent-1", current_account_id=rig.account, now=NOW)
