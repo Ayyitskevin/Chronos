@@ -1,5 +1,6 @@
 """Fill progress must survive same-status callbacks and fence stale cancel settlement."""
 
+import logging
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,36 @@ def test_fill_during_confirmation_refuses_stale_cancelled_zero_settlement() -> N
         assert report.unresolved[0].intent_id == "intent-1"
         assert report.unresolved[0].reason.startswith("fill_floor_conflict: RecordedFillsAdvanced:")
         assert "recorded fills advanced" in report.unresolved[0].reason
+    finally:
+        rig.close()
+
+
+def test_nonterminal_pending_cancel_observation_does_not_delay_terminal_settlement() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        partial = _pending_cancel_fill_update().model_copy(
+            update={
+                "lifecycle": OrderLifecycle.PARTIALLY_FILLED,
+                "filled_quantity": Decimal("5"),
+                "remaining_quantity": Decimal("5"),
+            }
+        )
+        assert rig.tracker.ingest(partial, current_account_id=rig.account).lifecycle_changed
+        rig.venue.open = [venue_order(OrderLifecycle.CANCEL_PENDING, "0")]
+
+        first = rig.reconcile()
+
+        assert rig.status() is OrderLifecycle.CANCEL_PENDING
+        assert first.unresolved == ()
+        rig.venue.open = []
+        rig.venue.completed = [venue_order(OrderLifecycle.CANCELLED, "5")]
+
+        second = rig.reconcile()
+
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal("5")
+        assert second.unresolved == ()
     finally:
         rig.close()
 
@@ -252,6 +283,54 @@ def test_first_terminal_figure_beyond_column_scale_is_not_refused_against_itself
         assert outcome.lifecycle_changed
         assert rig.status() is OrderLifecycle.CANCELLED
         assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+    finally:
+        rig.close()
+
+
+def test_repeated_terminal_figure_beyond_column_scale_matches_the_stored_floor() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        rig.event(OrderLifecycle.PARTIALLY_FILLED, at=NOW, filled="0.123456789")
+        assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+
+        outcome = rig.tracker.ingest(
+            _pending_cancel_fill_update().model_copy(
+                update={
+                    "lifecycle": OrderLifecycle.CANCELLED,
+                    "filled_quantity": Decimal("0.123456789"),
+                }
+            ),
+            current_account_id=rig.account,
+        )
+
+        assert outcome.lifecycle_changed
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+    finally:
+        rig.close()
+
+
+def test_settle_planner_accepts_the_same_over_scale_fill_it_witnessed() -> None:
+    rig = make_rig(ScriptedVenue())
+    try:
+        rig.seed()
+        partial = _pending_cancel_fill_update().model_copy(
+            update={
+                "lifecycle": OrderLifecycle.PARTIALLY_FILLED,
+                "filled_quantity": Decimal("0.123456789"),
+                "remaining_quantity": Decimal("9.876543211"),
+            }
+        )
+        assert rig.tracker.ingest(partial, current_account_id=rig.account).lifecycle_changed
+        rig.pending()
+        rig.venue.completed = [venue_order(OrderLifecycle.CANCELLED, "0.123456789")]
+
+        report = rig.reconcile()
+
+        assert rig.status() is OrderLifecycle.CANCELLED
+        assert rig.events()[-1].filled_quantity == Decimal("0.12345679")
+        assert report.unresolved == ()
     finally:
         rig.close()
 
@@ -535,8 +614,10 @@ def test_official_cancel_ack_keeps_explicit_fill_semantics(
             with pytest.raises(OrderMutationError) as raised:
                 h.service.cancel("intent-1", now=h.now)
 
-            assert "0" in str(raised.value) and "5" in str(raised.value)
-            assert "reconcile" in str(raised.value).lower()
+            cause = raised.value.__cause__
+            assert isinstance(cause, RecordedFillsAdvanced)
+            assert cause.recorded == Decimal("5")
+            assert cause.attempted == Decimal("0")
             assert h.status("intent-1") is OrderLifecycle.CANCEL_PENDING
             assert h.tracker.recorded_filled_quantity(
                 "intent-1", current_account_id=h.account
@@ -602,7 +683,7 @@ def test_cancel_service_accepts_equal_or_higher_explicit_fill(
     ids=["lower-explicit", "equal-control"],
 )
 def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
-    ack_fill: str, expected_status: int
+    ack_fill: str, expected_status: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = make_rig(ScriptedVenue())
     try:
@@ -648,13 +729,27 @@ def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
         app.dependency_overrides[require_writer] = lambda: state
         app.dependency_overrides[require_token] = lambda: None
 
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with (
+            caplog.at_level(logging.WARNING, logger="chronos.orders.mutations"),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
             response = client.post("/orders/intent-1/cancel")
 
         assert response.status_code == expected_status
         if ack_fill == "0":
-            detail = response.json()["detail"].lower()
-            assert "5" in detail and "0" in detail and "reconcile" in detail
+            assert response.json()["detail"] == (
+                "cancel acknowledgement reports 0 filled, below the 5 already recorded; "
+                "the order remains unresolved; reconcile before acting"
+            )
+            warnings = [
+                record.getMessage()
+                for record in caplog.records
+                if record.name == "chronos.orders.mutations" and record.levelno == logging.WARNING
+            ]
+            assert warnings == [
+                "cancel acknowledgement fill floor conflict: attempted=0 recorded=5"
+            ]
+            assert "synthetic explicit cancel acknowledgement" not in warnings[0]
             assert rig.status() is OrderLifecycle.CANCEL_PENDING
             readiness_after_cancel = rig.readiness.snapshot()
             assert readiness_after_cancel.generation > readiness_before_cancel.generation
@@ -663,6 +758,12 @@ def test_cancel_ack_fill_floor_is_typed_through_the_operator_route(
                 "intent-1", current_account_id=rig.account
             ) == Decimal("5")
         else:
+            warnings = [
+                record
+                for record in caplog.records
+                if record.name == "chronos.orders.mutations" and record.levelno == logging.WARNING
+            ]
+            assert warnings == []
             assert rig.status() is OrderLifecycle.CANCELLED
             assert rig.events()[-1].filled_quantity == Decimal("5")
             readiness_after_cancel = rig.readiness.snapshot()

@@ -137,7 +137,7 @@ class _Rig:
             **fields,  # type: ignore[arg-type]
         )
 
-    def seed(self, local: OrderLifecycle) -> None:
+    def seed(self, local: OrderLifecycle, *, permanent_id: int | None = PERM_ID) -> None:
         """One 10-share BUY intent whose persisted ids are the ones the real path writes."""
 
         record = OrderIntentRecord(
@@ -185,7 +185,7 @@ class _Rig:
             source="SUBMIT",
             from_status=OrderLifecycle.USER_CONFIRMED,
             broker_order_id=BROKER_ID,
-            permanent_id=PERM_ID,
+            permanent_id=permanent_id,
             client_id=CLIENT_ID,
             filled_quantity=Decimal(0),
             remaining_quantity=QUANTITY,
@@ -380,6 +380,105 @@ def test_no_evidence_leaves_the_intent_locked_with_the_absence_reason(
     assert report.permits_new_opening_order is False
     (item,) = report.unresolved
     assert "absent from the broker order and execution snapshots" in item.reason
+
+
+def test_reconcile_writes_pending_cancel_below_a_recorded_partial_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    rig._record(
+        OrderLifecycle.PARTIALLY_FILLED,
+        "witness-five",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.CANCEL_PENDING, "0")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_reconcile_writes_pending_cancel_below_a_recorded_submitted_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMITTED)
+    rig._record(
+        OrderLifecycle.SUBMITTED,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMITTED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.CANCEL_PENDING, "0")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.CANCEL_PENDING
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_reconcile_refines_identity_below_a_recorded_submitted_fill(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMITTED, permanent_id=None)
+    rig._record(
+        OrderLifecycle.SUBMITTED,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMITTED,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.SUBMITTED, "0")]
+
+    report = rig.reconcile()
+
+    identity_event = rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1]
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert identity_event.source == "IDENTITY"
+    assert identity_event.permanent_id == PERM_ID
+    assert identity_event.filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def _unknown_with_five_recorded(rig: _Rig) -> None:
+    rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
+    rig._record(
+        OrderLifecycle.SUBMISSION_UNKNOWN,
+        "witness-five",
+        from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+        filled_quantity=Decimal(5),
+        remaining_quantity=QUANTITY - 5,
+        occurred_at=NOW,
+    )
+    rig.venue.open = [_row(OrderLifecycle.SUBMITTED, "0")]
+
+
+def test_reconcile_resolves_unknown_to_submitted_below_its_recorded_fill(rig: _Rig) -> None:
+    _unknown_with_five_recorded(rig)
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
+    assert report.unresolved == ()
+
+
+def test_operator_resolve_applies_submitted_row_below_unknown_recorded_fill(rig: _Rig) -> None:
+    _unknown_with_five_recorded(rig)
+
+    assert (
+        rig.reconciler.operator_resolve(
+            "intent-1",
+            operator_note="checked the TWS order list",
+            current_account_id=ACCOUNT,
+            now=NOW,
+        )
+        is False
+    )
+    assert rig.status() is OrderLifecycle.SUBMITTED
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT)[-1].filled_quantity == Decimal(0)
 
 
 # --- LEGACY-5 (reader P2-2, Muse option B): a terminal row below the recorded fills settles nothing
