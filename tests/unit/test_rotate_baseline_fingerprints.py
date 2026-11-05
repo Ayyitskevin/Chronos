@@ -23,7 +23,9 @@ def _dump(payload: dict[str, Any]) -> str:
 
 
 def _digest(value: str) -> str:
-    return hashlib.sha1(value.encode(), usedforsecurity=False).hexdigest()  # pragma: allowlist secret
+    return hashlib.sha1(
+        value.encode(), usedforsecurity=False
+    ).hexdigest()  # pragma: allowlist secret
 
 
 @dataclass
@@ -31,7 +33,11 @@ class Repo:
     root: Path
 
     def git(self, *args: str) -> str:
-        return subprocess.check_output(["git", "-C", str(self.root), *args], stderr=subprocess.PIPE).decode().strip()
+        return (
+            subprocess.check_output(["git", "-C", str(self.root), *args], stderr=subprocess.PIPE)
+            .decode()
+            .strip()
+        )
 
     def commit(self, message: str) -> str:
         self.git("add", ".")
@@ -41,7 +47,9 @@ class Repo:
     def matrix(self, label: str) -> str:
         (self.root / "source.txt").write_text(label)
         value = hashlib.sha256(label.encode()).hexdigest()  # pragma: allowlist secret
-        (self.root / MATRIX).write_text(_dump({"source_fingerprints": [{"path": "source.txt", "sha256": value}]}))
+        (self.root / MATRIX).write_text(
+            _dump({"source_fingerprints": [{"path": "source.txt", "sha256": value}]})
+        )
         return value
 
     def payload(self) -> dict[str, Any]:
@@ -49,8 +57,18 @@ class Repo:
 
     def baseline(self, value: str, history: list[dict[str, Any]] | None = None) -> None:
         payload = self.payload()
-        payload["results"] = {MATRIX: [{"type": "Hex High Entropy String", "filename": MATRIX,
-            "hashed_secret": _digest(value), "is_verified": False, "line_number": 6, "is_secret": False}]}
+        payload["results"] = {
+            MATRIX: [
+                {
+                    "type": "Hex High Entropy String",
+                    "filename": MATRIX,
+                    "hashed_secret": _digest(value),
+                    "is_verified": False,
+                    "line_number": 5,
+                    "is_secret": False,
+                }
+            ]
+        }
         payload["history_results"] = {MATRIX: history} if history else {}
         (self.root / ".secrets.baseline").write_text(_dump(payload))
 
@@ -64,8 +82,13 @@ class Repo:
 
 
 def _history(value: str, commit: str) -> dict[str, Any]:
-    return {"type": "Hex High Entropy String", "hashed_secret": _digest(value), "is_secret": False,
-            "observed_commit": commit, "reason": REASON}
+    return {
+        "type": "Hex High Entropy String",
+        "hashed_secret": _digest(value),
+        "is_secret": False,
+        "observed_commit": commit,
+        "reason": REASON,
+    }
 
 
 @pytest.fixture
@@ -81,7 +104,8 @@ def repo(tmp_path: Path) -> Repo:
     (root / "scripts/build_current_state.py").write_text(
         "import hashlib,json\nfrom pathlib import Path\n"
         "m=json.loads(Path('docs/generated/capability-matrix.json').read_text())\n"
-        "assert m['source_fingerprints'][0]['sha256']==hashlib.sha256(Path('source.txt').read_bytes()).hexdigest()\n"
+        "expected=hashlib.sha256(Path('source.txt').read_bytes()).hexdigest()\n"
+        "assert m['source_fingerprints'][0]['sha256']==expected\n"
         "assert Path('state.txt').read_text()=='current'\n"
     )
     (root / "state.txt").write_text("current")
@@ -105,7 +129,7 @@ def test_one_parent_rotation_and_check_never_write_until_apply(repo: Repo) -> No
     assert repo.run(parent).returncode == 0
     payload = repo.payload()
     assert payload["results"][MATRIX][0]["hashed_secret"] == _digest(current)
-    assert payload["results"][MATRIX][0]["line_number"] == 6
+    assert payload["results"][MATRIX][0]["line_number"] == 5
     assert payload["history_results"][MATRIX][0]["observed_commit"] == parent
     assert repo.run(parent, check=True).returncode == 0
 
@@ -132,7 +156,9 @@ def test_two_parent_merge_unions_shared_history_once_and_retires_both_values(rep
     assert result.returncode == 0, result.stderr
     entries = repo.payload()["history_results"][MATRIX]
     assert len(entries) == len({entry["hashed_secret"] for entry in entries}) == 4
-    assert {e["hashed_secret"] for e in entries} == {_digest(v) for v in [initial, common_value, main_value, side_value]}
+    assert {e["hashed_secret"] for e in entries} == {
+        _digest(v) for v in [initial, common_value, main_value, side_value]
+    }
     assert repo.payload()["results"][MATRIX][0]["hashed_secret"] == _digest(merged)
 
 
@@ -155,8 +181,12 @@ def test_new_values_are_not_absorbed_and_never_printed(repo: Repo, plant: str) -
     assert (repo.root / ".secrets.baseline").read_bytes() == before
 
 
-@pytest.mark.parametrize("problem", ["unavailable commit", "unfindable value", "duplicate identity", "round-trip"])
-def test_invalid_parent_provenance_or_writer_refuses_without_writing(repo: Repo, problem: str) -> None:
+@pytest.mark.parametrize(
+    "problem", ["unavailable commit", "unfindable value", "duplicate identity", "round-trip"]
+)
+def test_invalid_parent_provenance_or_writer_refuses_without_writing(
+    repo: Repo, problem: str
+) -> None:
     parent = repo.git("rev-parse", "HEAD")
     value = json.loads(repo.git("show", parent + ":" + MATRIX))["source_fingerprints"][0]["sha256"]
     entry = _history(value, parent)
@@ -165,8 +195,12 @@ def test_invalid_parent_provenance_or_writer_refuses_without_writing(repo: Repo,
     elif problem == "unfindable value":
         entry["hashed_secret"] = "0" * 40  # pragma: allowlist secret
     payload = repo.payload()
-    payload["history_results"] = {MATRIX: [entry, dict(entry)] if problem == "duplicate identity" else [entry]}
-    (repo.root / ".secrets.baseline").write_text(json.dumps(payload) if problem == "round-trip" else _dump(payload))
+    payload["history_results"] = {
+        MATRIX: [entry, dict(entry)] if problem == "duplicate identity" else [entry]
+    }
+    (repo.root / ".secrets.baseline").write_text(
+        json.dumps(payload) if problem == "round-trip" else _dump(payload)
+    )
     bad_parent = repo.commit("bad parent")
     before = (repo.root / ".secrets.baseline").read_bytes()
     result = repo.run(bad_parent)
@@ -193,11 +227,15 @@ def test_generator_must_accept_the_working_artifacts(repo: Repo) -> None:
     assert (repo.root / ".secrets.baseline").read_bytes() == before
 
 
-def test_inventory_value_must_be_explained_by_source_bytes_even_with_bad_generator(repo: Repo) -> None:
+def test_inventory_value_must_be_explained_by_source_bytes_even_with_bad_generator(
+    repo: Repo,
+) -> None:
     parent = repo.git("rev-parse", "HEAD")
     path = repo.root / MATRIX
     payload = json.loads(path.read_text())
-    payload["source_fingerprints"][0]["sha256"] = hashlib.sha256(b"unexplained").hexdigest()  # pragma: allowlist secret
+    payload["source_fingerprints"][0]["sha256"] = hashlib.sha256(
+        b"unexplained"
+    ).hexdigest()  # pragma: allowlist secret
     path.write_text(_dump(payload))
     (repo.root / "scripts/build_current_state.py").write_text("raise SystemExit(0)\n")
     before = (repo.root / ".secrets.baseline").read_bytes()
