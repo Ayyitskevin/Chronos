@@ -777,6 +777,43 @@ def test_r1_4_permid_fallback_applies_only_to_a_blank_order_ref_and_contradictio
     assert "only when" in doc and "blank" in doc
 
 
+@pytest.mark.parametrize(
+    ("account_id", "client_id", "owned"),
+    [
+        pytest.param(PAPER_ACCOUNT, _CLIENT_ID, True, id="owned-permanent-id"),
+        pytest.param("DU7654321", _CLIENT_ID, False, id="foreign-account"),
+        pytest.param(PAPER_ACCOUNT, _CLIENT_ID + 1, False, id="foreign-client"),
+    ],
+)
+def test_r1b_identity_conflict_details_require_verified_ownership(
+    account_id: str,
+    client_id: int,
+    owned: bool,
+) -> None:
+    intent = _intent("i-r1b", status=OrderLifecycle.SUBMISSION_UNKNOWN)
+    observation = _working_order(
+        order_ref="CHR-OTHER",
+        permanent_id=_PERM_ID,
+    ).model_copy(update={"account_id": account_id, "client_id": client_id})
+
+    update, reason = _resolve(
+        intent,
+        observation,
+        persisted_permanent_id=_PERM_ID,
+    )
+
+    assert update is None
+    if owned:
+        assert reason.startswith("identity conflict:")
+        assert all(identifier in reason for identifier in ("CHR-OTHER", "4242", "9001"))
+    else:
+        assert reason == (
+            "identity conflict: broker order evidence reports the persisted permanent id "
+            "under another order reference"
+        )
+        assert all(identifier not in reason for identifier in ("CHR-OTHER", "4242", "9001"))
+
+
 def test_r1_4b_a_mismatching_nonblank_order_ref_stays_unresolved_through_the_reconciler(
     database: Database,
 ) -> None:

@@ -29,7 +29,7 @@ from enum import StrEnum
 from types import SimpleNamespace
 from typing import Any
 
-from chronos.broker.base import BrokerDataError
+from chronos.broker.base import BrokerDataError, CompletedOrdersReconnectRequired
 from chronos.broker.market_data import (
     MarketDataPacingError,
     MarketDataPermissionError,
@@ -375,6 +375,7 @@ class CallbackBridge:
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None
         self._completed_orders: _SingleFlight | None = None
+        self._completed_orders_tainted = False
         self._order_acks: dict[int, _SingleFlight] = {}
         self.order_statuses: dict[int, tuple[str, float, float]] = {}
         self._quotes: dict[int, QuoteState] = {}
@@ -597,8 +598,12 @@ class CallbackBridge:
 
     def start_completed_orders(self) -> _SingleFlight:
         with self._lock:
+            if self._completed_orders_tainted:
+                raise CompletedOrdersReconnectRequired
             if self._completed_orders is not None and not self._completed_orders.done.is_set():
-                raise RuntimeError("a completed-orders request is already in flight")
+                raise BrokerDataError(
+                    "a completed-orders request is already in flight; wait for it to finish"
+                )
             flight = _SingleFlight()
             self._completed_orders = flight
             return flight
@@ -606,14 +611,47 @@ class CallbackBridge:
     def on_completed_order(self, contract: Any, order: Any, order_state: Any) -> None:
         with self._lock:
             flight = self._completed_orders
-        if flight is not None and not flight.done.is_set():
-            flight.items.append((contract, order, order_state))
+            tainted = self._completed_orders_tainted
+            if flight is not None and not flight.done.is_set():
+                flight.items.append((contract, order, order_state))
+        if flight is None and tainted:
+            self._logger.warning(
+                "Completed-orders row discarded while the session requires reconnect",
+                extra={"event": "tainted_completed_order_discarded"},
+            )
 
     def on_completed_orders_end(self) -> None:
         with self._lock:
             flight = self._completed_orders
-        if flight is not None:
-            flight.done.set()
+            tainted = self._completed_orders_tainted
+            if flight is not None:
+                flight.done.set()
+        if flight is None and tainted:
+            self._logger.warning(
+                "Completed-orders end discarded while the session requires reconnect",
+                extra={"event": "tainted_completed_orders_end_discarded"},
+            )
+
+    def release_completed_orders(
+        self,
+        flight: _SingleFlight,
+        *,
+        taint_if_incomplete: bool = True,
+    ) -> None:
+        """Release one request and require reconnect when its stream can still answer."""
+
+        taint_set = False
+        with self._lock:
+            if self._completed_orders is flight:
+                self._completed_orders = None
+                if taint_if_incomplete and not flight.done.is_set():
+                    taint_set = not self._completed_orders_tainted
+                    self._completed_orders_tainted = True
+        if taint_set:
+            self._logger.warning(
+                CompletedOrdersReconnectRequired.MESSAGE,
+                extra={"event": "completed_orders_reconnect_required"},
+            )
 
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).
@@ -633,10 +671,11 @@ class CallbackBridge:
             self.next_valid_id = None
             self.order_statuses.clear()
             self._order_acks.clear()
-            # the completed-orders stream has no request id: a request left unanswered by the
-            # old session is dropped (not completed -- its waiter times out on its own), so a
-            # fresh session can ask again (Daybreak U-A r1 P3-1)
+            # The completed-orders stream has no request id. An unanswered old-session request is
+            # dropped (not completed -- its waiter times out on its own), and the timeout taint is
+            # cleared only for this fresh session (K-20261103-003, CPSRECUT r3).
             self._completed_orders = None
+            self._completed_orders_tainted = False
             quote_request_ids = tuple(self._quotes)
             self._quotes.clear()
             for market_rule_flight in self._market_rule_flights.values():

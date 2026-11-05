@@ -134,6 +134,13 @@ runbooks.
   client id is unverified until the M4 read-only session (K4).
 - A completed readiness pass also carries typed in-memory blocker codes. They do not change
   the published status or reason and are not persisted or served.
+- A completed-orders request has no broker request id. If that stream times out, its session is
+  tainted and every later completed-orders read refuses until a fresh connection session exists;
+  late rows are discarded. The production runtime connects once during backend startup and has no
+  in-process reconnect loop, so today the operator action that creates that fresh session is a
+  backend restart. The restarted process remains unreconciled until a later startup, operator, or
+  periodic pass proves parity. The refused read still counts as a failed broker call and freezes
+  other intents' planned writes until that restart.
 - The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
   basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
