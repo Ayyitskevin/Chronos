@@ -127,6 +127,45 @@ def test_one_persisted_broker_id_still_settles_each_path(
         rig.close()
 
 
+def test_second_broker_id_landing_after_precheck_refuses_typed_identity_conflict() -> None:
+    venue = ScriptedVenue()
+    rig = make_rig(venue)
+    try:
+        rig.seed()
+        rig.pending()
+        persisted_identities = rig.tracker.persisted_identities
+
+        def race_after_precheck(intent_id: str, *, current_account_id: str):  # type: ignore[no-untyped-def]
+            assert rig.repo.record_transition(
+                intent_id=intent_id,
+                event_key="r5:post-precheck-broker-id",
+                source="TEST",
+                from_status=CP,
+                to_status=CP,
+                current_account_id=current_account_id,
+                broker_order_id=OTHER_BROKER_ID,
+                occurred_at=PRIOR,
+            )
+            rig.tracker.persisted_identities = persisted_identities
+            return persisted_identities(intent_id, current_account_id=current_account_id)
+
+        rig.tracker.persisted_identities = race_after_precheck
+        venue.execs = [venue_execution("R5-RACE-EXEC", "10", NOW - timedelta(minutes=5))]
+        before = len(rig.events())
+
+        report = rig.reconcile()
+
+        assert rig.status() is CP
+        assert len(rig.events()) == before + 1  # the injected identity row, no settlement row
+        assert rig.events()[-1].source == "TEST"
+        reason = " ".join(issues(report))
+        assert reason.startswith("identity conflict:")
+        assert "persisted broker order ids" in reason
+        assert "not bound to this intent" not in reason
+    finally:
+        rig.close()
+
+
 def test_completed_order_timeout_guidance_reaches_the_real_reconciler() -> None:
     bridge = CallbackBridge(RequestRegistry())
     flight = bridge.start_completed_orders()
@@ -197,9 +236,50 @@ def test_foreign_session_row_with_our_permid_refuses_without_foreign_identifiers
 
         assert rig.status() is CP
         assert "identity conflict" in reason
+        assert "broker order evidence" in reason
         assert foreign_ref not in reason
         assert str(foreign_broker_id) not in reason
         assert "DU7654321" not in reason
+    finally:
+        rig.close()
+
+
+def test_foreign_execution_with_our_permid_names_kind_without_identifiers() -> None:
+    venue = ScriptedVenue()
+    rig = make_rig(venue)
+    try:
+        rig.seed()
+        rig.pending()
+        foreign_ref = "CHR-FOREIGN-EXEC-R5-987654321"
+        foreign_execution_id = "FOREIGN-EXEC-R5-987654321"
+        foreign_broker_id = 987654321
+        foreign_client_id = CLIENT_ID + 1
+        venue.execs = [
+            venue_execution(
+                foreign_execution_id,
+                "1",
+                NOW - timedelta(minutes=5),
+                ref=foreign_ref,
+                perm=PERM_ID,
+            ).model_copy(
+                update={
+                    "broker_order_id": foreign_broker_id,
+                    "client_id": foreign_client_id,
+                }
+            )
+        ]
+        venue.completed = [venue_order(OrderLifecycle.CANCELLED, "0")]
+
+        reason = " ".join(issues(rig.reconcile()))
+
+        assert rig.status() is CP
+        assert "identity conflict" in reason
+        assert "broker execution evidence" in reason
+        assert foreign_ref not in reason
+        assert foreign_execution_id not in reason
+        assert str(foreign_broker_id) not in reason
+        assert str(foreign_client_id) not in reason
+        assert rig.account not in reason
     finally:
         rig.close()
 

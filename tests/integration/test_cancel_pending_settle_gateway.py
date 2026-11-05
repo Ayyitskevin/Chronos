@@ -258,6 +258,7 @@ def test_P3_1_a_timed_out_completed_orders_read_requires_reconnect(
     report = _at(rig)
     assert rig.status() is CP
     assert any("completed-orders evidence is not available" in r for r in issues(report))
+    assert any("reconnect is required" in r for r in issues(report))
     monkeypatch.setattr(gateway, "completed_orders", answer)
     with pytest.raises(BrokerDataError, match="reconnect"):
         rig.connection.run(adapter.completed_orders())
