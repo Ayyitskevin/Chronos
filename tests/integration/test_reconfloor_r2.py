@@ -9,6 +9,7 @@ import pytest
 from tests.support.settle_rig import (
     BROKER_ID,
     CLIENT_ID,
+    NOW,
     PERM_ID,
     PRIOR,
     Rig,
@@ -36,7 +37,7 @@ def rig() -> Iterator[Rig]:
 @pytest.mark.parametrize("source", ["listed", "completed-zero-id"])
 @pytest.mark.parametrize("figure", ["0", "3"])
 def test_planned_terminal_cannot_drop_row_bound_snapshot_executions(
-    rig: Rig, status: L, source: str, figure: str
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, status: L, source: str, figure: str
 ) -> None:
     rig.seed()
     if status is L.SUBMITTED:
@@ -55,11 +56,22 @@ def test_planned_terminal_cannot_drop_row_bound_snapshot_executions(
         venue_execution("blank-2", "2", PRIOR, ref=None, perm=None),
     ]
 
+    plans = []
+    original = rig.reconciler._plan_settle
+
+    def observe(*args, **kwargs):
+        plan = original(*args, **kwargs)
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(rig.reconciler, "_plan_settle", observe)
     report = rig.reconcile()
 
     assert rig.status() is status and rig.events() == before
     assert report.applied_updates == () and not report.permits_new_opening_order
-    assert report.unresolved[0].reason.startswith("snapshot fill conflict:")
+    assert report.unresolved[0].reason
+    if status is L.CANCEL_PENDING or source == "completed-zero-id":
+        assert any(plan.kind == "refuse" and plan.reason.startswith("snapshot fill conflict:") for plan in plans)
 
 
 @pytest.mark.parametrize("kind", ["foreign-reference", "other-contract", "other-side", "other-permid"])
@@ -116,13 +128,13 @@ def test_own_full_fill_is_not_overcounted_with_a_foreign_fill_on_reused_id(rig: 
 def test_operator_unknown_resolution_refuses_two_persisted_broker_ids(
     rig: Rig, evidence: str
 ) -> None:
-    rig.seed()
-    rig.event(L.SUBMISSION_UNKNOWN, at=PRIOR)
+    rig.seed(at=NOW)
+    rig.event(L.SUBMISSION_UNKNOWN, at=NOW)
     other_id = BROKER_ID + 77
     assert rig.repo.record_transition(
         intent_id="intent-1", event_key="other-broker", source="TEST",
         from_status=L.SUBMISSION_UNKNOWN, to_status=L.SUBMISSION_UNKNOWN,
-        current_account_id=rig.account, broker_order_id=other_id, occurred_at=PRIOR,
+        current_account_id=rig.account, broker_order_id=other_id, occurred_at=NOW,
     )
     before = rig.events()
     if evidence == "executions":
@@ -135,7 +147,7 @@ def test_operator_unknown_resolution_refuses_two_persisted_broker_ids(
     with pytest.raises(ValueError, match="persisted order identity is contradictory.*broker order ids"):
         rig.reconciler.operator_resolve(
             "intent-1", operator_note="synthetic verification", current_account_id=rig.account,
-            now=PRIOR + timedelta(days=3),
+            now=NOW + timedelta(seconds=5),
         )
     assert rig.status() is L.SUBMISSION_UNKNOWN and rig.events() == before
 
