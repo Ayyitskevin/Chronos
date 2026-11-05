@@ -418,6 +418,17 @@ class RecordedFillsAdvanced(ValueError):
         )
 
 
+class IdentityHistoryAdvanced(ValueError):
+    """A settlement write observed identity history beyond the planner's snapshot."""
+
+    def __init__(self, intent_id: str) -> None:
+        self.intent_id = intent_id
+        super().__init__(
+            f"identity history advanced for intent {intent_id!r} before the settle write; "
+            "nothing was written and the intent stays locked"
+        )
+
+
 class _StatusMoved(Exception):
     """Internal: a CAS found the status moved once inside the write transaction (rolls back)."""
 
@@ -446,6 +457,9 @@ class OrderTrackerRepository:
         occurred_at: datetime,
         enforce_from_status: bool = False,
         refuse_below_recorded_fills: bool = False,
+        expected_identity_sets: (
+            tuple[frozenset[int], frozenset[int], frozenset[int]] | None
+        ) = None,
     ) -> bool:
         """Write one order_events row and set the intent status in one txn.
 
@@ -478,6 +492,12 @@ class OrderTrackerRepository:
         exists; if no fill figure is recorded, the terminal row remains figureless. An explicit
         lower figure raises :class:`RecordedFillsAdvanced`, the savepoint rolls back, and nothing
         is written.
+
+        ``expected_identity_sets`` closes the same-status history race for reconciliation
+        settlements. After the candidate INSERT takes the write lock, the transaction rereads
+        the permanent/client/broker-order id sets from every earlier event. Any difference from
+        the planner's captured sets rolls the candidate event back before the fill-floor check:
+        identity provenance is established before quantity evidence is interpreted.
         """
 
         with self._sessions.begin() as session:
@@ -519,6 +539,12 @@ class OrderTrackerRepository:
                         if recorded is not None:
                             row.filled_quantity = Decimal(recorded)
                             session.flush()
+                    if expected_identity_sets is not None:
+                        self._refuse_moved_identity_history(
+                            session,
+                            row,
+                            expected=expected_identity_sets,
+                        )
                     if refuse_below_recorded_fills or to_status in TERMINAL_ORDER_LIFECYCLES:
                         self._refuse_below_recorded_fills(session, row)
                     if enforce_from_status:
@@ -535,6 +561,35 @@ class OrderTrackerRepository:
             except _StatusMoved:
                 return False  # the CAS lost inside the transaction: nothing was written
             return True
+
+    @staticmethod
+    def _refuse_moved_identity_history(
+        session: Session,
+        row: OrderEventRow,
+        *,
+        expected: tuple[frozenset[int], frozenset[int], frozenset[int]],
+    ) -> None:
+        columns = (
+            OrderEventRow.permanent_id,
+            OrderEventRow.client_id,
+            OrderEventRow.broker_order_id,
+        )
+        observed = tuple(
+            frozenset(
+                int(value)
+                for value in session.scalars(
+                    select(column).where(
+                        OrderEventRow.intent_id == row.intent_id,
+                        OrderEventRow.id != row.id,
+                        column.is_not(None),
+                    )
+                )
+                if value is not None
+            )
+            for column in columns
+        )
+        if observed != expected:
+            raise IdentityHistoryAdvanced(row.intent_id)
 
     def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
         with self._sessions() as session:

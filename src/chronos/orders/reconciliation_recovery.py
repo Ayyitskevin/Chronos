@@ -25,7 +25,7 @@ from functools import partial
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
-from chronos.broker.base import CompletedOrderEvidence
+from chronos.broker.base import CompletedOrderEvidence, CompletedOrdersReconnectRequired
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import TERMINAL_ORDER_LIFECYCLES, ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
@@ -34,8 +34,14 @@ from chronos.orders.state_machine import (
     OrderLifecycleError,
     OrderLifecycleMachine,
 )
-from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
+from chronos.orders.tracker import (
+    OrderIdentityConflict,
+    OrderStatusUpdate,
+    OrderTracker,
+    PersistedIdentities,
+)
 from chronos.persistence.order_repositories import (
+    IdentityHistoryAdvanced,
     OrderIntentRecord,
     OrderIntentRepository,
     RecordedFillsAdvanced,
@@ -216,6 +222,8 @@ def _identity_conflict_reason(
     *,
     order_ref: str,
     persisted_permanent_id: int | None,
+    current_account_id: str,
+    expected_broker_client_id: int,
     open_orders: tuple[BrokerOrder, ...],
     executions: tuple[BrokerExecution, ...],
 ) -> str | None:
@@ -225,6 +233,31 @@ def _identity_conflict_reason(
         return None
     for kind, observations in (("order", open_orders), ("execution", executions)):
         for observation in observations:
+            if (
+                observation.order_ref
+                and observation.order_ref != order_ref
+                and observation.permanent_id == persisted_permanent_id
+                and (
+                    observation.account_id != current_account_id
+                    or observation.client_id != expected_broker_client_id
+                )
+            ):
+                return (
+                    f"identity conflict: broker {kind} evidence reports the persisted "
+                    "permanent id under another order reference"
+                )
+            if (
+                observation.account_id != current_account_id
+                or observation.client_id != expected_broker_client_id
+            ):
+                if observation.order_ref == order_ref and _permid_contradicts(
+                    observation.permanent_id, persisted_permanent_id
+                ):
+                    return (
+                        f"identity conflict: broker {kind} evidence reports the owned order "
+                        "reference with a contradicting permanent id"
+                    )
+                continue
             if (
                 observation.order_ref
                 and observation.order_ref != order_ref
@@ -419,6 +452,8 @@ def _unresolved_evidence_reason(
     conflict = _identity_conflict_reason(
         order_ref=order_ref,
         persisted_permanent_id=persisted_permanent_id,
+        current_account_id=current_account_id,
+        expected_broker_client_id=expected_broker_client_id,
         open_orders=open_orders,
         executions=executions,
     )
@@ -641,31 +676,31 @@ def _completed_record_bound(
     current_account_id: str,
     expected_broker_client_id: int,
     expected_limit_price: Decimal | None,
-    persisted_broker_order_id: int | None,
-    persisted_permanent_id: int | None,
-    persisted_client_id: int | None,
+    identities: PersistedIdentities,
 ) -> bool:
     """Exact identity (design §2.1): a record binds only when EVERY identifying field agrees.
 
     Used for a completed-order record AND a terminal open-book row. The reference is checked
     HERE, exactly and non-empty (design §2.1 item 1; Daybreak U-A r1 delta P1-1): an open-book
     row reaches this through ``_is_owned``, whose blank-reference/permId fallback is ownership
-    for observation, never a binding for a settle. The persisted sets are exact (Daybreak r1
-    P1-1): the ONE persisted permId (positive) and the ONE persisted client id are required and
-    equal to the record's, and a record that names a venue order id (0 = absent on completed
-    rows) must name the ONE persisted broker order id -- an intent with none persisted never
-    binds it. A persisted conflict never reaches here (the caller refuses it first).
+    for observation, never a binding for a settle. Across the full event history, the persisted
+    permId and client-id sets must exactly equal the record's identities. When the record names a
+    venue order id (0 = absent on completed rows), the full persisted broker-order-id set must
+    exactly equal it. Missing or additional identities never bind.
     """
 
+    permanent_id = record.permanent_id
     return (
         bool(intent.order_ref)
         and record.order_ref == intent.order_ref
-        and persisted_permanent_id is not None
-        and persisted_permanent_id > 0
-        and record.permanent_id == persisted_permanent_id
-        and persisted_client_id is not None
-        and record.client_id == persisted_client_id
-        and (not record.broker_order_id or record.broker_order_id == persisted_broker_order_id)
+        and permanent_id is not None
+        and permanent_id > 0
+        and identities.permanent_ids == {permanent_id}
+        and identities.client_ids == {record.client_id}
+        and (
+            (not record.broker_order_id and len(identities.broker_order_ids) <= 1)
+            or identities.broker_order_ids == {record.broker_order_id}
+        )
         and _working_order_matches_intent(
             intent,
             record,
@@ -749,9 +784,17 @@ class OrderRestartReconciler:
         proven: list[RestartOrderObservation] = []
         unresolved: list[RestartOrderObservation] = []
         applied: list[OrderStatusUpdate] = []
-        settle_plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]] = []
+        settle_plans: list[
+            tuple[
+                OrderIntentRecord,
+                _SettlePlan,
+                Callable[..., _SettlePlan],
+                PersistedIdentities,
+            ]
+        ] = []
         read_completed = self._completed_reader()
         for intent in working:
+            identities: PersistedIdentities | None = None
             persisted_broker_order_id = self._tracker.broker_order_id(
                 intent.intent_id,
                 current_account_id=current_account_id,
@@ -762,18 +805,25 @@ class OrderRestartReconciler:
                     current_account_id=current_account_id,
                 )
                 # a divergent client id is the same contradiction (R-e, r2): fail closed
-                persisted_client_id = self._tracker.client_id(
-                    intent.intent_id, current_account_id=current_account_id
-                )
+                self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
                 planned = intent.status in _SETTLE_STATUSES or self._recovered(
                     intent, current_account_id=current_account_id
                 )
                 if planned:
-                    # the settle planner binds the EXACT persisted broker-order-id set, not the
-                    # latest (design §2.1; Daybreak U-A r1 P1-1): two distinct ids fail closed
+                    # A settle path requires exactly one broker order id across the full event
+                    # history. The latest id is not a substitute for that proof.
                     self._tracker.single_broker_order_id(
                         intent.intent_id, current_account_id=current_account_id
                     )
+                    identities = self._tracker.persisted_identities(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
+                    if len(identities.broker_order_ids) > 1:
+                        raise OrderIdentityConflict(
+                            intent.intent_id,
+                            tuple(sorted(identities.broker_order_ids)),
+                            field="broker_order_id",
+                        )
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.
@@ -793,6 +843,7 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             if planned:
+                assert identities is not None
                 # the same planner, bound to this intent's persisted facts, re-runs over the
                 # confirming snapshot before any write (design §3.1; Daybreak U-A r1 P1-2)
                 planner = partial(
@@ -803,7 +854,7 @@ class OrderRestartReconciler:
                     expected_limit_price=expected_limit_price,
                     persisted_broker_order_id=persisted_broker_order_id,
                     persisted_permanent_id=persisted_permanent_id,
-                    persisted_client_id=persisted_client_id,
+                    identities=identities,
                     previous_dwell=previous_dwell,
                     mono_now=mono_now,
                 )
@@ -816,7 +867,7 @@ class OrderRestartReconciler:
                 # S-R3: a recovered SUBMITTED that the planner cannot settle is "as today"
                 as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
                 if plan.kind != "legacy" and not as_today:
-                    settle_plans.append((intent, plan, planner))
+                    settle_plans.append((intent, plan, planner, identities))
                     continue
             recorded_filled_quantity = self._tracker.recorded_filled_quantity(
                 intent.intent_id,
@@ -925,11 +976,13 @@ class OrderRestartReconciler:
                 else:
                     try:
                         cache.append((self._connection.run(broker.completed_orders()), ""))
-                    except Exception as error:
+                    except CompletedOrdersReconnectRequired as error:
+                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
+                    except Exception:
                         # ANY failure of this optional read is a typed, fail-closed hold for the
                         # intents that need it -- never an exception out of the whole pass
                         # (Daybreak U-A r1 P3-1: e.g. an earlier unanswered id-less request)
-                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
+                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: broker read failed"))
             return cache[0]
 
         return read
@@ -1061,7 +1114,7 @@ class OrderRestartReconciler:
         expected_limit_price: Decimal | None,
         persisted_broker_order_id: int | None,
         persisted_permanent_id: int | None,
-        persisted_client_id: int | None,
+        identities: PersistedIdentities,
         previous_dwell: Mapping[str, _Dwell],
         mono_now: float,
         epochs: tuple[int, int | None],
@@ -1087,6 +1140,8 @@ class OrderRestartReconciler:
         conflict = _identity_conflict_reason(
             order_ref=order_ref,
             persisted_permanent_id=persisted_permanent_id,
+            current_account_id=current_account_id,
+            expected_broker_client_id=self._expected_broker_client_id,
             open_orders=open_orders,
             executions=executions,
         )
@@ -1202,10 +1257,13 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
                 expected_broker_client_id=self._expected_broker_client_id,
                 expected_limit_price=expected_limit_price,
-                persisted_broker_order_id=persisted_broker_order_id,
-                persisted_permanent_id=persisted_permanent_id,
-                persisted_client_id=persisted_client_id,
+                identities=identities,
             )
+
+        def unbound_reason(source: str) -> str:
+            if len(identities.broker_order_ids) > 1:
+                return f"{source} is not bound to this intent: persisted broker order ids disagree"
+            return f"{source} is not bound to this intent"
 
         def from_terminal(record: BrokerOrder, source: str) -> _SettlePlan:
             figure = record.filled_quantity
@@ -1254,9 +1312,7 @@ class OrderRestartReconciler:
             if terminal:
                 # a terminal open-book row is a bound T only under the same exact identity
                 if not bound_exactly(order):
-                    return _SettlePlan(
-                        "refuse", "terminal open-book row is not bound to this intent"
-                    )
+                    return _SettlePlan("refuse", unbound_reason("terminal open-book row"))
                 if filled_by_quantity:  # C3
                     return settle(order, order.filled_quantity, OrderLifecycle.FILLED, "open_order")
                 return from_terminal(order, "open_order")
@@ -1380,12 +1436,19 @@ class OrderRestartReconciler:
                 f"completed order record has not a terminal status ({record.lifecycle.value})",
             )
         if not bound_exactly(record):
-            return _SettlePlan("refuse", "completed order record is not bound to this intent")
+            return _SettlePlan("refuse", unbound_reason("completed order record"))
         return from_terminal(record, "completed_order")
 
     def _act_on_settle_plans(
         self,
-        plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]],
+        plans: list[
+            tuple[
+                OrderIntentRecord,
+                _SettlePlan,
+                Callable[..., _SettlePlan],
+                PersistedIdentities,
+            ]
+        ],
         *,
         current_account_id: str,
         now: datetime,
@@ -1405,14 +1468,14 @@ class OrderRestartReconciler:
 
         fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...], _CompletedRead] | None
         fresh = None
-        if any(plan.kind == "write" for _, plan, _ in plans):
+        if any(plan.kind == "write" for _, plan, _, _ in plans):
             confirm_epochs = self._current_epochs()  # before the confirming read (r3)
             fresh = (
                 self._connection.run(self._connection.broker.open_orders()),
                 self._connection.run(self._connection.broker.executions()),
                 self._completed_reader(),
             )
-        for intent, plan, planner in plans:
+        for intent, plan, planner, identities in plans:
             observed = RestartOrderObservation(
                 intent_id=intent.intent_id,
                 local_status=intent.status,
@@ -1457,27 +1520,35 @@ class OrderRestartReconciler:
                     )
                 )
                 continue
+            history_refusal: IdentityHistoryAdvanced | None = None
+            won = False
             try:
                 with self._epochs_held(plan.epochs) as current:
                     if current:
-                        won = self._tracker.record_planned_transition(
-                            intent_id=intent.intent_id,
-                            current_account_id=current_account_id,
-                            from_status=intent.status,
-                            to_status=plan.to_status,
-                            event_key=plan.event_key,
-                            source=plan.source
-                            or (
-                                "FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"
-                            ),
-                            broker_order_id=plan.broker_order_id,
-                            permanent_id=plan.permanent_id,
-                            client_id=plan.client_id,
-                            filled_quantity=plan.filled,
-                            remaining_quantity=plan.remaining,
-                            evidence=dict(plan.evidence),
-                            now=now,
-                        )
+                        try:
+                            won = self._tracker.record_planned_transition(
+                                intent_id=intent.intent_id,
+                                current_account_id=current_account_id,
+                                from_status=intent.status,
+                                to_status=plan.to_status,
+                                event_key=plan.event_key,
+                                source=plan.source
+                                or (
+                                    "FILL_PROGRESS"
+                                    if plan.to_status is intent.status
+                                    else "RECONCILE"
+                                ),
+                                broker_order_id=plan.broker_order_id,
+                                permanent_id=plan.permanent_id,
+                                client_id=plan.client_id,
+                                filled_quantity=plan.filled,
+                                remaining_quantity=plan.remaining,
+                                evidence=dict(plan.evidence),
+                                now=now,
+                                expected_identities=identities,
+                            )
+                        except IdentityHistoryAdvanced as refused:
+                            history_refusal = refused
             except RecordedFillsAdvanced as refused:
                 unresolved.append(
                     RestartOrderObservation(
@@ -1497,6 +1568,17 @@ class OrderRestartReconciler:
                         broker_status=None,
                         transition_applied=False,
                         reason="uncertainty changed before the write; nothing was written",
+                    )
+                )
+                continue
+            if history_refusal is not None:
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason=str(history_refusal),
                     )
                 )
                 continue

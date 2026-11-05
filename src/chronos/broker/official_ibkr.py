@@ -39,6 +39,7 @@ from chronos.broker.base import (
     BrokerRefusedBeforeSend,
     BrokerSafetyError,
     BrokerSendGuard,
+    CompletedOrdersReconnectRequired,
     OptionChainResponse,
     OrderOwnershipLedger,
     VenueOrderIdentity,
@@ -1373,18 +1374,28 @@ class OfficialIBKRBroker:
 
         app = self._require_app()
         flight = self.bridge.start_completed_orders()
-        app.reqCompletedOrders(True)
-        done = await asyncio.get_running_loop().run_in_executor(
-            None, flight.done.wait, _REQUEST_TIMEOUT_S
-        )
-        if not done or self.bridge.connection_closed.is_set():
-            raise BrokerConnectionError("completed-orders request did not complete")
-        records: list[BrokerOrder] = []
-        for contract, order, order_state in flight.items:
-            record = self._completed_record(contract, order, order_state)
-            if record is not None:
-                records.append(record)
-        return tuple(records)
+        request_sent = False
+        try:
+            app.reqCompletedOrders(True)
+            request_sent = True
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            if not done:
+                raise CompletedOrdersReconnectRequired
+            if self.bridge.connection_closed.is_set():
+                raise BrokerConnectionError("completed-orders request did not complete")
+            records: list[BrokerOrder] = []
+            for contract, order, order_state in flight.items:
+                record = self._completed_record(contract, order, order_state)
+                if record is not None:
+                    records.append(record)
+            return tuple(records)
+        finally:
+            self.bridge.release_completed_orders(
+                flight,
+                taint_if_incomplete=request_sent,
+            )
 
     def _completed_record(self, contract: Any, order: Any, order_state: Any) -> BrokerOrder | None:
         order_ref = str(getattr(order, "orderRef", "") or "")
