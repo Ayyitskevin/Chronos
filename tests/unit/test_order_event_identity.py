@@ -807,7 +807,10 @@ def test_r1b_identity_conflict_details_require_verified_ownership(
         assert reason.startswith("identity conflict:")
         assert all(identifier in reason for identifier in ("CHR-OTHER", "4242", "9001"))
     else:
-        assert reason == "owned order was absent from the broker order and execution snapshots"
+        assert reason == (
+            "identity conflict: broker evidence reports the persisted permanent id "
+            "under another order reference"
+        )
         assert all(identifier not in reason for identifier in ("CHR-OTHER", "4242", "9001"))
 
 
