@@ -91,6 +91,36 @@ async def test_demo_snapshot_is_repeatable(demo_broker: DemoBroker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_demo_cancel_removes_only_the_owned_order_and_preserves_evidence(
+    demo_broker: DemoBroker,
+) -> None:
+    await demo_broker.connect()
+    (owned,) = await demo_broker.open_orders()
+    foreign = owned.model_copy(update={"broker_order_id": 7002, "order_ref": "MANUAL"})
+    demo_broker._orders = (owned, foreign)
+    before = await demo_broker.snapshot()
+
+    with pytest.raises(BrokerSafetyError, match="does not own"):
+        await demo_broker.cancel_order(foreign.broker_order_id)
+    unknown = await demo_broker.cancel_order(999999)
+    assert unknown.requested is False
+    assert unknown.lifecycle is OrderLifecycle.REJECTED
+    assert await demo_broker.open_orders() == (owned, foreign)
+
+    result = await demo_broker.cancel_order(owned.broker_order_id)
+    assert result.requested is True
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    after = await demo_broker.snapshot()
+    assert after.open_orders == (foreign,)
+    assert after.positions == before.positions
+    assert after.executions == before.executions
+    repeated = await demo_broker.cancel_order(owned.broker_order_id)
+    assert repeated.requested is False
+    assert repeated.lifecycle is OrderLifecycle.REJECTED
+    assert await demo_broker.open_orders() == (foreign,)
+
+
+@pytest.mark.asyncio
 async def test_default_demo_clock_is_stable_across_brokers() -> None:
     first = DemoBroker()
     second = DemoBroker()
