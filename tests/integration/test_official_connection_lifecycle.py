@@ -277,17 +277,6 @@ def test_a_held_client_id_fails_closed_at_the_handshake(gateway: fake_ibapi.Fake
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "B1R-F1: a code the gateway sends before the handshake (326 client id in use; also "
-        "502/504, ASSUMED-IB) lands only in bridge.notices (callbacks.py:397-399); the handshake "
-        "timeout error (official_ibkr.py:982-987) says 'is the API enabled?' and omits it. The "
-        "operator sees the wrong cause. Diagnostic gap, not a safety bypass; the fix (U-h) is "
-        "src and Kevin's call."
-    ),
-)
 def test_the_handshake_timeout_names_the_code_the_gateway_sent(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
@@ -296,6 +285,31 @@ def test_the_handshake_timeout_names_the_code_the_gateway_sent(
     with pytest.raises(BrokerConnectionError) as raised:
         asyncio.run(broker.connect())
     assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(raised.value)
+
+
+def test_handshake_diagnostics_select_only_bounded_current_gateway_codes() -> None:
+    old_notices = (
+        "[999] old-session gateway secret",
+        "[foreign-order] old-session order 77123 ref='PRIVATE-REF'",
+    )
+    current_notices = (
+        "[901] gateway secret 901",
+        "[902] gateway secret 902",
+        "[903] gateway secret 903",
+        "[904] gateway secret 904",
+        "[foreign-order] current adapter notice order 88421 ref='PRIVATE-CURRENT'",
+    )
+
+    assert official_module._new_gateway_notice_codes(
+        old_notices,
+        old_notices + current_notices,
+        limit=3,
+    ) == (902, 903, 904)
+    assert official_module._new_gateway_notice_codes(
+        old_notices,
+        (*old_notices, "[326] current-session refusal"),
+        limit=3,
+    ) == (326,)
 
 
 # --- 4. handshake timeouts, wrong account -------------------------------------------------

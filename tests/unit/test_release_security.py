@@ -194,7 +194,10 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 62 at FILLFLOOR r8-1 (the superseded runtime.py source-inventory fingerprint).
     # 66 at LAND: merged 62/60 histories plus two superseded demo fingerprints.
     # 71 at CPSRECUT-LAND-1: remove the duplicate identity shared by both merge parents.
-    assert len(historical_candidates) == 71
+    # XFIX-C branch-side history: 58 and 59 at XFIX-C and XFIX-C-R1 (official_ibkr.py).
+    # 74 at the XFIX-C/main merge: main's 71 plus three official_ibkr.py fingerprints the merged
+    # file supersedes (main's, XFIX-C's and XFIX-C-R1's); XFIX-C's other entry was already on main.
+    assert len(historical_candidates) == 74
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
