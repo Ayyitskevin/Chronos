@@ -150,7 +150,17 @@ class Repository:
             failure=f"unavailable commit for {label}",
         )
         if key[0] == MATRIX and key[2] not in self.matrix(observed):
-            raise RotationError(f"unfindable value for {label}")
+            candidates = self.git("rev-list", parent, "--", MATRIX).decode().splitlines()
+            for candidate in candidates:
+                try:
+                    values = self.matrix(candidate)
+                except RotationError:
+                    continue
+                if key[2] in values:
+                    entry["observed_commit"] = candidate
+                    break
+            else:
+                raise RotationError(f"unfindable value for {label}")
         if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
             raise RotationError(f"missing review reason for {label}")
 

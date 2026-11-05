@@ -218,6 +218,21 @@ def test_matrix_conflict_markers_refuse_without_touching_conflicted_baseline(rep
     assert (repo.root / ".secrets.baseline").read_bytes() == before
 
 
+def test_misbound_history_resolves_to_reachable_matrix_commit(repo: Repo) -> None:
+    initial = repo.git("rev-parse", "HEAD")
+    initial_value = json.loads(repo.git("show", initial + ":" + MATRIX))["source_fingerprints"][0][
+        "sha256"
+    ]
+    current = repo.matrix("changed source")
+    repo.baseline(current, [_history(initial_value, initial)])
+    wrong_observation = repo.commit("current matrix lacks initial value")
+    repo.baseline(current, [_history(initial_value, wrong_observation)])
+    parent = repo.commit("misbound history")
+    result = repo.run(parent)
+    assert result.returncode == 0, result.stderr
+    assert repo.payload()["history_results"][MATRIX][0]["observed_commit"] == initial
+
+
 def test_generator_must_accept_the_working_artifacts(repo: Repo) -> None:
     parent = repo.git("rev-parse", "HEAD")
     (repo.root / "state.txt").write_text("stale")
