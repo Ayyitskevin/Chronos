@@ -15,6 +15,7 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 
 from __future__ import annotations
 
+import logging
 import time as _time_module
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
@@ -47,6 +48,8 @@ from chronos.persistence.order_repositories import (
     RecordedFillsAdvanced,
 )
 from chronos.utils.identifiers import PersistenceKey, account_fingerprint
+
+logger = logging.getLogger(__name__)
 
 # Intent statuses whose true broker state must be re-derived on restart.
 _UNRESOLVED_STATUSES = frozenset(
@@ -1016,6 +1019,13 @@ class OrderRestartReconciler:
                 # LEGACY-5: the terminal write was refused atomically because a concurrent writer
                 # advanced the recorded fill maximum after this pass read it. A contradictory
                 # lifecycle likewise holds only this intent; other intents must still reconcile.
+                if isinstance(refused, OrderLifecycleError):
+                    logger.warning(
+                        "reconciliation lifecycle conflict: intent=%s local=%s observed=%s",
+                        intent.intent_id,
+                        intent.status.value,
+                        update.lifecycle.value,
+                    )
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
