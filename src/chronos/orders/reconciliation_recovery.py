@@ -348,6 +348,8 @@ def resolve_from_broker_evidence(
         _identity_conflict_reason(
             order_ref=order_ref,
             persisted_permanent_id=persisted_permanent_id,
+            current_account_id=current_account_id,
+            expected_broker_client_id=expected_broker_client_id,
             open_orders=open_orders,
             executions=executions,
         )
@@ -484,7 +486,7 @@ def _unresolved_evidence_reason(
         executions=executions,
     )
     if conflict is not None:
-        return "identity conflict: broker snapshot contradicts persisted order identity"
+        return conflict
     matching_orders = tuple(
         order
         for order in open_orders
