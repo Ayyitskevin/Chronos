@@ -262,6 +262,20 @@ def _terminal_below_recorded_fills(order: BrokerOrder, recorded: Decimal | None)
     )
 
 
+def _terminal_below_snapshot_fills(
+    order: BrokerOrder, executions: tuple[BrokerExecution, ...]
+) -> bool:
+    """A terminal row cannot undercut coherent owned executions in the same snapshot.
+
+    Call only after execution identity/coherence checks. The record-only fills store is not
+    evidence here: unlike that store, these executions belong to the snapshot being resolved.
+    """
+
+    return order.lifecycle in TERMINAL_ORDER_LIFECYCLES and order.filled_quantity < sum(
+        (execution.quantity for execution in executions), Decimal("0")
+    )
+
+
 def resolve_from_broker_evidence(
     intent: OrderIntentRecord,
     *,
@@ -344,6 +358,8 @@ def resolve_from_broker_evidence(
             return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
         if _terminal_below_recorded_fills(order, recorded_filled_quantity):
             return None  # LEGACY-5: a terminal row cannot lower the fills already recorded
+        if _terminal_below_snapshot_fills(order, tuple(fills)):
+            return None  # RECONFLOOR: terminal rows cannot erase this snapshot's executions
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
         # value through the raw-IBKR-string mapper. Refine only by fill quantity
         # (the working lifecycles and a typed FILLED row, per the guard above).
@@ -492,6 +508,12 @@ def _unresolved_evidence_reason(
             f"owned broker order is typed {below.lifecycle.value} at {row_fills} filled, "
             f"below the {recorded} filled already recorded: a terminal write "
             "would drop recorded fills, the intent stays locked"
+        )
+    if any(_terminal_below_snapshot_fills(order, matching_executions) for order in matching_orders):
+        witnessed = sum((execution.quantity for execution in matching_executions), Decimal("0"))
+        return (
+            "snapshot fill conflict: terminal venue figure is below the witnessed lower bound "
+            f"{witnessed} from owned snapshot executions, the intent stays locked"
         )
     if any(not order.order_ref for order in matching_orders) or any(
         not execution.order_ref for execution in matching_executions
