@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
-from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES, OrderLifecycleMachine
+from chronos.orders.state_machine import OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
     OrderEventRecord,
     OrderIntentRepository,
@@ -55,22 +55,25 @@ class IngestOutcome:
 
     ``lifecycle_changed``: the intent's status advanced (a transition row was
     written). ``identity_refined``: a same-status observation supplied broker
-    identity the rows lacked (an IDENTITY row was written) — evidence, never a
-    lifecycle transition. Both False: a duplicate / stale / benign no-op. This is
-    deliberately NOT a bool: the old single flag conflated the two meanings and
-    the restart report published a refinement as an applied transition.
+    identity the rows lacked (an IDENTITY row was written). ``fill_progress_recorded``:
+    a same-status observation raised the cumulative fill and was recorded as
+    evidence. Both refinements leave lifecycle unchanged. All False: a duplicate /
+    stale / benign no-op. This is deliberately NOT a bool: the old single flag
+    conflated the evidence and lifecycle meanings.
     """
 
     lifecycle_changed: bool
     identity_refined: bool
+    fill_progress_recorded: bool = False
 
     @property
     def recorded(self) -> bool:
-        return self.lifecycle_changed or self.identity_refined
+        return self.lifecycle_changed or self.identity_refined or self.fill_progress_recorded
 
     def __bool__(self) -> bool:
         raise TypeError(
-            "IngestOutcome is not a bool: read .lifecycle_changed / .identity_refined / .recorded"
+            "IngestOutcome is not a bool: read .lifecycle_changed / .identity_refined / "
+            ".fill_progress_recorded / .recorded"
         )
 
 
@@ -179,31 +182,29 @@ class OrderTracker:
         update: OrderStatusUpdate,
         *,
         current_account_id: str,
-        fills_floor: bool = False,
     ) -> IngestOutcome:
         """Apply one broker observation.
 
         Returns an :class:`IngestOutcome`: ``lifecycle_changed`` for a genuine
-        transition, ``identity_refined`` for a same-status observation that first
-        supplied broker identity (R-d), neither for a no-op/duplicate/stale event.
+        transition, ``identity_refined`` for a same-status observation that adds
+        broker identity (R-d), and ``fill_progress_recorded`` when a same-status
+        observation raises the cumulative fill. Neither refinement advances the
+        lifecycle.
 
-        ``fills_floor`` (LEGACY-5 r1; the legacy resolver's two callers): the recorded fills are a
-        floor for a TERMINAL update. One whose figure is below the largest recorded fill figure
-        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside
-        the transition's own transaction: the caller's earlier read of the maximum may be stale.
+        Every terminal update is checked against the largest recorded fill inside the repository's
+        transition transaction. A terminal update below that floor raises
+        :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced`; the caller's
+        earlier read of the maximum may be stale.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
         if intent is None:
             raise ValueError(f"Unknown order intent {update.intent_id!r}")
 
-        # The monotonic stale-fill guard applies ONLY to fill-progress updates:
-        # a fill callback reporting a lower cumulative fill than already seen is
-        # stale and ignored. Terminal/administrative transitions (CANCELLED,
-        # REJECTED, CANCEL_PENDING) must NOT be dropped for carrying a lower
-        # filled_quantity — the state machine decides their legality instead, so
-        # a real terminal resolution is applied (or a contradiction surfaces).
-        if update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}:
+        # A lower PARTIALLY_FILLED callback is stale and ignored. FILLED is terminal:
+        # its explicit figure must reach the repository's atomic floor so a contradiction
+        # is reported instead of silently discarded.
+        if update.lifecycle is OrderLifecycle.PARTIALLY_FILLED:
             prior_filled = self._latest_filled(update.intent_id, current_account_id)
             if update.filled_quantity < prior_filled:
                 return _NOTHING_RECORDED
@@ -211,12 +212,15 @@ class OrderTracker:
         machine = OrderLifecycleMachine(intent.status)
         # apply() raises OrderLifecycleError on a contradiction (surfaced to the
         # caller); returns False for a benign no-op we can skip — unless a
-        # same-status callback newly supplies the broker identity (R-d).
+        # same-status callback supplies new identity (R-d) or fill evidence.
         if not machine.apply(update.lifecycle):
             if update.lifecycle is not intent.status:
                 return _NOTHING_RECORDED  # an out-of-order message after a terminal state
-            refined = self._record_identity_refinement(update, intent.status, current_account_id)
-            return IngestOutcome(lifecycle_changed=False, identity_refined=refined)
+            return self._record_same_status_evidence(
+                update,
+                intent.status,
+                current_account_id,
+            )
 
         event_key = (
             f"{update.intent_id}:{update.broker_order_id}:"
@@ -242,25 +246,21 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
-            refuse_below_recorded_fills=(
-                fills_floor and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
-            ),
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
-    def _record_identity_refinement(
-        self, update: OrderStatusUpdate, status: OrderLifecycle, current_account_id: str
-    ) -> bool:
-        """A same-status callback that first supplies permId/clientId (BP-2 r1, R-d).
+    def _record_same_status_evidence(
+        self,
+        update: OrderStatusUpdate,
+        status: OrderLifecycle,
+        current_account_id: str,
+    ) -> IngestOutcome:
+        """Append new same-status identity or cumulative-fill evidence.
 
-        Appends ONE identity-refinement row (``from_status == to_status``, source
-        ``IDENTITY``, carrying the permId and the client id the callback reported)
-        through the same CAS write as every other event; it never edits an earlier
-        row and moves no existing event. Either field newly arriving (None ->
-        non-None) is new identity; a callback repeating the persisted values
-        records nothing. A contradicting value IS recorded — it is evidence — and
-        the accessor for that field then fails closed (:class:`OrderIdentityConflict`)
-        instead of the contradiction being dropped.
+        The append-only row records either identity refinement, fill progress, or
+        both; it never edits an earlier row or advances lifecycle. A repeated
+        observation is idempotent. Contradicting identity remains evidence and its
+        accessor fails closed with :class:`OrderIdentityConflict`.
         """
 
         # R-d (clarified in r2): EITHER field going None -> non-None is new identity;
@@ -273,15 +273,30 @@ class OrderTracker:
         new_client_id = update.client_id is not None and update.client_id != _latest(
             events, "client_id"
         )
-        if not (new_permanent_id or new_client_id):
-            return False
-        return self._tracker.record_transition(
-            intent_id=update.intent_id,
-            event_key=(
+        identity_refined = new_permanent_id or new_client_id
+        prior_fills = [
+            event.filled_quantity for event in events if event.filled_quantity is not None
+        ]
+        fill_progress = update.filled_quantity > max(prior_fills, default=Decimal("0"))
+        if not (identity_refined or fill_progress):
+            return _NOTHING_RECORDED
+
+        if fill_progress:
+            event_key = (
+                f"{update.intent_id}:{update.broker_order_id}:{status.value}:fill_progress:"
+                f"{update.filled_quantity}:{update.permanent_id}:{update.client_id}"
+            )
+            source = "FILL_PROGRESS"
+        else:
+            event_key = (
                 f"{update.intent_id}:{update.broker_order_id}:identity:"
                 f"{update.permanent_id}:{update.client_id}"
-            ),
-            source="IDENTITY",
+            )
+            source = "IDENTITY"
+        written = self._tracker.record_transition(
+            intent_id=update.intent_id,
+            event_key=event_key,
+            source=source,
             from_status=status,
             to_status=status,
             current_account_id=current_account_id,
@@ -293,12 +308,25 @@ class OrderTracker:
             evidence={
                 "permanent_id": update.permanent_id,
                 "client_id": update.client_id,
-                "refinement": "identity",
+                "refinement": (
+                    "identity_and_fill_progress"
+                    if identity_refined and fill_progress
+                    else "identity"
+                    if identity_refined
+                    else "fill_progress"
+                ),
+                "identity_refined": identity_refined,
+                "fill_progress_recorded": fill_progress,
                 "observed_via": update.source,
                 "occurred_at": update.occurred_at.isoformat(),
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
+        )
+        return IngestOutcome(
+            lifecycle_changed=False,
+            identity_refined=written and identity_refined,
+            fill_progress_recorded=written and fill_progress,
         )
 
     def record_operator_rejection(
@@ -376,6 +404,7 @@ class OrderTracker:
             evidence=evidence,
             occurred_at=now,
             enforce_from_status=True,
+            refuse_below_recorded_fills=True,
         )
 
     def fill_figures(

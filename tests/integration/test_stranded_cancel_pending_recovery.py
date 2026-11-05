@@ -72,7 +72,11 @@ def world() -> Iterator[tuple[World, _Cancels]]:
 def _service(w: World) -> OrderCancellationService:
     r = w.rig
     return OrderCancellationService(
-        connection=r.connection, intents=r.intents, tracker=r.tracker, tracker_repo=r.repo
+        connection=r.connection,
+        intents=r.intents,
+        tracker=r.tracker,
+        tracker_repo=r.repo,
+        reconciliation_readiness=r.readiness,
     )
 
 

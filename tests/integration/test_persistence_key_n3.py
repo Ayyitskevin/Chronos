@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import hmac
+import inspect
 import secrets
 import sqlite3
 from pathlib import Path
@@ -30,6 +31,7 @@ from tests.integration.test_migrations import _alembic_config
 from chronos import runtime as runtime_module
 from chronos.broker.demo import DEMO_ACCOUNT_ID
 from chronos.config.settings import Settings
+from chronos.orders.mutations import OrderCancellationService
 from chronos.persistence.database import Database
 from chronos.persistence.schema import Base
 
@@ -116,6 +118,22 @@ def test_t1_the_stored_fingerprint_is_the_keyed_hmac_and_not_enumerable(
     space = [f"DU123{n:04d}" for n in range(10_000)]
     assert DEMO_ACCOUNT_ID in space
     assert [candidate for candidate in space if _unkeyed(candidate) == stored] == []
+
+
+def test_cancel_service_requires_and_shares_runtime_readiness(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parameter = inspect.signature(OrderCancellationService.__init__).parameters[
+        "reconciliation_readiness"
+    ]
+    assert parameter.default is inspect.Parameter.empty
+
+    runtime = _build_with_key(monkeypatch, secrets.token_hex(32))
+    try:
+        cancellation = runtime.order_management._cancellation
+        assert cancellation._reconciliation_readiness is runtime.reconciliation_readiness
+    finally:
+        runtime.close()
 
 
 def test_t2_the_same_key_rebinds_the_same_database_after_a_restart(

@@ -523,6 +523,7 @@ class DemoBroker:
             lifecycle=OrderLifecycle.CANCELLED,
             message="Deterministic cancellation accepted.",
             timestamp=self._clock().astimezone(UTC),
+            filled_quantity=order.filled_quantity,
         )
 
     async def snapshot(self) -> BrokerSnapshot:

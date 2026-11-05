@@ -331,6 +331,7 @@ async def test_cancel_removes_a_working_order_and_keeps_partial_fills() -> None:
     broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.5, close=99.0))
     result = await broker.cancel_order(submission.broker_order_id)
     assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCELLED)
+    assert result.filled_quantity == Decimal("5")
     assert await broker.open_orders() == ()
     (position,) = await broker.positions()
     assert position.quantity == Decimal("5")

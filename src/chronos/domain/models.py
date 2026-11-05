@@ -646,6 +646,9 @@ class CancellationResult(ChronosModel):
     lifecycle: OrderLifecycle
     message: str
     timestamp: AwareDatetime
+    # When present, the venue's cumulative fill figure at the cancellation boundary.
+    # None means the venue supplied no figure; it must not erase an explicit zero.
+    filled_quantity: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class BrokerSnapshot(ChronosModel):

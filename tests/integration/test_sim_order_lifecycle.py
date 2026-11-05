@@ -403,6 +403,7 @@ class _SimHarness:
                 intents=self.intents,
                 tracker=self.tracker,
                 tracker_repo=self.tracker_repo,
+                reconciliation_readiness=self.readiness,
             ),
             tracker=self.tracker,
             tracker_repo=self.tracker_repo,
@@ -862,6 +863,9 @@ def test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal(venue: _Ve
             report = h.service.reconcile_on_restart_report(now=h.now)
             assert report.unresolved == ()
         assert h.status("intent-1") is OrderLifecycle.CANCELLED
+        terminal_event = h.tracker_repo.events("intent-1", current_account_id=h.account)[-1]
+        assert terminal_event.to_status is OrderLifecycle.CANCELLED
+        assert terminal_event.filled_quantity == Decimal("5")
         assert h.sim_open_order_ids() == set()
         assert h.sim_position() == Decimal("5")
         assert len(h.connection.run(h.broker.executions())) == 1

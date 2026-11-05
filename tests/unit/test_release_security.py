@@ -178,10 +178,17 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 55 at D54-FIX5 (api/autonomy_wiring.py: the covered-call residual pointer supersedes FIX4's).
     # 56 at E-0 (runtime.py: the typed readiness blocker union supersedes its source fingerprint).
     # 57 at E0-R1 (runtime.py: the P3 blocker predicate supersedes E-0's fingerprint).
+    # Main-side history:
     # 58 at XFIX-D (demo.py: typed pre-send refusals supersede its CB-1 source fingerprint).
     # 59 at XFIX-D r1 (demo.py: disconnected refusals supersede its initial XFIX-D fingerprint).
     # 60 at U1-F1 (demo.py: removing a cancelled order supersedes XFIX-D r1's fingerprint).
-    assert len(historical_candidates) == 60
+    # Branch-side history:
+    # 58 at FILLFLOOR r3 (the regenerated capability matrix's source-inventory fingerprint).
+    # 59 at FILLFLOOR r6 (the superseded capability-matrix fingerprint moved to history).
+    # 60 and 61 at FILLFLOOR r7 (stale generated demo and official adapter fingerprints).
+    # 62 at FILLFLOOR r8-1 (the superseded runtime.py source-inventory fingerprint).
+    # 66 at LAND: merged 62/60 histories plus two superseded demo fingerprints.
+    assert len(historical_candidates) == 66
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
