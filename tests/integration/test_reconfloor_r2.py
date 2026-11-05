@@ -70,7 +70,13 @@ def test_planned_terminal_cannot_drop_row_bound_snapshot_executions(
 
     assert rig.status() is status and rig.events() == before
     assert report.applied_updates == () and not report.permits_new_opening_order
-    assert report.unresolved[0].reason
+    if status is L.CANCEL_PENDING or source == "completed-zero-id" or figure == "0":
+        assert report.unresolved[0].reason.startswith("snapshot fill conflict:")
+    else:
+        assert report.unresolved[0].reason == (
+            "owned broker order is typed CANCELLED (not a working lifecycle) but reports fills: "
+            "fill quantity cannot settle it, the intent stays locked"
+        )
     if status is L.CANCEL_PENDING or source == "completed-zero-id":
         assert any(
             plan.kind == "refuse" and plan.reason.startswith("snapshot fill conflict:")
