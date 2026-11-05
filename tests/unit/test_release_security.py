@@ -193,9 +193,8 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 60 and 61 at FILLFLOOR r7 (stale generated demo and official adapter fingerprints).
     # 62 at FILLFLOOR r8-1 (the superseded runtime.py source-inventory fingerprint).
     # 66 at LAND: merged 62/60 histories plus two superseded demo fingerprints.
-    # 72 at CPSRECUT-LAND: union of both histories (70) plus each side's superseded current
-    # official_ibkr.py source-inventory fingerprint (2).
-    assert len(historical_candidates) == 72
+    # 71 at CPSRECUT-LAND-1: remove the duplicate identity shared by both merge parents.
+    assert len(historical_candidates) == 71
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
