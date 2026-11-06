@@ -1,4 +1,10 @@
-"""Rotate reviewed matrix fingerprints from committed parent baselines only."""
+"""Rotate reviewed matrix fingerprints from committed parent baselines only.
+
+The operator fetches origin first, then pins the reviewed record:
+    python scripts/rotate_baseline_fingerprints.py \\
+        --reviewed "$(git rev-parse origin/main)" --parent HEAD --check
+For a merge, supply two --parent arguments. Inventory sources must be indexed.
+"""
 
 from __future__ import annotations
 
@@ -137,18 +143,28 @@ class Repository:
             )
         return self._matrices[commit]
 
-    def baseline(self, ref: str) -> tuple[str, dict[str, Any]]:
-        commit = (
+    def commit(self, ref: str, *, failure: str = "baseline commit unavailable") -> str:
+        return (
             self.git(
                 "rev-parse",
                 "--verify",
                 "--end-of-options",
                 f"{ref}^{{commit}}",
-                failure="baseline commit unavailable",
+                failure=failure,
             )
             .decode()
             .strip()
         )
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        try:
+            self.git("merge-base", "--is-ancestor", older, newer)
+        except RotationError:
+            return False
+        return True
+
+    def baseline(self, ref: str) -> tuple[str, dict[str, Any]]:
+        commit = self.commit(ref)
         raw = self.git("show", f"{commit}:{BASELINE}")
         try:
             payload = json.loads(raw)
@@ -286,6 +302,17 @@ def scan(root: Path, payload: dict[str, Any]) -> dict[Identity, int]:
 
 def plan(root: Path, refs: Sequence[str], reviewed_ref: str) -> bytes:
     repository = Repository(root)
+    if re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_ref) is None:
+        raise RotationError("--reviewed requires a full 40-hex SHA")
+    reviewed_ref = reviewed_ref.lower()
+    origin_main = repository.commit(
+        "refs/remotes/origin/main", failure="origin/main is absent or unavailable"
+    )
+    if not repository.is_ancestor(reviewed_ref, origin_main):
+        raise RotationError("reviewed commit is not an ancestor of origin/main")
+    parent_commits = [repository.commit(ref) for ref in refs]
+    if not any(repository.is_ancestor(reviewed_ref, parent) for parent in parent_commits):
+        raise RotationError("reviewed commit is not an ancestor of any parent")
     reviewed_commit, reviewed = repository.baseline(reviewed_ref)
     reviewed_current = entries(reviewed, "results")
     reviewed_history = entries(reviewed, "history_results")
@@ -294,7 +321,7 @@ def plan(root: Path, refs: Sequence[str], reviewed_ref: str) -> bytes:
         repository.note_carried(key, entry, reviewed)
     parents: list[tuple[str, dict[str, Any], dict[str, tuple[str, int, str]]]] = []
     new_history: dict[tuple[str, Identity], dict[str, Any]] = {}
-    for ref in refs:
+    for ref in parent_commits:
         commit, payload = repository.baseline(ref)
         current = entries(payload, "results")
         history = entries(payload, "history_results")
@@ -334,7 +361,10 @@ def plan(root: Path, refs: Sequence[str], reviewed_ref: str) -> bytes:
     if re.search(rb"(?m)^(<<<<<<<|=======|>>>>>>>)", raw_matrix):
         raise RotationError("matrix conflict markers")
     current_inventory = inventory(raw_matrix)
+    indexed = set(repository.git("ls-files", "--cached", "-z").decode().split("\0"))
     for source_name, _, value in current_inventory.values():
+        if source_name not in indexed:
+            raise RotationError(f"inventory source is not indexed: {source_name!r}")
         source_path = root / source_name
         if source_path.name == ".env" or source_path.is_symlink():
             raise RotationError(f"unsafe inventory source {source_name!r}")

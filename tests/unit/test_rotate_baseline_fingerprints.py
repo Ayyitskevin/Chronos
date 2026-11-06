@@ -80,11 +80,12 @@ class Repo:
         (self.root / ".secrets.baseline").write_text(_dump(payload))
 
     def run(
-        self, *parents: str, check: bool = False, reviewed: str | None = "reviewed"
+        self, *parents: str, check: bool = False, reviewed: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         args = [sys.executable, str(SCRIPT)]
-        if reviewed is not None:
-            args.extend(["--reviewed", reviewed])
+        args.extend(
+            ["--reviewed", reviewed if reviewed is not None else self.git("rev-parse", "reviewed")]
+        )
         for parent in parents:
             args.extend(["--parent", parent])
         if check:
@@ -128,6 +129,7 @@ def repo(tmp_path: Path) -> Repo:
     r.baseline(value)
     r.commit("initial")
     r.git("branch", "reviewed")
+    r.git("update-ref", "refs/remotes/origin/main", r.git("rev-parse", "HEAD"))
     return r
 
 
@@ -242,6 +244,7 @@ def test_carried_misbound_history_stays_exact_and_prints_one_note(repo: Repo) ->
     wrong_observation = repo.commit("current matrix lacks initial value")
     repo.baseline(current, [_history(initial_value, wrong_observation)])
     parent = repo.commit("misbound history")
+    repo.git("update-ref", "refs/remotes/origin/main", parent)
     carried = repo.payload()["history_results"][MATRIX][0]
     result = repo.run(parent, reviewed=parent)
     assert result.returncode == 0, result.stderr
@@ -364,6 +367,7 @@ def test_reviewed_non_matrix_history_carries_unchanged_on_merge(repo: Repo) -> N
     payload["history_results"]["retired.txt"] = [carried]
     (repo.root / ".secrets.baseline").write_text(_dump(payload))
     reviewed = repo.commit("reviewed non-matrix history")
+    repo.git("update-ref", "refs/remotes/origin/main", reviewed)
     parents = []
     for branch in ["left", "right"]:
         repo.git("switch", "-qc", branch, reviewed)
@@ -409,7 +413,17 @@ def test_atomic_failure_cleans_temporary_candidate(
         monkeypatch.setattr(tempfile, "NamedTemporaryFile", temporary)
     else:
         monkeypatch.setattr(os, "replace", fail_replace)
-    assert rotation.main(["--reviewed", "reviewed", "--parent", repo.git("rev-parse", "HEAD")]) == 2
+    assert (
+        rotation.main(
+            [
+                "--reviewed",
+                repo.git("rev-parse", "reviewed"),
+                "--parent",
+                repo.git("rev-parse", "HEAD"),
+            ]
+        )
+        == 2
+    )
     assert (repo.root / ".secrets.baseline").read_bytes() == before
     assert not list(repo.root.glob(".baseline-rotate-*"))
 
@@ -433,6 +447,7 @@ def test_reviewed_result_identity_is_not_reproved_when_retired(repo: Repo) -> No
     path.write_text(_dump(matrix))
     repo.baseline(value)
     reviewed = repo.commit("explicitly reviewed matrix result")
+    repo.git("update-ref", "refs/remotes/origin/main", reviewed)
     repo.matrix("valid new working source")
     result = repo.run(reviewed, reviewed=reviewed)
     assert result.returncode == 0, result.stderr
@@ -475,3 +490,146 @@ def test_inventory_value_must_be_explained_by_source_bytes_even_with_bad_generat
     result = repo.run(parent)
     assert result.returncode == 2 and "not explained by source" in result.stderr
     assert (repo.root / ".secrets.baseline").read_bytes() == before
+
+
+@pytest.mark.parametrize("visibility", ["ignored", "untracked", "tracked"])
+def test_inventory_source_visibility_refuses_plant_then_checks_history_gate(
+    repo: Repo, visibility: str
+) -> None:
+    parent = repo.git("rev-parse", "HEAD")
+    planted = hashlib.sha256(
+        b"R4 source visibility candidate"
+    ).hexdigest()  # pragma: allowlist secret
+    name = "source.txt" if visibility == "tracked" else "untracked.txt"
+    source = repo.root / name
+    source.write_text(f'credential = "{planted}"\n')
+    value = hashlib.sha256(source.read_bytes()).hexdigest()  # pragma: allowlist secret
+    (repo.root / MATRIX).write_text(
+        _dump({"source_fingerprints": [{"path": name, "sha256": value}]})
+    )
+    (repo.root / "scripts/build_current_state.py").write_text("raise SystemExit(0)\n")
+    if visibility == "ignored":
+        (repo.root / ".gitignore").write_text(name + "\n")
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(parent)
+    unchanged = (repo.root / ".secrets.baseline").read_bytes() == before
+    repo.commit("visibility rotation outcome")
+    gate_passed, gate_found = _gate_outcome(repo, value if visibility == "ignored" else planted)
+    (repo.root.parent / "visibility-outcome.json").write_text(
+        json.dumps(
+            {
+                "visibility": visibility,
+                "rotation_exit": result.returncode,
+                "unchanged": unchanged,
+                "history_gate_passed": gate_passed,
+                "history_gate_found_candidate": gate_found,
+            }
+        )
+    )
+    expected = (
+        "outside matrix fingerprints"
+        if visibility == "tracked"
+        else "inventory source is not indexed"
+    )
+    assert result.returncode == 2 and expected in result.stderr
+    assert unchanged and name in result.stderr and planted not in result.stdout + result.stderr
+    assert not gate_passed and gate_found
+
+
+def test_orphan_reviewed_record_refuses_then_history_gate_finds_plant(repo: Repo) -> None:
+    planted = hashlib.sha256(b"R4 orphan review candidate").hexdigest()  # pragma: allowlist secret
+    retired = repo.root / "retired.txt"
+    retired.write_text(f'credential = "{planted}"\n')
+    introduced = repo.commit("unreviewed retired value")
+    retired.unlink()
+    parent = repo.commit("retired value removed")
+    repo.git("update-ref", "refs/remotes/origin/main", parent)
+    repo.git("checkout", "--orphan", "unrelated-reviewed")
+    payload = repo.payload()
+    payload["history_results"]["retired.txt"] = [_history(planted, introduced)]
+    (repo.root / ".secrets.baseline").write_text(_dump(payload))
+    orphan = repo.commit("unrelated authority record")
+    repo.git("switch", "main")
+    repo.matrix("valid working rotation")
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(parent, reviewed=orphan)
+    unchanged = (repo.root / ".secrets.baseline").read_bytes() == before
+    repo.commit("orphan rotation outcome")
+    gate_passed, gate_found = _gate_outcome(repo, planted)
+    (repo.root.parent / "orphan-outcome.json").write_text(
+        json.dumps(
+            {
+                "rotation_exit": result.returncode,
+                "unchanged": unchanged,
+                "history_gate_passed": gate_passed,
+                "history_gate_found_candidate": gate_found,
+            }
+        )
+    )
+    assert result.returncode == 2 and "ancestor of origin/main" in result.stderr
+    assert unchanged and planted not in result.stdout + result.stderr
+    assert not gate_passed and gate_found
+
+
+@pytest.mark.parametrize("form", ["name", "short"])
+def test_reviewed_requires_full_commit_sha(repo: Repo, form: str) -> None:
+    parent = repo.git("rev-parse", "HEAD")
+    reviewed = "reviewed" if form == "name" else parent[:12]
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(parent, reviewed=reviewed)
+    assert result.returncode == 2 and "full 40-hex" in result.stderr
+    assert (repo.root / ".secrets.baseline").read_bytes() == before
+
+
+def test_branch_only_review_is_not_authority(repo: Repo) -> None:
+    repo.git("switch", "-qc", "branch")
+    value = repo.matrix("branch-only source")
+    repo.baseline(value)
+    branch = repo.commit("branch-only reviewed record")
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(branch, reviewed=branch)
+    assert result.returncode == 2 and "ancestor of origin/main" in result.stderr
+    assert (repo.root / ".secrets.baseline").read_bytes() == before
+
+
+def test_reviewed_must_be_ancestor_of_a_selected_parent(repo: Repo) -> None:
+    parent = repo.git("rev-parse", "HEAD")
+    value = repo.matrix("later main source")
+    repo.baseline(value)
+    reviewed = repo.commit("later main record")
+    repo.git("update-ref", "refs/remotes/origin/main", reviewed)
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(parent, reviewed=reviewed)
+    assert result.returncode == 2 and "ancestor of any parent" in result.stderr
+    assert (repo.root / ".secrets.baseline").read_bytes() == before
+
+
+def test_origin_main_is_required(repo: Repo) -> None:
+    parent = repo.git("rev-parse", "HEAD")
+    repo.git("update-ref", "-d", "refs/remotes/origin/main")
+    before = (repo.root / ".secrets.baseline").read_bytes()
+    result = repo.run(parent)
+    assert result.returncode == 2 and "origin/main is absent" in result.stderr
+    assert (repo.root / ".secrets.baseline").read_bytes() == before
+
+
+def test_legitimate_staged_merge_accepts_reviewed_main_parent(repo: Repo) -> None:
+    initial = repo.git("rev-parse", "HEAD")
+    original = json.loads(repo.git("show", initial + ":" + MATRIX))["source_fingerprints"][0][
+        "sha256"
+    ]
+    repo.git("switch", "-qc", "branch")
+    side_value = repo.matrix("side source")
+    repo.baseline(side_value, [_history(original, initial)])
+    side = repo.commit("branch parent")
+    repo.git("switch", "main")
+    main_value = repo.matrix("main source")
+    repo.baseline(main_value, [_history(original, initial)])
+    main = repo.commit("main parent")
+    repo.git("update-ref", "refs/remotes/origin/main", main)
+    merged = repo.matrix("merged staged source")
+    repo.git("add", "source.txt", MATRIX)
+    result = repo.run(side, main, reviewed=main)
+    assert result.returncode == 0, result.stderr
+    assert repo.payload()["results"][MATRIX][0]["hashed_secret"] == _digest(merged)
+    assert len(repo.payload()["history_results"][MATRIX]) == 3
