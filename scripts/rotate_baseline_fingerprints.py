@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import copy
 import hashlib
 import io
@@ -18,6 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Never
 
+from detect_secrets.core.scan import scan_line
 from detect_secrets.core.secrets_collection import SecretsCollection
 from detect_secrets.settings import transient_settings
 
@@ -137,10 +137,37 @@ class Repository:
             )
         return self._matrices[commit]
 
-    def prove(self, key: Identity, entry: dict[str, Any], parent: str) -> None:
-        observed = entry.get("observed_commit")
+    def baseline(self, ref: str) -> tuple[str, dict[str, Any]]:
+        commit = (
+            self.git(
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{ref}^{{commit}}",
+                failure="baseline commit unavailable",
+            )
+            .decode()
+            .strip()
+        )
+        raw = self.git("show", f"{commit}:{BASELINE}")
+        try:
+            payload = json.loads(raw)
+        except ValueError as error:
+            raise RotationError("committed baseline is unreadable") from error
+        if render(payload) != raw:
+            raise RotationError("committed baseline fails writer round-trip")
+        entries(payload, "results")
+        entries(payload, "history_results")
+        return commit, payload
+
+    def prove_new(
+        self, key: Identity, parent: str, observed: str, *, reviewed: bool = False
+    ) -> str:
+        """Find a matrix observation; only unreviewed identities need source-byte proof."""
         label = f"{key[0]!r} hash={key[2][:8]}"
-        if not isinstance(observed, str) or re.fullmatch(r"[0-9a-f]{40}", observed) is None:
+        if key[0] != MATRIX or key[1] != HEX_TYPE:
+            raise RotationError(f"new non-matrix identity {label}")
+        if re.fullmatch(r"[0-9a-f]{40}", observed) is None:
             raise RotationError(f"unavailable commit for {label}")
         self.git(
             "merge-base",
@@ -149,44 +176,79 @@ class Repository:
             parent,
             failure=f"unavailable commit for {label}",
         )
-        if key[0] == MATRIX and key[2] not in self.matrix(observed):
-            candidates = self.git("rev-list", parent, "--", MATRIX).decode().splitlines()
-            for candidate in candidates:
+        candidates = [observed, *self.git("rev-list", parent, "--", MATRIX).decode().splitlines()]
+        unproved_source: str | None = None
+        for candidate in dict.fromkeys(candidates):
+            try:
+                values = self.matrix(candidate)
+            except RotationError:
+                continue
+            if key[2] not in values:
+                continue
+            if reviewed:
+                return candidate
+            source, _, value = values[key[2]]
+            if Path(source).name == ".env":
+                raise RotationError(f"unsafe committed source for {label}")
+            source_commits = [
+                candidate,
+                *self.git("rev-list", parent, "--", source).decode().splitlines(),
+            ]
+            for source_commit in dict.fromkeys(source_commits):
                 try:
-                    values = self.matrix(candidate)
+                    raw = self.git("show", f"{source_commit}:{source}")
                 except RotationError:
                     continue
-                if key[2] in values:
-                    entry["observed_commit"] = candidate
-                    break
-            else:
-                raise RotationError(f"unfindable value for {label}")
-        if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
-            raise RotationError(f"missing review reason for {label}")
-
-    def pinned_history(self, parent: str, count: int) -> bool:
-        """Retain existing current/history overlap only when its committed count pin requires it."""
-        try:
-            tree = ast.parse(
-                self.git("show", f"{parent}:tests/unit/test_release_security.py").decode()
+                if hashlib.sha256(raw).hexdigest() == value:
+                    return candidate
+            unproved_source = source
+        if unproved_source is not None:
+            raise RotationError(
+                f"value not proved from committed source {unproved_source!r}: {label}"
             )
-        except RotationError:
-            return False
-        return any(
-            isinstance(node, ast.Compare)
-            and isinstance(node.left, ast.Call)
-            and isinstance(node.left.func, ast.Name)
-            and node.left.func.id == "len"
-            and len(node.left.args) == 1
-            and isinstance(node.left.args[0], ast.Name)
-            and node.left.args[0].id == "historical_candidates"
-            and len(node.ops) == 1
-            and isinstance(node.ops[0], ast.Eq)
-            and len(node.comparators) == 1
-            and isinstance(node.comparators[0], ast.Constant)
-            and node.comparators[0].value == count
-            for node in ast.walk(tree)
-        )
+        raise RotationError(f"unfindable value for {label}")
+
+    def note_carried(self, key: Identity, entry: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Observation only: the reviewed record remains authoritative and unchanged."""
+        observed = entry.get("observed_commit", "")
+        found = False
+        try:
+            if not isinstance(observed, str) or re.fullmatch(r"[0-9a-f]{40}", observed) is None:
+                raise RotationError("carried observation unavailable")
+            if Path(key[0]).name == ".env":
+                raise RotationError("carried observation unavailable")
+            if key[0] == MATRIX:
+                found = key[2] in self.matrix(observed)
+            else:
+                raw = self.git("show", f"{observed}:{key[0]}").decode()
+                with (
+                    transient_settings(scanner_settings(payload)),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    found = any(
+                        secret.type == key[1] and secret.secret_hash == key[2]
+                        for line in raw.splitlines()
+                        for secret in scan_line(line)
+                    )
+        except (RotationError, UnicodeError):
+            pass
+        if not found:
+            short_commit = observed[:8] if isinstance(observed, str) else "unknown"
+            print(
+                f"NOTE carried {key[0]!r} hash={key[2][:8]} "
+                f"observed={short_commit} lacks value; unchanged"
+            )
+
+
+def scanner_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    config = copy.deepcopy(payload)
+    config["filters_used"] = [
+        f
+        for f in config["filters_used"]
+        if f["path"] != "detect_secrets.filters.common.is_ignored_due_to_verification_policies"
+    ]
+    return config
 
 
 def scan(root: Path, payload: dict[str, Any]) -> dict[Identity, int]:
@@ -208,12 +270,7 @@ def scan(root: Path, payload: dict[str, Any]) -> dict[Identity, int]:
         .decode()
         .split("\0")
     )
-    config = copy.deepcopy(payload)
-    config["filters_used"] = [
-        f
-        for f in config["filters_used"]
-        if f["path"] != "detect_secrets.filters.common.is_ignored_due_to_verification_policies"
-    ]
+    config = scanner_settings(payload)
     collection = SecretsCollection(root=str(root))
     with transient_settings(config), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         for path in paths:
@@ -227,35 +284,31 @@ def scan(root: Path, payload: dict[str, Any]) -> dict[Identity, int]:
     }
 
 
-def plan(root: Path, refs: Sequence[str]) -> bytes:
+def plan(root: Path, refs: Sequence[str], reviewed_ref: str) -> bytes:
     repository = Repository(root)
+    reviewed_commit, reviewed = repository.baseline(reviewed_ref)
+    reviewed_current = entries(reviewed, "results")
+    reviewed_history = entries(reviewed, "history_results")
+    trusted = reviewed_current.keys() | reviewed_history.keys()
+    for key, entry in reviewed_history.items():
+        repository.note_carried(key, entry, reviewed)
     parents: list[tuple[str, dict[str, Any], dict[str, tuple[str, int, str]]]] = []
-    allowed_overlap: set[Identity] = set()
+    new_history: dict[tuple[str, Identity], dict[str, Any]] = {}
     for ref in refs:
-        commit = (
-            repository.git(
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                f"{ref}^{{commit}}",
-                failure="parent commit unavailable",
-            )
-            .decode()
-            .strip()
-        )
-        raw = repository.git("show", f"{commit}:{BASELINE}")
-        try:
-            payload = json.loads(raw)
-        except ValueError as error:
-            raise RotationError("committed baseline is unreadable") from error
-        if render(payload) != raw:
-            raise RotationError("committed baseline fails writer round-trip")
+        commit, payload = repository.baseline(ref)
         current = entries(payload, "results")
         history = entries(payload, "history_results")
         for key, entry in history.items():
-            repository.prove(key, entry, commit)
-        if repository.pinned_history(commit, len(history)):
-            allowed_overlap.update(current.keys() & history.keys())
+            if key in reviewed_history:
+                continue
+            observed = entry.get("observed_commit", "")
+            if not isinstance(observed, str):
+                raise RotationError(f"unavailable commit at {key[0]!r} hash={key[2][:8]}")
+            proven = repository.prove_new(key, commit, observed, reviewed=key in trusted)
+            new_history[commit, key] = {**entry, "observed_commit": proven}
+        for key in current:
+            if key not in trusted and (key[0] != MATRIX or key[1] != HEX_TYPE):
+                repository.prove_new(key, commit, commit)
         parents.append((commit, payload, repository.matrix(commit)))
 
     # Timestamps are provenance, not scanner policy: retain the newest committed timestamp.
@@ -271,6 +324,10 @@ def plan(root: Path, refs: Sequence[str]) -> bytes:
             if k not in ("results", "history_results", "generated_at")
         } != policy:
             raise RotationError("outside matrix fingerprints: parent scanner policy differs")
+    if {
+        k: v for k, v in reviewed.items() if k not in ("results", "history_results", "generated_at")
+    } != policy:
+        raise RotationError("outside matrix fingerprints: reviewed scanner policy differs")
 
     path = root / MATRIX
     raw_matrix = path.read_bytes()
@@ -299,13 +356,13 @@ def plan(root: Path, refs: Sequence[str]) -> bytes:
         payload: dict[str, Any], source: dict[str, tuple[str, int, str]]
     ) -> dict[Identity, dict[str, Any]]:
         return {
-            key: entry
+            key: reviewed_current.get(key, entry)
             for key, entry in entries(payload, "results").items()
             if not (key[0] == MATRIX and key[1] == HEX_TYPE and key[2] in source)
         }
 
-    expected_outside = outside(anchor, parents[0][2])
-    for _, payload, source in parents[1:]:
+    expected_outside = outside(reviewed, repository.matrix(reviewed_commit))
+    for _, payload, source in parents:
         if outside(payload, source) != expected_outside:
             raise RotationError("outside matrix fingerprints: parent results differ")
     findings = scan(root, anchor)
@@ -323,27 +380,40 @@ def plan(root: Path, refs: Sequence[str]) -> bytes:
         )
 
     result = copy.deepcopy(anchor)
-    result["results"][MATRIX] = [
-        {
-            "type": HEX_TYPE,
-            "filename": MATRIX,
-            "hashed_secret": digest,
-            "is_verified": False,
-            "line_number": data[1],
-            "is_secret": False,
-        }
-        for digest, data in current_inventory.items()
+    result["results"] = copy.deepcopy(reviewed["results"])
+    matrix_results = []
+    for digest, data in current_inventory.items():
+        key = MATRIX, HEX_TYPE, digest
+        if key in reviewed_current and reviewed_current[key]["line_number"] != data[1]:
+            raise RotationError(f"carried result line changed at {MATRIX!r} hash={digest[:8]}")
+        matrix_results.append(
+            reviewed_current.get(
+                key,
+                {
+                    "type": HEX_TYPE,
+                    "filename": MATRIX,
+                    "hashed_secret": digest,
+                    "is_verified": False,
+                    "line_number": data[1],
+                    "is_secret": False,
+                },
+            )
+        )
+    result["results"][MATRIX] = matrix_results + [
+        entry for key, entry in expected_outside.items() if key[0] == MATRIX
     ]
-    history_union: dict[Identity, dict[str, Any]] = {}
+    history_union = dict(reviewed_history)
     for commit, payload, source in parents:
-        for key, entry in entries(payload, "history_results").items():
-            history_union.setdefault(key, entry)
+        for key in entries(payload, "history_results"):
+            if key not in reviewed_history:
+                history_union.setdefault(key, new_history[commit, key])
         for key in entries(payload, "results"):
             if (
                 key[0] == MATRIX
                 and key[1] == HEX_TYPE
                 and key[2] in source
                 and key[2] not in current_inventory
+                and key not in history_union
             ):
                 history_union.setdefault(
                     key,
@@ -351,14 +421,16 @@ def plan(root: Path, refs: Sequence[str]) -> bytes:
                         "type": HEX_TYPE,
                         "hashed_secret": key[2],
                         "is_secret": False,
-                        "observed_commit": commit,
+                        "observed_commit": repository.prove_new(
+                            key, commit, commit, reviewed=key in trusted
+                        ),
                         "reason": REASON,
                     },
                 )
     active = set(entries(result, "results"))
     result["history_results"] = {}
     for key, entry in history_union.items():
-        if key in active and key not in allowed_overlap:
+        if key in active and key not in reviewed_history:
             continue
         result["history_results"].setdefault(key[0], []).append(entry)
     return render(result)
@@ -366,20 +438,23 @@ def plan(root: Path, refs: Sequence[str]) -> bytes:
 
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> Never:
-        raise RotationError("arguments require one or two --parent REF and optional --check")
+        raise RotationError(
+            "arguments require --reviewed REF, one or two --parent REF, and optional --check"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Validate everything before the sole atomic baseline write."""
+    """Validate before atomic replacement; crash durability after replace is not guaranteed."""
     try:
         parser = Parser(description=__doc__)
         parser.add_argument("--parent", action="append", required=True)
+        parser.add_argument("--reviewed", required=True)
         parser.add_argument("--check", action="store_true")
         args = parser.parse_args(argv)
         if len(args.parent) not in (1, 2):
             raise RotationError("one or two parents required")
         root = Path(Repository(Path.cwd()).git("rev-parse", "--show-toplevel").decode().strip())
-        candidate = plan(root, args.parent)
+        candidate = plan(root, args.parent, args.reviewed)
         target = root / BASELINE
         if target.is_symlink():
             raise RotationError("baseline target is a symlink")
@@ -393,15 +468,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.check:
             return 1 if changed else 0
         if changed:
-            with tempfile.NamedTemporaryFile(
-                dir=root, prefix=".baseline-rotate-", delete=False
-            ) as output:
-                temporary = Path(output.name)
-                output.write(candidate)
+            temporary: Path | None = None
             try:
+                with tempfile.NamedTemporaryFile(
+                    dir=root, prefix=".baseline-rotate-", delete=False
+                ) as output:
+                    temporary = Path(output.name)
+                    output.write(candidate)
                 os.replace(temporary, target)
             finally:
-                temporary.unlink(missing_ok=True)
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         return 0
     except (RotationError, OSError, ValueError, subprocess.SubprocessError) as error:
         # Do not echo subprocess stderr, JSON content or candidate values.
