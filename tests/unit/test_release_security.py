@@ -205,11 +205,14 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 64 at H1B1-R2: 1 superseded generated source fingerprints.
     # 82 at the H1B1/main merge: main's 74 plus the branch's six history entries it did not share
     # and the two runtime.py fingerprints the merged file supersedes (main's and H1B1's).
-    # 83 at DEFER356-R4: runtime.py's two readiness reasons reworded, so its generated
-    # source-inventory fingerprint rotates once more (main's superseded).
-    # 84 at DEFER356-R5: the two readiness reasons reworded again (no longer single out
-    # closes), so runtime.py's generated source-inventory fingerprint rotates once more.
-    assert len(historical_candidates) == 84
+    # 84 at TIDY-R4: main's 82 plus this branch's two (the superseded official_ibkr.py
+    # inventory values at 72e404a and at 8cc781c, which exists only on this branch: land
+    # by a real merge commit).
+    # 83 at DEFER356-R4 and 84 at DEFER356-R5 on the reconcile-defer-356 branch: runtime.py's two
+    # readiness reasons reworded twice, each rotating its generated source fingerprint.
+    # 86 at the DEFER356/main merge: main's 84 (TIDY-R4) plus the branch's runtime.py history
+    # entries main does not share, rotated from both committed parents.
+    assert len(historical_candidates) == 86
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

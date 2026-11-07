@@ -28,7 +28,7 @@ import math
 import re
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
@@ -294,26 +294,22 @@ _INSTALL_GUIDANCE = (
 
 
 def _new_gateway_notice_codes(
-    before: Sequence[str],
-    after: Sequence[str],
+    notices: Iterable[str],
+    appended: int,
     *,
     limit: int,
 ) -> tuple[int, ...]:
-    """Return bounded gateway codes added after a session marker, never notice text."""
+    """Return bounded gateway codes among the ``appended`` newest notices, never notice text.
 
-    if limit <= 0:
+    ``appended`` is the bridge's monotonic append count since the session marker, not a
+    diff of two windows (RECHECK-348 P3-2). Only notices still in the window can be read.
+    """
+
+    window = tuple(notices)
+    if limit <= 0 or appended <= 0 or not window:
         return ()
-    max_overlap = min(len(before), len(after))
-    overlap = next(
-        (
-            count
-            for count in range(max_overlap, 0, -1)
-            if tuple(before[-count:]) == tuple(after[:count])
-        ),
-        0,
-    )
     codes: list[int] = []
-    for notice in after[overlap:]:
+    for notice in window[-min(appended, len(window)) :]:
         match = _NOTICE_CODE.match(notice)
         if match:
             codes.append(int(match.group(1)))
@@ -1029,7 +1025,7 @@ class OfficialIBKRBroker:
         # Fresh handshake state: stale events must not vouch for a new session
         # (M7 review finding H4).
         self.bridge.reset_for_reconnect()
-        notices_before = tuple(self.bridge.notices)
+        notices_before = self.bridge.notices.appended
         app = _make_app(self.bridge)
         app.connect(self._settings.ib_host, self._settings.ib_port, self._settings.ib_client_id)
         thread = threading.Thread(target=app.run, name="chronos-ibapi-reader", daemon=True)
@@ -1048,8 +1044,8 @@ class OfficialIBKRBroker:
         if not connected or not accounts_seen:
             await self.disconnect()
             notice_codes = _new_gateway_notice_codes(
-                notices_before,
-                tuple(self.bridge.notices),
+                self.bridge.notices,
+                self.bridge.notices.appended - notices_before,
                 limit=3,
             )
             detail = (

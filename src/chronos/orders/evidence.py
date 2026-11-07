@@ -62,6 +62,7 @@ class _OpeningCounter(Protocol):
         current_account_id: str,
         since: datetime,
         evaluated_intent: WheelOrderIntent | None = None,
+        environment: str | None = None,
     ) -> int: ...
 
 
@@ -243,6 +244,7 @@ class BrokerRiskEvidenceProvider:
                 current_account_id=intent.account_id,
                 since=local_midnight.astimezone(UTC),
                 evaluated_intent=intent,
+                environment=self._settings.ib_environment.value,
             )
         except Exception:
             _logger.exception(

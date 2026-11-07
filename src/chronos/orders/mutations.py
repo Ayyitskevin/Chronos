@@ -103,19 +103,88 @@ class OrderModificationService:
                 )
             )
         )
-        # Record a MODIFIED event without changing the lifecycle status.
-        self._tracker_repo.record_transition(
+        # Record a MODIFIED event without changing the lifecycle status. A true CAS
+        # (RECHECK-355 P3-4): a fill or cancel that landed while the broker call was in
+        # flight must not be put back to the status read before the call.
+        self._record_modified(
             intent_id=intent_id,
-            event_key=f"{intent_id}:{broker_order_id}:MODIFIED:{new_limit_price}",
-            source="MODIFY",
-            from_status=intent.status,
-            to_status=intent.status,
-            current_account_id=current_account_id,
             broker_order_id=broker_order_id,
-            evidence={"new_limit_price": format(new_limit_price, "f")},
-            occurred_at=now,
+            new_limit_price=new_limit_price,
+            expected_status=intent.status,
+            current_account_id=current_account_id,
+            now=now,
         )
         return submission
+
+    def _record_modified(
+        self,
+        *,
+        intent_id: str,
+        broker_order_id: int,
+        new_limit_price: Decimal,
+        expected_status: OrderLifecycle,
+        current_account_id: str,
+        now: datetime,
+    ) -> None:
+        """Write the MODIFIED event after the broker call, never silently skipping it.
+
+        REVIEW-TIDY P3-3. The broker has already re-priced the order and the intent row does not
+        carry the price, so this event is the only durable record of it. When the compare-and-set
+        writes nothing, re-read the status to tell why:
+
+        * unchanged: the event key was already recorded (the same price asked twice); benign,
+          logged as a duplicate, not as a moved status.
+        * moved to another working status (a partial fill): retry once from the current status.
+          Same event type, same evidence; the order is still working at the new limit.
+        * moved to a terminal status: raise, as the cancel completion does for a contradicting
+          terminal status. The recorded status stands, nothing is written over a settled order,
+          and the operator sees a 409 telling them to reconcile. No readiness freeze is added
+          here (D-69 is an open decision about freezes), and no new event type.
+        """
+
+        evidence = {"new_limit_price": format(new_limit_price, "f")}
+        event_key = f"{intent_id}:{broker_order_id}:MODIFIED:{new_limit_price}"
+
+        def write(from_status: OrderLifecycle) -> bool:
+            return self._tracker_repo.record_transition(
+                intent_id=intent_id,
+                event_key=event_key,
+                source="MODIFY",
+                from_status=from_status,
+                to_status=from_status,
+                current_account_id=current_account_id,
+                broker_order_id=broker_order_id,
+                evidence=evidence,
+                occurred_at=now,
+                enforce_from_status=True,
+            )
+
+        if write(expected_status):
+            return
+        current = self._intents.get(intent_id, current_account_id=current_account_id)
+        status = current.status if current is not None else None
+        if status is expected_status:
+            logger.info(
+                "modify_event_duplicate: this modify was already recorded for this order",
+                extra={"event": "modify_event_duplicate", "intent_id": intent_id},
+            )
+            return
+        if status is not None and not is_terminal(status) and write(status):
+            logger.warning(
+                "modify_status_moved: recorded from the current status after a move in flight",
+                extra={"event": "modify_status_moved", "intent_id": intent_id},
+            )
+            return
+        logger.warning(
+            "modify_status_moved: the re-price was not recorded",
+            extra={"event": "modify_status_moved", "intent_id": intent_id},
+        )
+        shown = status.value if status is not None else "unknown"
+        raise OrderMutationError(
+            f"the modify reached the broker (new limit {format(new_limit_price, 'f')}) but the "
+            f"order is now recorded as {shown}; the re-price was not recorded and the recorded "
+            "status stands: reconcile before acting"
+        )
 
 
 class OrderCancellationService:
