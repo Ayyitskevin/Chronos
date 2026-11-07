@@ -620,39 +620,52 @@ def _account_summary_reads(source: str) -> list[str]:
     return reads
 
 
-_H1B1_READ_DELTA = (
+_C_READ_SIGNATURE = (
+    "def _read_net_liquidation(self) "
+    "-> tuple[Decimal | None, datetime | None, AccountSummaryProvenance, str]:"
+)
+_C_READ_FAILURE = (
+    'return None, None, AccountSummaryProvenance.UNKNOWN, f"net liquidation unavailable: {error}"'
+)
+_C_READ_SUCCESS = (
+    'return account.net_liquidation, getattr(account, "as_of", None), '
+    'account_summary_provenance(account), ""'
+)
+# The merge-base moves as the stack lands: before H1B1, then H1B1 without C, then C itself.
+_APPROVED_READ_DELTAS = (
     (
-        "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
-        "def _read_net_liquidation(self) "
-        "-> tuple[Decimal | None, datetime | None, AccountSummaryProvenance, str]:",
+        ("def _read_net_liquidation(self) -> tuple[Decimal | None, str]:", _C_READ_SIGNATURE),
+        ('return None, f"net liquidation unavailable: {error}"', _C_READ_FAILURE),
+        ('return account.net_liquidation, ""', _C_READ_SUCCESS),
     ),
     (
-        'return None, f"net liquidation unavailable: {error}"',
-        "return None, None, AccountSummaryProvenance.UNKNOWN, "
-        'f"net liquidation unavailable: {error}"',
-    ),
-    (
-        'return account.net_liquidation, ""',
-        'return account.net_liquidation, getattr(account, "as_of", None), '
-        'account_summary_provenance(account), ""',
+        (
+            "def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:",
+            _C_READ_SIGNATURE,
+        ),
+        ('return None, None, f"net liquidation unavailable: {error}"', _C_READ_FAILURE),
+        ('return account.net_liquidation, getattr(account, "as_of", None), ""', _C_READ_SUCCESS),
     ),
 )
 
 
 def _expected_read_source(path: str, before: str) -> str:
-    """The merge-base source with the approved H1B1 delta applied, if that base predates it.
+    """The merge-base source with the approved delta applied, if that base predates C.
 
-    A base without the old signature already carries the delta, or has moved on from it, so it
-    is compared as it stands. A base with the old signature must take all three edits exactly.
+    A base with an older signature must take all three edits of its delta exactly. A base with
+    neither already carries C, or has moved on from it, so it is compared as it stands.
     """
 
-    if path != "src/chronos/orders/submission.py" or _H1B1_READ_DELTA[0][0] not in before:
+    if path != "src/chronos/orders/submission.py":
         return before
-    expected = before
-    for old, new in _H1B1_READ_DELTA:
-        assert expected.count(old) == 1, old
-        expected = expected.replace(old, new)
-    return expected
+    for delta in _APPROVED_READ_DELTAS:
+        if delta[0][0] in before:
+            expected = before
+            for old, new in delta:
+                assert expected.count(old) == 1, old
+                expected = expected.replace(old, new)
+            return expected
+    return before
 
 
 def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> None:
@@ -709,14 +722,17 @@ def test_3b8_a_landed_base_still_catches_an_edited_read() -> None:
     )
 
 
-def test_3b9_a_base_with_only_part_of_the_delta_text_is_refused() -> None:
+@pytest.mark.parametrize(
+    "partial",
+    [
+        "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:\n"
+        '    return account.net_liquidation, ""',
+        "def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:\n"
+        '    return account.net_liquidation, getattr(account, "as_of", None), ""',
+    ],
+)
+def test_3b9_a_base_with_only_part_of_the_delta_text_is_refused(partial: str) -> None:
     path = "src/chronos/orders/submission.py"
-    partial = "\n".join(
-        (
-            "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
-            '    return account.net_liquidation, ""',
-        )
-    )
     with pytest.raises(AssertionError, match="net liquidation unavailable"):
         _expected_read_source(path, partial)
 
