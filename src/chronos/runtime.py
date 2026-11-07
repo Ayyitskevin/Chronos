@@ -298,12 +298,15 @@ class AppRuntime:
             reason = "portfolio reconciliation did not produce complete evidence"
         elif portfolio.snapshot.open_orders:
             status = ReconciliationStatus.PENDING
-            reason = "broker open orders remain; another opening action is locked"
+            reason = (
+                "broker open orders remain; "
+                "no new order can be submitted until a pass proves parity"
+            )
         elif not restart.permits_new_opening_order:
             status = ReconciliationStatus.PENDING
             reason = (
                 "sent-active order intents remain after restart reconciliation; "
-                "another opening action is locked"
+                "no new order can be submitted until they resolve"
             )
         else:
             status = ReconciliationStatus.RECONCILED

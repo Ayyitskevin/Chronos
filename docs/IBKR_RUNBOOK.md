@@ -108,6 +108,22 @@ are a local history conflict, also refused by SUBMISSION_UNKNOWN operator resolu
 both IDs in TWS, preserve the event history, and keep the intent held for owner review; cancelling
 a venue row does not erase that persisted conflict.
 
+A `below the witnessed lower bound` hold means the venue's terminal figure is below the largest fill
+figure already recorded for the intent. It has no operator route: `POST /orders/{id}/resolve`
+applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconciling again holds again,
+across restarts, because the recorded floor never lowers. It clears only if the venue later reports
+a figure at or above the recorded one; nothing else clears it. While it lasts no new order can be
+submitted, even on an otherwise flat account; that is what the hold adds. A position cannot be
+closed through Chronos today in any case, hold or not: any held position keeps readiness in
+MANUAL_REVIEW (HELD_POSITION_UNPROVEN) until allocation provenance exists, so close the position in
+TWS if it must be closed. A close in TWS is a
+manual trade Chronos did not originate and records nowhere: it does not clear this hold, readiness
+stays locked by the hold whatever the position does, and the execution-plane gate
+(`src/chronos/execution/reconciliation.py`) blocks trading on any resulting position it cannot map
+to a Chronos fill (UNEXPLAINED_POSITION): resolve that under "Position mismatch" below, document
+the manual trade, and rearm with a note. Stop and escalate to the owner with the intent id, both
+figures and the TWS trade log; do not edit the database.
+
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
    ```bash
@@ -149,6 +165,22 @@ halted (`STATE_CORRUPTION` / `UNKNOWN_ORDER` in `src/chronos/control/halt.py`).
    the broker if it should not be working.
 4. Record what you found (docs/INCIDENT_RESPONSE.md evidence capture).
 5. Rearm with a note describing the resolution.
+
+### Daily opening cap refuses after a failed propose (broker error or stale account summary)
+
+Meaning: `max_opening_orders_per_day` counts every opening intent created since local midnight in
+the market timezone, including a `DRAFT` left behind when `POST /orders/propose` failed inside
+evidence gathering: a broker read error (the route answers 500) or, since #353, an account summary
+older than `account_summary_max_age_seconds` (409). The row is created before evidence is
+gathered, so no risk decision exists for it. Three such failures spend a cap of three.
+
+What you can do: nothing clears or completes the draft through a route. Proposing the same order
+again makes a new intent with new ids, which the draft's idempotency key refuses as a duplicate for
+the rest of the trading day (the route answers 500); propose a different order, or wait. `GET
+/orders` shows `DRAFT` rows with no `risk_snapshot_id` but no creation time, so it cannot tell
+today's drafts from older ones; if that matters, only the owner can check, from the database. The
+count resets at local midnight in the market timezone. The cap is a safety limit: raising it for
+the day is the owner's decision, not a workaround.
 
 ### Position mismatch (UNEXPLAINED_POSITION)
 

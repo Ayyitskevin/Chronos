@@ -1967,13 +1967,13 @@ def test_5_the_composite_predicate_is_unchanged() -> None:
         (
             "portfolio.snapshot.open_orders",
             "ReconciliationStatus.PENDING",
-            "'broker open orders remain; another opening action is locked'",
+            "'broker open orders remain; no new order can be submitted until a pass proves parity'",
         ),
         (
             "not restart.permits_new_opening_order",
             "ReconciliationStatus.PENDING",
             "'sent-active order intents remain after restart reconciliation; "
-            "another opening action is locked'",
+            "no new order can be submitted until they resolve'",
         ),
         (
             "not restart.permits_new_opening_order",

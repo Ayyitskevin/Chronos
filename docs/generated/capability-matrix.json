@@ -27,7 +27,7 @@
     },
     {
       "path": "src/chronos/runtime.py",
-      "sha256": "438bb47275b6a8704a7e847e9bd306db63546d6a93197d32411e2f53e8609558"
+      "sha256": "b22a7f091bcd94ba85a4ac3ae1093ff438c49a67a99f4c63bbcbca41b8d5b076"
     },
     {
       "path": "src/chronos/api/autonomy_wiring.py",

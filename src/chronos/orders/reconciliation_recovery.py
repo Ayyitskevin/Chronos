@@ -1373,7 +1373,10 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
-            if figure.quantize(Decimal("0.00000001")) < witnessed:
+            # DEFER356 P3-4: both sides at the stored eight-place scale. The conductor's RECONFLOOR
+            # R3 decision set this scale for the row-bound comparison below; this extends it to the
+            # witnessed comparison. Not a Kevin ruling: Kevin is told in the DEFER356 PR body.
+            if figure.quantize(Decimal("0.00000001")) < witnessed.quantize(Decimal("0.00000001")):
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
@@ -1392,6 +1395,16 @@ class OrderRestartReconciler:
                     ),
                     Decimal("0"),
                 )
+                if row_bound > quantity:
+                    # DEFER356 P3-1: a row-bound sum above the order quantity is never settled: it
+                    # is a genuine overfill or a placeholder (ibapi sizes reach 1e20 and up, where
+                    # quantize would raise and abort the whole pass). Refuse this intent, typed,
+                    # before quantizing, and leave the judgement to review.
+                    return _SettlePlan(
+                        "refuse",
+                        f"snapshot fill conflict: row-bound snapshot executions {row_bound} exceed "
+                        f"the order quantity {quantity}; held for review",
+                    )
                 if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
                     Decimal("0.00000001")
                 ):

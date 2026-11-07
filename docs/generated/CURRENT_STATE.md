@@ -221,7 +221,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
 | src/chronos/config/settings.py | `8ee2ef74849a79da2c8d9b3530cfbfb3b58c244e3c953297cda785fbe6a2e961` |
 | src/chronos/domain/enums.py | `816081fa7bb52cc646e3aae7b8a3c796521d873b0206c25f66463f95a257a776` |
-| src/chronos/runtime.py | `438bb47275b6a8704a7e847e9bd306db63546d6a93197d32411e2f53e8609558` |
+| src/chronos/runtime.py | `b22a7f091bcd94ba85a4ac3ae1093ff438c49a67a99f4c63bbcbca41b8d5b076` |
 | src/chronos/api/autonomy_wiring.py | `7ad75c63d850a9d5b8329ae17be16cc151c1be73378c52c75c3f06511d50c6b5` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `c91471b4898c0985762b55cf99b35f8e139587742dc2c493a0d76913fdce3d86` |
