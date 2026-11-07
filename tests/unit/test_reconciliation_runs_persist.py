@@ -668,6 +668,19 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
         )
 
 
+def test_3b7_the_read_pin_still_holds_once_h1b1_is_the_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Landing moves the merge-base to a commit that already carries the H1B1 delta.
+
+    The pin then measures a base with none of the pre-H1B1 text left to rewrite, on main itself
+    and on every later branch. It has to keep comparing reads there, not fail on the rewrite.
+    """
+
+    monkeypatch.setenv("CHRONOS_PACKET_BASE_REF", "HEAD")
+    test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta()
+
+
 @pytest.mark.parametrize(
     ("path", "old", "new"),
     [
