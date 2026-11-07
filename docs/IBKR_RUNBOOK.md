@@ -111,9 +111,11 @@ a venue row does not erase that persisted conflict.
 A `below the witnessed lower bound` hold means the venue's terminal figure is below the largest fill
 figure already recorded for the intent. It has no operator route: `POST /orders/{id}/resolve`
 applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconciling again holds again,
-across restarts, because the recorded floor never lowers and the venue will not report a higher
-figure. New opening orders stay blocked while it lasts. Stop and escalate to the owner with the
-intent id, both figures and the TWS trade log; do not edit the database.
+across restarts, because the recorded floor never lowers. It clears only if the venue later reports
+a figure at or above the recorded one; nothing else clears it. While it lasts every new order
+submission through Chronos is refused, closing orders included (the readiness gate has no
+open/close distinction), so close the position in TWS if it must be closed. Stop and escalate to
+the owner with the intent id, both figures and the TWS trade log; do not edit the database.
 
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
