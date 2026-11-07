@@ -15,7 +15,7 @@ import pytest
 
 from chronos.domain.enums import IBEnvironment, OrderLifecycle
 from chronos.domain.models import OrderSubmission
-from chronos.orders.mutations import OrderModificationService
+from chronos.orders.mutations import OrderModificationService, OrderMutationError
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.order_repositories import OrderIntentRepository, OrderTrackerRepository
 from tests.safety.test_opening_cap_exercised import _ACCOUNT, _MORNING, _database, _intent
@@ -104,7 +104,8 @@ def test_a_modify_that_overlaps_a_fill_does_not_put_the_status_back() -> None:
         tracker=OrderTracker(intents, tracker_repo),
         tracker_repo=tracker_repo,
     )
-    service.modify(intent.intent_id, Decimal("399.00"), current_account_id=_ACCOUNT, now=_NOW)
+    with pytest.raises(OrderMutationError, match="not recorded"):  # REVIEW-TIDY P3-3: not silent
+        service.modify(intent.intent_id, Decimal("399.00"), current_account_id=_ACCOUNT, now=_NOW)
     stored = intents.get(intent.intent_id, current_account_id=_ACCOUNT)
     assert stored is not None and stored.status is OrderLifecycle.FILLED
 
