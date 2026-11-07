@@ -114,8 +114,13 @@ applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconcilin
 across restarts, because the recorded floor never lowers. It clears only if the venue later reports
 a figure at or above the recorded one; nothing else clears it. While it lasts every new order
 submission through Chronos is refused, closing orders included (the readiness gate has no
-open/close distinction), so close the position in TWS if it must be closed. Stop and escalate to
-the owner with the intent id, both figures and the TWS trade log; do not edit the database.
+open/close distinction), so close the position in TWS if it must be closed. A close in TWS is a
+manual trade Chronos did not originate and records nowhere: it does not clear this hold, readiness
+stays locked by the hold whatever the position does, and the execution-plane gate
+(`src/chronos/execution/reconciliation.py`) blocks trading on any resulting position it cannot map
+to a Chronos fill (UNEXPLAINED_POSITION): resolve that under "Position mismatch" below, document
+the manual trade, and rearm with a note. Stop and escalate to the owner with the intent id, both
+figures and the TWS trade log; do not edit the database.
 
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:

@@ -41,7 +41,7 @@ from tests.support.settle_rig import (
 )
 
 from chronos.broker.base import BrokerError
-from chronos.domain.enums import OrderIntent, ProductFamily, ReconciliationStatus
+from chronos.domain.enums import OrderIntent, OrderSide, ProductFamily, ReconciliationStatus
 from chronos.domain.enums import OrderLifecycle as L
 from chronos.domain.models import AccountSummary, BrokerPosition, CancellationResult
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
@@ -147,6 +147,26 @@ def test_documents_that_no_operator_route_clears_the_recorded_floor_hold(rig: Ri
     with pytest.raises(OrderMutationError, match="a cancel is already pending"):
         _cancellation(rig).cancel("intent-1", current_account_id=rig.account, now=NOW)
     assert rig.status() is L.CANCEL_PENDING
+
+
+def test_documents_that_a_manual_close_in_tws_neither_clears_the_hold_nor_is_recorded(
+    rig: Rig,
+) -> None:
+    """A close the operator makes in TWS is a trade Chronos did not originate: the snapshot then
+    carries a SELL execution with no reference, which is neither a witness nor an own fill, so the
+    hold stands, nothing is written, and the permit stays refused."""
+
+    _recorded_seven_then_venue_five(rig)
+    rig.reconcile()
+    before = rig.events()
+    manual_close = venue_execution("manual-close", "5", NOW, ref=None, perm=None)
+    rig.venue.execs.append(manual_close.model_copy(update={"side": OrderSide.SELL}))
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+    assert FLOOR_HOLD in report.unresolved[0].reason
+    assert not report.permits_new_opening_order
 
 
 class _AcknowledgesFive(ScriptedVenue):

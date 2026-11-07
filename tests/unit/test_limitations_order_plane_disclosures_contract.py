@@ -39,6 +39,8 @@ def test_the_recorded_floor_hold_is_disclosed_with_no_operator_route_and_an_esca
     assert "closing orders included" in runbook
     assert "close the position in TWS" in runbook
     assert "at or above the recorded one" in runbook
+    assert "manual trade" in runbook and "does not clear this hold" in runbook
+    assert "UNEXPLAINED_POSITION" in runbook and "rearm with a note" in runbook
     assert "escalate to the owner" in runbook
 
 
