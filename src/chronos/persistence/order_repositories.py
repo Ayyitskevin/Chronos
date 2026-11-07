@@ -303,6 +303,7 @@ class OrderIntentRepository:
         current_account_id: str,
         since: datetime,
         evaluated_intent: WheelOrderIntent | None = None,
+        environment: str | None = None,
     ) -> int:
         """Count opening intents created on/after ``since``, whatever their side.
 
@@ -328,6 +329,10 @@ class OrderIntentRepository:
         row. A mismatch refuses; an unpersisted candidate subtracts nothing. The
         scope check, identity read and count share this session. No lifecycle
         filter is applied: rejected prior attempts still consume the limit.
+
+        RECHECK-345 P3-2: the row's environment is compared with ``environment``,
+        the one the caller is configured for, not with itself. An evaluation
+        without a configured environment refuses rather than skipping the check.
         """
 
         with self._sessions() as session:
@@ -336,6 +341,8 @@ class OrderIntentRepository:
             ).account_fingerprint
             excluded_id = None
             if evaluated_intent is not None:
+                if environment is None:
+                    raise ValueError("Evaluated intent requires the configured environment")
                 if evaluated_intent.account_id != current_account_id:
                     raise ValueError("Evaluated intent account does not match the count scope")
                 row = session.get(OrderIntentRow, evaluated_intent.intent_id)
@@ -352,7 +359,7 @@ class OrderIntentRepository:
                         evaluated_intent.order_type,
                         evaluated_intent.time_in_force,
                         evaluated_intent.outside_rth,
-                        row.environment,
+                        environment,
                         evaluated_intent.correlation_id,
                     )
                     if _economic_signature(row) != expected:
@@ -388,6 +395,17 @@ class OrderIntentRepository:
             row = session.get(OrderIntentRow, intent_id)
             if row is None:
                 raise ValueError(f"Unknown order intent {intent_id!r}")
+            # RECHECK-355 P3-4: a terminal status is never overwritten by a status-only
+            # write (it has no event row, so nothing would record the change). A terminal
+            # repeating itself is not an overwrite.
+            if (
+                row.status != status.value
+                and OrderLifecycle(row.status) in TERMINAL_ORDER_LIFECYCLES
+            ):
+                raise ValueError(
+                    f"Order intent {intent_id!r} is already terminal ({row.status}); "
+                    f"refusing to overwrite it with {status.value}"
+                )
             row.status = status.value
             if confirmation_hash is not None:
                 row.confirmation_hash = confirmation_hash
