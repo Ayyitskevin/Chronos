@@ -44,6 +44,15 @@ class BrokerDataError(BrokerError):
     """Broker data is unavailable, incomplete, or internally inconsistent."""
 
 
+class CompletedOrdersReconnectRequired(BrokerDataError):
+    """A timed-out id-less completed-orders stream tainted this broker session."""
+
+    MESSAGE = "Completed-orders stream timed out; reconnect is required before retrying"
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
 class BrokerSafetyError(BrokerError):
     """An operation crossed a Chronos safety boundary and was blocked."""
 

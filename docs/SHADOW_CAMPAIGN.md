@@ -192,6 +192,19 @@ that lives **outside this repository**.
 
 ### Backend environment
 
+Autonomy maintenance is ON by default. An ordinary backend boot still serves reads and
+reconciliation but builds no autonomy runtime and reports NOT_READY, even without a mandate.
+Only for owner-approved normal campaign operation, put exactly one
+`CHRONOS_AUTONOMY_MAINTENANCE=off` line in the **backend EnvironmentFile actually loaded by
+the unit**, then restart. Do not put it in the repo-root `.env` or rely on `Environment=`:
+systemd's EnvironmentFile wins over that directive. Use the read-only ON/OFF pre-start proof
+in `docs/ops/N3-CUTOVER.md`, “Backend autonomy maintenance”, to discover the exact required
+source, refuse conflicts and verify no final maintenance removal remains before an OFF
+restart. During cutover, the dedicated `UnsetEnvironment=` drop-in wins last and the ON proof
+is mandatory before every boot through step 8; only Kevin's step-9 word permits its removal.
+A foreground demo/UI session can keep maintenance ON; intended SHADOW autonomy additionally
+requires the explicit lift, trusted matching mandate, proposer posture and all other gates.
+
 | Variable | Value | Why |
 |---|---|---|
 | `BROKER_MODE` | `demo` | no broker, no TWS, no gateway |
@@ -199,7 +212,8 @@ that lives **outside this repository**.
 | `DATABASE_URL` | `sqlite:///<state>/chronos.db` | the campaign's journal |
 | `LIVE_KILL_SWITCH_FILE`, `SESSION_BASELINE_FILE` | under `<state>/` | keep them with the database: ADR-0054's two installation witnesses must travel together, and a state directory that disagrees with the database boots the backend under a recovery hold |
 | `BACKEND_TOKEN_FILE` | `<state>/backend_api_token` | the worker is given this file's **value**, never its path |
-| `AUTONOMY_MANDATE_FILE` | the SHADOW mandate | ADR-0017 auto-activates it on boot |
+| `AUTONOMY_MANDATE_FILE` | the SHADOW mandate | activation at boot requires lifted maintenance and the remaining startup gates |
+| `CHRONOS_AUTONOMY_MAINTENANCE` | default ON; explicit `off` only for owner-approved normal operation | process environment only; use the source/readback procedure above, never lift during cutover steps 1–8 |
 | `AUTONOMY_PROPOSERS_FILE` | the registry | §1 |
 | `AUTONOMY_EVIDENCE_BUNDLES` | `1` | §1 |
 | `AUTONOMY_ALERT_FILE` | `<state>/owner_alerts.jsonl` | the trail that survives a database problem |
@@ -218,7 +232,8 @@ first stops the backend:
   Two neighbours also boot but answer differently: a **recovery hold (ADR-0054)** boots read-only and
   `require_writer` answers HTTP 409 until it is acknowledged **and the backend is restarted**
   (acknowledgement takes effect at the next start and does not itself activate a mandate; that restart
-  can auto-activate a configured, valid persistent mandate under ADR-0017, and neither step clears the
+  can activate a configured, valid persistent mandate under ADR-0017 only after maintenance is
+  explicitly lifted and all other startup gates pass; during cutover keep it ON. Neither step clears the
   kill switch, arming or the live gates); a **broken proposer registry** makes
   `require_proposer` answer a different 503 ("the proposer registry is configured but unreadable or
   invalid …"). See `docs/OPERATIONS.md`, "A running backend that refuses proposals".

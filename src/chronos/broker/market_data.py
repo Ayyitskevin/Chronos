@@ -704,6 +704,15 @@ class MarketDataManager:
                 observed_values=(quote,),
                 observed_at=self._now(),
             )
+        if quote.data_quality is DataQuality.LIVE and all(
+            price is None for price in (quote.bid, quote.ask, quote.last, quote.close)
+        ):
+            raise MarketDataUnavailableError(
+                f"Broker returned an empty live quote for {contract.symbol}",
+                contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
+            )
         fetched_at = self._now()
         entry = _CacheEntry(quote, fetched_at)
         self._quote_cache[contract.con_id] = entry
@@ -741,6 +750,15 @@ class MarketDataManager:
         if quote.contract.con_id != contract.con_id:
             raise MarketDataUnavailableError(
                 f"Broker returned a mismatched quote for {contract.symbol}",
+                contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
+            )
+        if quote.data_quality is DataQuality.LIVE and all(
+            price is None for price in (quote.bid, quote.ask, quote.last, quote.close)
+        ):
+            raise MarketDataUnavailableError(
+                f"Broker returned an empty live quote for {contract.symbol}",
                 contract_ids=(contract.con_id,),
                 observed_values=(quote,),
                 observed_at=self._now(),

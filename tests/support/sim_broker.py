@@ -619,6 +619,7 @@ class SimBroker:
                 lifecycle=order.lifecycle,
                 message="order is not working, or its cancel is already pending",
                 timestamp=now,
+                filled_quantity=order.filled,
             )
         if order.cancel_pending:
             order.lifecycle = OrderLifecycle.CANCEL_PENDING
@@ -628,6 +629,7 @@ class SimBroker:
                 lifecycle=OrderLifecycle.CANCEL_PENDING,
                 message="cancel requested; awaiting broker confirmation",
                 timestamp=now,
+                filled_quantity=order.filled,
             )
         order.lifecycle = OrderLifecycle.CANCELLED
         return CancellationResult(
@@ -636,6 +638,7 @@ class SimBroker:
             lifecycle=OrderLifecycle.CANCELLED,
             message="simulated cancel",
             timestamp=now,
+            filled_quantity=order.filled,
         )
 
     # --- internals ----------------------------------------------------------------------------

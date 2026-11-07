@@ -58,7 +58,7 @@ def _bullet(anchor: str) -> str:
 def test_1_the_wired_bullet_states_the_activation_predicate_and_cites_both_modules() -> None:
     bullet = _bullet(WIRED_BULLET)
     accepted = (
-        "does not construct the runtime at all under a recovery hold",
+        "does not construct the runtime at all under maintenance (above) or a recovery hold",
         "with no mandate file configured, autonomy is inert",
         "scoped to this account",
         "submitting mode additionally requires a proposer registry and evidence binding",
@@ -98,11 +98,15 @@ def _if_not_recovery_held_calls_build(tree: ast.AST) -> bool:
         if not isinstance(node, ast.If):
             continue
         test = node.test
-        guards_hold = (
-            isinstance(test, ast.UnaryOp)
-            and isinstance(test.op, ast.Not)
-            and isinstance(test.operand, ast.Name)
-            and test.operand.id == "recovery_held"
+        terms = (
+            test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+        )
+        guards_hold = any(
+            isinstance(term, ast.UnaryOp)
+            and isinstance(term.op, ast.Not)
+            and isinstance(term.operand, ast.Name)
+            and term.operand.id == "recovery_held"
+            for term in terms
         )
         if not guards_hold:
             continue
@@ -171,7 +175,8 @@ def test_3d_account_scope_and_durable_activation_gate_assembly_in_the_wiring_sou
 # The WHOLE accepted sentence (whitespace-collapsed), not a fragment: any rewording of the
 # activation claim or of what an assembled runtime may do fails this pin (Daybreak, r2 HOLD).
 INTRO_ACCEPTED = (
-    "a backend assembles the autonomy runtime at boot only when every conjunct holds: a valid, "
+    "a backend assembles the autonomy runtime at boot only when every conjunct holds: explicit "
+    "`CHRONOS_AUTONOMY_MAINTENANCE=off` in the process environment, a valid, "
     "account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable activation that has "
     "not been revoked, and, for a submitting mode, an authenticated proposer and evidence "
     "posture; an assembled runtime judges proposals inside that mandate and, in a submitting "

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -35,7 +35,7 @@ from chronos.broker.market_data import (
 )
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.domain.enums import DataQuality
-from chronos.domain.models import UnderlyingContract
+from chronos.domain.models import MarketQuote, UnderlyingContract
 
 PERMISSION_CODES = (354, 10089, 10090, 10091, 10186, 10189, 10197)
 AAPL_CON_ID = 999
@@ -257,24 +257,6 @@ async def test_a_snapshot_with_no_quality_report_reads_unknown(
     assert quote.bid is not None  # the prices came; only their quality is unknown
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "B1R-F5 (B1R-F4 in build-ub; renumbered in build-ua-r1, which gives F4 to the "
-        "two-step cancel): a snapshot that ends (tickSnapshotEnd) with a LIVE quality report "
-        "and NO price ticks comes back as a LIVE quote whose bid/ask/last/close are all None "
-        "(official_ibkr.py:2003-2063 builds it from whatever state arrived). The quality says "
-        "LIVE; the data is absent. Fail-closed would be MarketDataUnavailableError (or a "
-        "non-LIVE quality). The MANAGER layer has no emptiness check either: "
-        "MarketDataManager._underlying_quote_locked compares only the con id and then CACHES "
-        "the quote (market_data.py:695-710), so the guarded entry also accepts and serves it "
-        "(the next case). The smoke's own any-value check would catch it on B1 day; nothing "
-        "trades then. ASSUMED-IB that a gateway ever sends a snapshot end with no ticks "
-        "(plausible for an illiquid or closed-market symbol; K4). Owner call: a check in the "
-        "adapter or in the manager (the manager covers every adapter)."
-    ),
-)
 async def test_a_live_snapshot_with_no_prices_is_not_a_live_quote(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
@@ -290,18 +272,6 @@ async def test_a_live_snapshot_with_no_prices_is_not_a_live_quote(
     assert quote.data_quality is not DataQuality.LIVE
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "B1R-F5, the managed path (reader build-ub P2-1): MarketDataManager.underlying_quote "
-        "accepts the all-None LIVE snapshot, CACHES it (market_data.py:707-710) and serves the "
-        "second call from that cache, so there is one reqMktData for two reads and both return "
-        "a LIVE quote with bid/ask/last/close all None. Fail-closed: the manager raises "
-        "MarketDataUnavailableError (or returns a non-LIVE quality) and never caches an empty "
-        "quote. No src fix here."
-    ),
-)
 async def test_the_managed_path_neither_accepts_nor_caches_an_empty_live_quote(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
@@ -325,6 +295,60 @@ async def test_the_managed_path_neither_accepts_nor_caches_an_empty_live_quote(
             continue
         assert read.data_quality is not DataQuality.LIVE  # type: ignore[attr-defined]
     assert _requests(gateway, "reqMktData") == 2  # an empty quote is never served from cache
+
+
+async def test_the_manager_independently_refuses_and_does_not_cache_an_empty_live_quote(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = await _connected()
+    manager = MarketDataManager(broker, sleep=_Sleeps())
+    try:
+        underlying = await _aapl(broker)
+        empty = MarketQuote(
+            contract=underlying, timestamp=datetime.now(tz=UTC), data_quality=DataQuality.LIVE
+        )
+        calls = 0
+
+        async def return_empty(_contract: UnderlyingContract) -> MarketQuote:
+            nonlocal calls
+            calls += 1
+            return empty
+
+        monkeypatch.setattr(broker, "request_underlying_quote", return_empty)
+        for _ in range(2):
+            with pytest.raises(MarketDataUnavailableError) as raised:
+                await manager.underlying_quote(underlying)
+            assert raised.value.contract_ids == (underlying.con_id,)
+            assert raised.value.observed_values == (empty,)
+        assert calls == 2
+        assert manager.cache_entry_count == 0
+    finally:
+        await broker.disconnect()
+
+
+@pytest.mark.parametrize("field", ["bid", "ask", "last", "close"])
+async def test_the_manager_accepts_a_live_quote_with_one_price(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    broker = await _connected()
+    manager = MarketDataManager(broker, sleep=_Sleeps())
+    try:
+        underlying = await _aapl(broker)
+        quote = MarketQuote(
+            contract=underlying,
+            timestamp=datetime.now(tz=UTC),
+            data_quality=DataQuality.LIVE,
+            **{field: Decimal("0")},
+        )
+
+        async def return_quote(_contract: UnderlyingContract) -> MarketQuote:
+            return quote
+
+        monkeypatch.setattr(broker, "request_underlying_quote", return_quote)
+        assert (await manager.underlying_quote(underlying)).quote == quote
+        assert (await manager.underlying_quote(underlying)).from_cache is True
+    finally:
+        await broker.disconnect()
 
 
 # --- 5. id-less refusals and notices --------------------------------------------------------

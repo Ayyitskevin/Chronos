@@ -25,11 +25,12 @@ import contextlib
 import heapq
 import logging
 import math
+import re
 import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from chronos.broker.base import (
@@ -39,6 +40,7 @@ from chronos.broker.base import (
     BrokerRefusedBeforeSend,
     BrokerSafetyError,
     BrokerSendGuard,
+    CompletedOrdersReconnectRequired,
     OptionChainResponse,
     OrderOwnershipLedger,
     VenueOrderIdentity,
@@ -282,12 +284,40 @@ _LIVE_PORTS = LIVE_API_PORTS
 # validation failures. Ambiguous codes deliberately stay out — those leave the
 # intent SUBMISSION_UNKNOWN for reconciliation (M7 review finding H2).
 _DEFINITIVE_ORDER_REJECT_CODES = frozenset({110, 201, 203, 321, 10268})
+_NOTICE_CODE = re.compile(r"^\[(-?\d+)\]")
 
 _INSTALL_GUIDANCE = (
     "The official IBKR TWS API package (ibapi) is not installed. It is not on "
     "PyPI: download the TWS API from interactivebrokers.github.io, then install "
     "the bundled Python client (see docs/ibkr_setup.md). Demo mode runs without it."
 )
+
+
+def _new_gateway_notice_codes(
+    before: Sequence[str],
+    after: Sequence[str],
+    *,
+    limit: int,
+) -> tuple[int, ...]:
+    """Return bounded gateway codes added after a session marker, never notice text."""
+
+    if limit <= 0:
+        return ()
+    max_overlap = min(len(before), len(after))
+    overlap = next(
+        (
+            count
+            for count in range(max_overlap, 0, -1)
+            if tuple(before[-count:]) == tuple(after[:count])
+        ),
+        0,
+    )
+    codes: list[int] = []
+    for notice in after[overlap:]:
+        match = _NOTICE_CODE.match(notice)
+        if match:
+            codes.append(int(match.group(1)))
+    return tuple(codes[-limit:])
 
 
 def _with_session_evidence[T: (UnderlyingContract, OptionContract)](
@@ -999,6 +1029,7 @@ class OfficialIBKRBroker:
         # Fresh handshake state: stale events must not vouch for a new session
         # (M7 review finding H4).
         self.bridge.reset_for_reconnect()
+        notices_before = tuple(self.bridge.notices)
         app = _make_app(self.bridge)
         app.connect(self._settings.ib_host, self._settings.ib_port, self._settings.ib_client_id)
         thread = threading.Thread(target=app.run, name="chronos-ibapi-reader", daemon=True)
@@ -1016,10 +1047,20 @@ class OfficialIBKRBroker:
         )
         if not connected or not accounts_seen:
             await self.disconnect()
+            notice_codes = _new_gateway_notice_codes(
+                notices_before,
+                tuple(self.bridge.notices),
+                limit=3,
+            )
+            detail = (
+                f" Recent broker notice codes: {', '.join(str(code) for code in notice_codes)}"
+                if notice_codes
+                else ""
+            )
             raise BrokerConnectionError(
                 "TWS/Gateway did not complete the connection handshake "
                 f"within {_CONNECT_TIMEOUT_S:.0f}s (is the API enabled on "
-                f"{self._settings.ib_host}:{self._settings.ib_port}?)"
+                f"{self._settings.ib_host}:{self._settings.ib_port}?){detail}"
             )
         if self.bridge.next_valid_id is not None:
             self.order_ids.seed(self.bridge.next_valid_id)
@@ -1373,18 +1414,28 @@ class OfficialIBKRBroker:
 
         app = self._require_app()
         flight = self.bridge.start_completed_orders()
-        app.reqCompletedOrders(True)
-        done = await asyncio.get_running_loop().run_in_executor(
-            None, flight.done.wait, _REQUEST_TIMEOUT_S
-        )
-        if not done or self.bridge.connection_closed.is_set():
-            raise BrokerConnectionError("completed-orders request did not complete")
-        records: list[BrokerOrder] = []
-        for contract, order, order_state in flight.items:
-            record = self._completed_record(contract, order, order_state)
-            if record is not None:
-                records.append(record)
-        return tuple(records)
+        request_sent = False
+        try:
+            app.reqCompletedOrders(True)
+            request_sent = True
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            if not done:
+                raise CompletedOrdersReconnectRequired
+            if self.bridge.connection_closed.is_set():
+                raise BrokerConnectionError("completed-orders request did not complete")
+            records: list[BrokerOrder] = []
+            for contract, order, order_state in flight.items:
+                record = self._completed_record(contract, order, order_state)
+                if record is not None:
+                    records.append(record)
+            return tuple(records)
+        finally:
+            self.bridge.release_completed_orders(
+                flight,
+                taint_if_incomplete=request_sent,
+            )
 
     def _completed_record(self, contract: Any, order: Any, order_state: Any) -> BrokerOrder | None:
         order_ref = str(getattr(order, "orderRef", "") or "")
@@ -2257,11 +2308,21 @@ class OfficialIBKRBroker:
             raise request_error
         if state is None:
             raise BrokerDataError(f"no quote state for conId {con_id}")
-        return quote_from_state(
+        quote = quote_from_state(
             state,
             contract=instrument,
             timestamp=state.completed_at or datetime.now(tz=UTC),
         )
+        if quote.data_quality is DataQuality.LIVE and all(
+            price is None for price in (quote.bid, quote.ask, quote.last, quote.close)
+        ):
+            raise MarketDataUnavailableError(
+                f"official IBKR returned an empty live quote for conId {con_id}",
+                contract_ids=(con_id,),
+                observed_values=(quote,),
+                observed_at=quote.timestamp,
+            )
+        return quote
 
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None:
         requested = tuple(
@@ -2722,6 +2783,23 @@ class OfficialIBKRBroker:
         finally:
             self.bridge.clear_order_ack(broker_order_id)
         raw_status = str(payload[2]) if payload and payload[0] == "orderStatus" else ""
+        filled_quantity: Decimal | None = None
+        if payload and payload[0] == "orderStatus" and len(payload) > 3 and payload[3] is not None:
+            quantity_problem: str | None = "cancel acknowledgement fill figures were unreadable"
+            try:
+                candidate_filled = Decimal(str(payload[3]))
+                candidate_remaining = Decimal(str(payload[4]))
+            except (InvalidOperation, IndexError, TypeError, ValueError):
+                pass
+            else:
+                quantity_problem = quantity_refusal(candidate_filled, candidate_remaining)
+                if quantity_problem is None:
+                    filled_quantity = candidate_filled
+            if quantity_problem is not None:
+                self.bridge.notices.append(
+                    f"[order-quantity] cancel acknowledgement for order {broker_order_id}: "
+                    f"{quantity_problem}; fill figure treated as absent"
+                )
         lowered = raw_status.lower()
         if lowered in {"cancelled", "apicancelled"}:
             lifecycle = OrderLifecycle.CANCELLED
@@ -2737,4 +2815,5 @@ class OfficialIBKRBroker:
             lifecycle=lifecycle,
             message=raw_status or "cancel requested; awaiting broker confirmation",
             timestamp=datetime.now(tz=UTC),
+            filled_quantity=filled_quantity,
         )

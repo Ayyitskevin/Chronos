@@ -429,6 +429,19 @@ def test_a_record_without_an_order_id_still_binds_by_the_other_fields(rig: Rig) 
     assert rig.status() is CANCELLED
 
 
+def test_P1_1_a_broker_id_history_with_two_ids_never_binds_even_if_the_latest_matches(
+    rig: Rig,
+) -> None:
+    rig.broker_id = 9002  # a later event records another order id for the same intent
+    rig.event(PF, at=PRIOR, filled="1")
+    rig.pending()
+    rig.venue.completed = [venue_order(CANCELLED, "1", broker_id=9002)]
+    before = len(rig.events())
+    report = rig.reconcile()
+    assert rig.status() is CP and len(rig.events()) == before
+    assert any("identity conflict" in reason for reason in issues(report))
+
+
 def test_a_persisted_permid_conflict_settles_nothing(rig: Rig) -> None:
     rig.event(PF, at=PRIOR, filled="1", permanent_id=PERM_ID + 7)
     rig.pending()
@@ -504,6 +517,22 @@ def test_a_failed_completed_orders_read_is_a_typed_reason_and_writes_nothing(rig
     assert rig.status() is CP and len(rig.events()) == before
     assert any("completed-orders evidence is not available" in r for r in issues(report))
     assert rig.readiness.snapshot().status.value == "PENDING"
+
+
+def test_P3_1_an_overlapping_completed_orders_request_is_a_typed_nonsticky_refusal() -> None:
+    from chronos.broker.base import BrokerDataError
+    from chronos.broker.callbacks import CallbackBridge
+    from chronos.broker.request_registry import RequestRegistry
+
+    bridge = CallbackBridge(RequestRegistry())
+    first = bridge.start_completed_orders()
+    with pytest.raises(BrokerDataError, match="already in flight"):
+        bridge.start_completed_orders()
+    bridge.on_completed_orders_end()
+    bridge.release_completed_orders(first)
+    bridge.start_completed_orders()
+    bridge.reset_for_reconnect()
+    bridge.start_completed_orders()  # a fresh session starts clean
 
 
 def test_completed_orders_are_not_read_while_every_pending_order_is_still_listed(rig: Rig) -> None:

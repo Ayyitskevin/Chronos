@@ -108,6 +108,15 @@ class OrderLifecycle(StrEnum):
     REJECTED = "REJECTED"
 
 
+TERMINAL_ORDER_LIFECYCLES: frozenset[OrderLifecycle] = frozenset(
+    {
+        OrderLifecycle.FILLED,
+        OrderLifecycle.CANCELLED,
+        OrderLifecycle.REJECTED,
+    }
+)
+
+
 class RiskCheckStatus(StrEnum):
     """Tri-state result of one structured risk check; unknown fails closed."""
 
