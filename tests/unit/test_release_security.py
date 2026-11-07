@@ -199,7 +199,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # file supersedes (main's, XFIX-C's and XFIX-C-R1's); XFIX-C's other entry was already on main.
     # 75 at TIDY-R2: official_ibkr.py's source-inventory fingerprint is superseded by the
     # NoticeLog change (the old one is on main 33bb082, which the history entry names).
-    assert len(historical_candidates) == 75
+    # 76 at TIDY-R3: the NoticeLog composition and modify changes supersede that fingerprint
+    # again; the intermediate value is committed in this branch (8cc781c), so it is history too.
+    assert len(historical_candidates) == 76
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
