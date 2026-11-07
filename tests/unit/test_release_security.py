@@ -212,7 +212,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # readiness reasons reworded twice, each rotating its generated source fingerprint.
     # 86 at the DEFER356/main merge: main's 84 (TIDY-R4) plus the branch's runtime.py history
     # entries main does not share, rotated from both committed parents.
-    assert len(historical_candidates) == 86
+    # 87 at FLOORHOLD on the fill-floor-hold-blocker branch: the retired matrix fingerprint,
+    # observed at 92859789 (branch-only: land by a real merge commit).
+    assert len(historical_candidates) == 87
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
