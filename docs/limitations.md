@@ -71,6 +71,15 @@ runbooks.
   across blocking work; it does not prove venue freshness. Broker-side update timestamps or an
   explicitly forced-refresh contract remain an open follow-up before this limitation can narrow.
 
+- **A close-only underlying quote is now refused at the manager.** Since QEMPTY (D-78), a quote
+  with no bid, ask or last is refused even when it carries a prior `close` (for example the
+  market is closed and only the previous close is delivered). At #348 `close` counted as a price.
+  The refusal raises `MarketDataUnavailableError`, so the read-only short-put evaluation drops
+  to its generic "could not be captured safely" outcome and shows no underlying display until a
+  live bid/ask/last arrives. Option batches are different: a refused batch keeps the underlying
+  and chain evidence and reports NO_TRADE. The refusal is the intended fail-closed behaviour,
+  not a defect; the cost is availability of the display outside market hours.
+
 ## Operational health
 
 - `/health` schema v2 separates liveness, service readiness, and PAPER/LIVE/autonomous
