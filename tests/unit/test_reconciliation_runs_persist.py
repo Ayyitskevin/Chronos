@@ -721,6 +721,20 @@ def test_3b9_a_base_with_only_part_of_the_delta_text_is_refused() -> None:
         _expected_read_source(path, partial)
 
 
+def test_3b10_a_base_with_h1b1_reads_takes_the_c_metadata_delta() -> None:
+    """#353 lands before #354, so this branch then measures a base holding H1B1's reads.
+
+    Commits are compared, not the working tree, so a later approved read change stays free.
+    """
+
+    path = "src/chronos/orders/submission.py"
+    h1b1 = _git("show", f"{_commit_by_marker('H1B1 r2 account carry')}:{path}")
+    c_marker = "mark unverified account balances and local read time"
+    c = _git("show", f"{_commit_by_marker(c_marker)}:{path}")
+    assert _account_summary_reads(h1b1) != _account_summary_reads(c)
+    assert _account_summary_reads(_expected_read_source(path, h1b1)) == _account_summary_reads(c)
+
+
 @pytest.mark.parametrize(
     ("path", "old", "new"),
     [
