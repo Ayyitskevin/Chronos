@@ -112,9 +112,11 @@ A `below the witnessed lower bound` hold means the venue's terminal figure is be
 figure already recorded for the intent. It has no operator route: `POST /orders/{id}/resolve`
 applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconciling again holds again,
 across restarts, because the recorded floor never lowers. It clears only if the venue later reports
-a figure at or above the recorded one; nothing else clears it. While it lasts every new order
-submission through Chronos is refused, closing orders included (the readiness gate has no
-open/close distinction), so close the position in TWS if it must be closed. A close in TWS is a
+a figure at or above the recorded one; nothing else clears it. While it lasts no new order can be
+submitted, even on an otherwise flat account; that is what the hold adds. A position cannot be
+closed through Chronos today in any case, hold or not: any held position keeps readiness in
+MANUAL_REVIEW (HELD_POSITION_UNPROVEN) until allocation provenance exists, so close the position in
+TWS if it must be closed. A close in TWS is a
 manual trade Chronos did not originate and records nowhere: it does not clear this hold, readiness
 stays locked by the hold whatever the position does, and the execution-plane gate
 (`src/chronos/execution/reconciliation.py`) blocks trading on any resulting position it cannot map

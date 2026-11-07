@@ -44,8 +44,5 @@ def test_reused_broker_id_holds_are_disclosed_as_fail_closed_with_no_operator_ex
 
     flat = _flat()
     assert "another order that reused the broker id" in flat
-    assert (
-        "blocks every new order submission through Chronos, closing orders included, while the "
-        "execution stays in the snapshot"
-    ) in flat
+    assert "keeps the orders-plane permit refused while the execution stays in the snapshot" in flat
     assert "has no operator exit" in flat

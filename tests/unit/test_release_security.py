@@ -207,7 +207,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # and the two runtime.py fingerprints the merged file supersedes (main's and H1B1's).
     # 83 at DEFER356-R4: runtime.py's two readiness reasons reworded, so its generated
     # source-inventory fingerprint rotates once more (main's superseded).
-    assert len(historical_candidates) == 83
+    # 84 at DEFER356-R5: the two readiness reasons reworded again (no longer single out
+    # closes), so runtime.py's generated source-inventory fingerprint rotates once more.
+    assert len(historical_candidates) == 84
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

@@ -25,9 +25,12 @@ def test_the_recorded_floor_hold_is_disclosed_with_no_operator_route_and_an_esca
 
     limitations, runbook = _flat(LIMITATIONS), _flat(RUNBOOK)
     assert (
-        "holds the intent in `CANCEL_PENDING` and blocks every new order submission through "
-        "Chronos, closing orders included"
-    ) in limitations
+        "holds the intent in `CANCEL_PENDING` and keeps the orders-plane permit refused"
+        in limitations
+    )
+    assert "permanent lock on new opening orders on an otherwise flat account" in limitations
+    assert "for any held position today, hold or not" in limitations
+    assert "`HELD_POSITION_UNPROVEN`" in limitations
     assert (
         "clears only if the venue later reports a figure at or above the recorded one"
         in limitations
@@ -36,7 +39,8 @@ def test_the_recorded_floor_hold_is_disclosed_with_no_operator_route_and_an_esca
     assert "stops and escalates" in limitations
     assert "`below the witnessed lower bound` hold" in runbook
     assert "do not edit the database" in runbook
-    assert "closing orders included" in runbook
+    assert "that is what the hold adds" in runbook
+    assert "hold or not" in runbook and "HELD_POSITION_UNPROVEN" in runbook
     assert "close the position in TWS" in runbook
     assert "at or above the recorded one" in runbook
     assert "manual trade" in runbook and "does not clear this hold" in runbook
