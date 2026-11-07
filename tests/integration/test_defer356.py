@@ -69,6 +69,10 @@ def test_a_placeholder_sized_blank_execution_holds_one_intent_and_the_other_stil
     assert set(held) == {"intent-1"}
     assert held["intent-1"].startswith("snapshot fill conflict:")
     assert "exceed the order quantity" in held["intent-1"]
+    assert held["intent-1"].endswith(
+        "; held for review"
+    )  # no credibility claim: an overfill reads the same
+    assert "not credible" not in held["intent-1"]
     assert rig.status("intent-2") is L.CANCELLED
     assert {item.intent_id for item in report.applied_updates} == {"intent-2"}
     assert not report.permits_new_opening_order
@@ -97,6 +101,8 @@ def test_the_quantity_bound_refuses_only_above_the_order_quantity(
     reason = report.unresolved[0].reason
     assert reason.startswith("snapshot fill conflict:")
     assert ("exceed the order quantity" in reason) is exceeds
+    assert reason.endswith("; held for review") is exceeds
+    assert "not credible" not in reason
 
 
 def test_the_legacy_route_already_holds_a_placeholder_sized_execution_without_aborting(
