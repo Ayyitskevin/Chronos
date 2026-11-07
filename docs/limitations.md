@@ -171,6 +171,10 @@ runbooks.
 
 The reconciler's snapshot fill hold keeps no memory between passes. It compares a terminal row with the executions in the current broker snapshot only, so if an execution leaves the snapshot while the terminal row stays listed, a later pass can settle below the fills seen earlier (for example CANCELLED@0), and nothing records that they were seen. Whether a real gateway can produce that sequence is unverified (K4).
 
+The reconciler's snapshot witnesses match a contract by `con_id` and symbol together, as ruled (RECONFLOOR r2): an execution with the same `con_id` but a different symbol (for example `BRK B` against `BRK.B`) is treated as a different contract, so a terminal row settles (for example CANCELLED@0) instead of holding on it. If IBKR's `con_id` alone is the contract identity, `con_id`-only matching would be the fail-closed choice; this needs checking at the first paper session (K4).
+
+A blank-reference execution that shares an order's account, client, broker id, side and contract counts as a snapshot witness even when it belongs to another order that reused the broker id (ASSUMED-IB). Such a hold fails closed and writes nothing; it blocks new opening orders while the execution stays in the snapshot, clears when the execution leaves, and has no operator exit. Whether IBKR reuses a broker id within one snapshot window is unverified (K4).
+
 ## Persistence and migrations
 
 - Fresh databases are built with SQLAlchemy `create_all` (always the current models); the Alembic
