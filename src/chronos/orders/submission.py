@@ -52,6 +52,10 @@ from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    require_account_summary_freshness,
+)
 from chronos.domain.accounts import classify_observed_environment
 from chronos.domain.enums import (
     ConnectionState,
@@ -442,10 +446,16 @@ class OrderSubmissionBoundary:
             OrderLifecycle.SUBMISSION_UNKNOWN, current_account_id=account_id
         )
         quote = self._read_quote(intent)
-        nlv, nlv_error = self._read_net_liquidation()
+        nlv, nlv_as_of, nlv_error = self._read_net_liquidation()
 
         # 6. Fresh clock AFTER the slow I/O: TTL gates must not pass on stale time.
         fresh_now = self._clock()
+        nlv, nlv_error = self._recheck_net_liquidation(
+            nlv=nlv,
+            as_of=nlv_as_of,
+            nlv_error=nlv_error,
+            now=fresh_now,
+        )
 
         drawdown_breached, drawdown_reason = self._drawdown_evidence(
             nlv=nlv, nlv_error=nlv_error, now=fresh_now
@@ -585,12 +595,39 @@ class OrderSubmissionBoundary:
         except Exception:
             return None
 
-    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:
+    def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:
         try:
             account = self._connection.run(self._connection.broker.account_summary())
-        except BrokerError as error:
+            require_account_summary_freshness(
+                getattr(account, "as_of", None),
+                # This is the only live account-summary freshness sample; take
+                # it immediately after the broker read, before other gates.
+                now=self._clock(),
+                max_age_seconds=self._settings.account_summary_max_age_seconds,
+            )
+        except (BrokerError, AccountSummaryFreshnessError) as error:
+            return None, None, f"net liquidation unavailable: {error}"
+        return account.net_liquidation, getattr(account, "as_of", None), ""
+
+    def _recheck_net_liquidation(
+        self,
+        *,
+        nlv: Decimal | None,
+        as_of: datetime | None,
+        nlv_error: str,
+        now: datetime,
+    ) -> tuple[Decimal | None, str]:
+        if nlv is None:
+            return None, nlv_error
+        try:
+            require_account_summary_freshness(
+                as_of,
+                now=now,
+                max_age_seconds=self._settings.account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
             return None, f"net liquidation unavailable: {error}"
-        return account.net_liquidation, ""
+        return nlv, nlv_error
 
     def _drawdown_evidence(
         self, *, nlv: Decimal | None, nlv_error: str, now: datetime

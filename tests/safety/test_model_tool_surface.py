@@ -357,6 +357,8 @@ def test_an_injected_size_is_still_clamped_by_the_mandate() -> None:
         reference_price=Decimal(100),
         multiplier=Decimal(1),
         evidence=AccountEvidence(
+            as_of=_NOW,
+            clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
             total_cash_usd=Decimal(60_000),
             buying_power_usd=Decimal(60_000),

@@ -55,6 +55,7 @@ from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.services.reconciliation import ReconciliationCoordinator
+from chronos.utils.time import utc_now
 
 UNKNOWN = OrderLifecycle.SUBMISSION_UNKNOWN
 MANAGER_FAILURE = "broker call failed; connection state is uncertain"
@@ -605,6 +606,9 @@ def _gather(manager: BrokerConnectionManager, readiness: ReconciliationReadiness
         connection=manager,
         settings=fake_ibapi.official_settings(),
         reconciliation_readiness=readiness,
+        # OfficialIBKRBroker stamps the synthetic gateway response at wall time;
+        # FIXED_NOW is only the reconciliation fixture's historical event time.
+        clock=utc_now,
     )
     intent = build_option_intent(
         account_id=fake_ibapi.ACCOUNT,

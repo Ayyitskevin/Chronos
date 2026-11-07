@@ -41,6 +41,7 @@ from chronos.services.short_put_demo_approval import (
     ShortPutDemoApprovalRequest,
     ShortPutDemoApprovalResult,
     ShortPutDemoApprovalService,
+    _DemoApprovalEvidenceError,
 )
 from chronos.services.short_put_demo_what_if import (
     DemoWhatIfStatus,
@@ -836,6 +837,47 @@ def test_stale_or_impossible_m7_time_is_withheld(
         assert result.receipt is None
         assert len(calls) == 1
         _assert_no_order_methods(harness)
+    finally:
+        harness.close()
+
+
+def test_approval_rechecks_account_summary_with_the_configured_age(
+    tmp_path: Path,
+) -> None:
+    harness = _approval_harness(tmp_path)
+    risk = harness.what_if.risk_refresh
+    assert risk is not None and risk.candidate_refresh is not None
+    refresh = risk.candidate_refresh
+    assert refresh.reconciliation is not None and refresh.reconciliation.snapshot is not None
+    snapshot = refresh.reconciliation.snapshot
+    stale_snapshot = snapshot.model_copy(
+        update={
+            "account": snapshot.account.model_copy(
+                update={"as_of": demo_now() - timedelta(seconds=3)}
+            )
+        }
+    )
+    stale_refresh = refresh.model_copy(
+        update={
+            "reconciliation": refresh.reconciliation.model_copy(update={"snapshot": stale_snapshot})
+        }
+    )
+    stale_risk = risk.model_copy(update={"candidate_refresh": stale_refresh})
+    stale_what_if = harness.what_if.model_copy(update={"risk_refresh": stale_risk})
+    settings = harness.base.settings.model_copy(update={"account_summary_max_age_seconds": 2})
+    try:
+        with pytest.raises(
+            _DemoApprovalEvidenceError,
+            match="Reconciled account capital is not fresh",
+        ):
+            ShortPutDemoApprovalService._require_fresh_what_if(
+                _request(harness),
+                stale_what_if,
+                expected_request=stale_what_if.request,
+                attempted_at=demo_now() - timedelta(seconds=10),
+                completed_at=demo_now(),
+                settings=settings,
+            )
     finally:
         harness.close()
 

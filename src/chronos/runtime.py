@@ -529,6 +529,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         )
         short_put_risk_preview = ShortPutRiskPreviewService(
             short_put_candidates,
+            account_summary_max_age_seconds=settings.account_summary_max_age_seconds,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
         short_put_demo_what_if = ShortPutDemoWhatIfService(
@@ -710,6 +711,7 @@ def _build_order_management(
             connection=connection,
             settings=settings,
             reconciliation_readiness=reconciliation_readiness,
+            clock=demo_now if isinstance(connection.broker, DemoBroker) else utc_now,
             # The repository that makes `max_opening_orders_per_day` real (R-25).
             # Same instance the submission boundary writes intents through, so
             # the cap counts the rows this process is creating.

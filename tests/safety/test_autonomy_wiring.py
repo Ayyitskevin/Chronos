@@ -23,6 +23,7 @@ allowed to change and the ones it is *not*:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -66,7 +67,7 @@ from chronos.autonomy import (
     VersionPins,
 )
 from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import BrokerMode, DataQuality
 from chronos.domain.models import MarketQuote, UnderlyingContract
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.persistence.database import Database
@@ -76,6 +77,7 @@ from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import HandoffDisposition
 from chronos.supervisor.runtime import AutonomyRuntime
 from chronos.utils.identifiers import account_fingerprint
+from tests.support import position_evidence as pe
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY, TEST_PERSISTENCE_KEY_HEX
 
 _NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
@@ -548,6 +550,30 @@ def test_a_matching_mandate_assembles_a_live_runtime(database: Database, tmp_pat
         )
     assert activation is not None
     assert activation.process_generation == 9
+
+
+def test_demo_runtime_binds_demo_clock_for_cycle_account_freshness(
+    database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronos.api import autonomy_wiring
+
+    monkeypatch.setattr(autonomy_wiring, "demo_now", lambda: pe.NOW)
+    shadow = _mandate(
+        mode=AutonomyMode.SHADOW,
+        promotions=(
+            FamilyPromotion(asset_class=TradableAssetClass.EQUITY, level=PromotionLevel.SHADOW),
+        ),
+    )
+    runtime = _runtime(database, tmp_path, mandate_file=_write_mandate(tmp_path, shadow))
+    runtime.settings.broker_mode = BrokerMode.DEMO
+    runtime.broker = pe.Broker()
+    runtime.connection = SimpleNamespace(run=asyncio.run)
+
+    autonomy = build_autonomy_runtime(runtime, process_generation=9, is_writer=lambda: True)
+
+    assert isinstance(autonomy, AutonomyRuntime)
+    facts = autonomy._gather_facts(pe.NOW + timedelta(seconds=31))
+    assert facts is not None
 
 
 def test_the_evidence_verification_limits_reach_the_production_runtime(

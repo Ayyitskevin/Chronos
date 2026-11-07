@@ -11,6 +11,10 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     DataQuality,
     EligibilityStatus,
@@ -203,9 +207,11 @@ class ShortPutRiskPreviewService:
         self,
         candidate_service: ShortPutCandidateEvaluator,
         *,
+        account_summary_max_age_seconds: int = 30,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._candidate_service = candidate_service
+        self._account_summary_max_age_seconds = account_summary_max_age_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def preview(self, request: ShortPutRiskPreviewRequest) -> ShortPutRiskPreviewResult:
@@ -332,6 +338,7 @@ class ShortPutRiskPreviewService:
             refresh,
             candidate,
             attempted_at=attempted_at,
+            account_summary_max_age_seconds=self._account_summary_max_age_seconds,
         )
 
         contract = candidate.contract
@@ -460,6 +467,7 @@ class ShortPutRiskPreviewService:
         candidate: RankedCandidate,
         *,
         attempted_at: datetime,
+        account_summary_max_age_seconds: int,
     ) -> None:
         contract = candidate.contract
         resolution = refresh.resolution
@@ -474,6 +482,17 @@ class ShortPutRiskPreviewService:
             raise _RiskPreviewEvidenceError(
                 "The selected candidate is missing a reconciled account snapshot."
             )
+        try:
+            require_account_summary_freshness(
+                getattr(snapshot.account, "as_of", None),
+                now=attempted_at,
+                max_age_seconds=account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
+            raise _RiskPreviewEvidenceError(
+                "The account summary is not fresh "
+                f"({error.reason.value}); timestamps are outside the risk-preview window."
+            ) from error
         max_age_seconds = resolution.policy.max_quote_age_seconds
         if not max_age_seconds.is_finite() or max_age_seconds <= 0:
             raise _RiskPreviewEvidenceError(

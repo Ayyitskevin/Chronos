@@ -22,6 +22,10 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 from chronos.broker.base import Broker
 from chronos.broker.demo import DemoBroker
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     BrokerMode,
     DataQuality,
@@ -1013,6 +1017,16 @@ class ShortPutDemoApprovalService:
                 "Fresh M7 evidence is missing its observation lineage."
             )
         snapshot = reconciliation.snapshot
+        try:
+            require_account_summary_freshness(
+                getattr(snapshot.account, "as_of", None),
+                now=completed_at,
+                max_age_seconds=settings.account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
+            raise _DemoApprovalEvidenceError(
+                f"Reconciled account capital is not fresh ({error.reason.value})."
+            ) from error
         timestamps = (
             risk_preview.evidence_evaluated_at,
             risk_preview.underlying_observed_at,

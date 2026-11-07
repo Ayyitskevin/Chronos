@@ -34,14 +34,16 @@ Rules, in order of severity:
   or divide by zero produce a refusal outcome, because a raising sizer inside a
   supervisor loop is an availability failure that could strand a decision.
 
-This module performs no I/O and knows nothing about brokers or contracts. It is
-pure arithmetic over evidence the supervisor already gathered.
+This module performs no broker I/O. It samples the evidence's injected clock
+before performing arithmetic over the account facts the supervisor gathered.
 """
 
 from __future__ import annotations
 
 import decimal
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from chronos.autonomy import (
@@ -49,6 +51,11 @@ from chronos.autonomy import (
     AutonomyMandate,
     DecisionKind,
     TradableAssetClass,
+)
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    AccountSummaryFreshnessReason,
+    require_account_summary_freshness,
 )
 from chronos.domain.enums import OrderSide
 from chronos.supervisor.compiler import closing_side
@@ -77,6 +84,12 @@ class AccountEvidence:
     net_liquidation_usd: Decimal
     total_cash_usd: Decimal
     buying_power_usd: Decimal
+    #: Preserve the adapter's observation stamp across all per-instrument reads.
+    #: Missing evidence never acquires a new timestamp at the sizing boundary.
+    as_of: datetime | None = None
+    max_age_seconds: int = 30
+    #: A process-owned completion clock, not a model input or a frozen tick time.
+    clock: Callable[[], datetime] | None = field(default=None, repr=False, compare=False)
     #: Current exposure to this instrument, in USD notional.
     symbol_exposure_usd: Decimal | None = None
     #: Current gross exposure across the account, in USD notional.
@@ -99,6 +112,19 @@ class AccountEvidence:
     #: account fingerprint, as text. Appended to the binding constraint's label so
     #: the sized figure names its source; ``None`` keeps the label unchanged.
     position_provenance: str | None = None
+
+    def require_freshness(self) -> None:
+        """Bind the original account stamp to the current financial-use clock."""
+
+        try:
+            checked_at = self.clock() if self.clock is not None else datetime.now(UTC)
+        except Exception:
+            raise AccountSummaryFreshnessError(
+                AccountSummaryFreshnessReason.INVALID_CLOCK
+            ) from None
+        require_account_summary_freshness(
+            self.as_of, now=checked_at, max_age_seconds=self.max_age_seconds
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +202,10 @@ def size_order(
     """
 
     constraints: list[str] = []
+    try:
+        evidence.require_freshness()
+    except AccountSummaryFreshnessError as error:
+        return _refuse(requested_quantity, constraints, str(error), code=error.reason.value)
     try:
         return _size(
             mandate=mandate,
