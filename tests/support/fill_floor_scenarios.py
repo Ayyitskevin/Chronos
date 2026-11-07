@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any
 
 from chronos.domain.enums import OrderLifecycle as L
+from chronos.orders.reconciliation_recovery import RECOVERY_SOURCE
 from chronos.orders.tracker import OrderStatusUpdate
 from tests.support.settle_rig import (
     BROKER_ID,
@@ -87,6 +88,21 @@ def planner_row_bound_over_quantity(rig: Any) -> None:
     rig.venue.execs = [
         venue_execution("blank-1", "6", PRIOR, ref=None, perm=None),
         venue_execution("blank-2", "4.00000001", PRIOR, ref=None, perm=None),
+    ]
+
+
+def recovered_submitted_row_bound(rig: Any) -> None:
+    """A SUBMITTED intent the dwell recovery returned: only a completed record can reach the
+    planner for it, and its refusal is reported as the legacy one ("as today"). Row-bound
+    executions of 3 and 2 against a completed record of 0."""
+
+    rig.seed()
+    rig.pending()
+    rig.event(L.SUBMITTED, at=PRIOR, source=RECOVERY_SOURCE)
+    rig.venue.completed = [venue_order(L.CANCELLED, "0", broker_id=0)]
+    rig.venue.execs = [
+        venue_execution("blank-3", "3", PRIOR, ref=None, perm=None),
+        venue_execution("blank-2", "2", PRIOR, ref=None, perm=None),
     ]
 
 
@@ -219,6 +235,14 @@ SCENARIOS: tuple[FloorScenario, ...] = (
         "10.00000001",
         "0",
         "exceed the order quantity",
+    ),
+    FloorScenario(
+        "recovered-submitted-row-bound",
+        recovered_submitted_row_bound,
+        "ROW_BOUND_EXECUTIONS",
+        "5",
+        "0",
+        "venue fill figure 0 is below the witnessed lower bound 5 from row-bound",
     ),
     FloorScenario(
         "planner-working-order",

@@ -217,6 +217,18 @@ GOLDEN: dict[str, dict[str, Any]] = {
         "submitted": False,
         "unresolved_reasons": ["venue fill figure 4 is below the witnessed lower bound 5.000"],
     },
+    "recovered-submitted-row-bound": {
+        "blockers": ["RESTART_BROKER_EVIDENCE_INCOMPLETE", "RESTART_SENT_ACTIVE"],
+        "broker_submit_calls": 0,
+        "permits_new_opening_order": False,
+        "reason": "sent-active order intents remain after restart "
+        "reconciliation; no new order can be submitted "
+        "until they resolve",
+        "refusal": "RECONCILIATION_NOT_READY",
+        "status": "PENDING",
+        "submitted": False,
+        "unresolved_reasons": ["snapshot fill conflict: venue fill figure 0 is below the wit"],
+    },
 }
 
 
