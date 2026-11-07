@@ -620,6 +620,38 @@ def _account_summary_reads(source: str) -> list[str]:
     return reads
 
 
+_H1B1_READ_DELTA = (
+    (
+        "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
+        "def _read_net_liquidation(self) -> tuple[Decimal | None, datetime | None, str]:",
+    ),
+    (
+        'return None, f"net liquidation unavailable: {error}"',
+        'return None, None, f"net liquidation unavailable: {error}"',
+    ),
+    (
+        'return account.net_liquidation, ""',
+        'return account.net_liquidation, getattr(account, "as_of", None), ""',
+    ),
+)
+
+
+def _expected_read_source(path: str, before: str) -> str:
+    """The merge-base source with the approved H1B1 delta applied, if that base predates it.
+
+    A base without the old signature already carries the delta, or has moved on from it, so it
+    is compared as it stands. A base with the old signature must take all three edits exactly.
+    """
+
+    if path != "src/chronos/orders/submission.py" or _H1B1_READ_DELTA[0][0] not in before:
+        return before
+    expected = before
+    for old, new in _H1B1_READ_DELTA:
+        assert expected.count(old) == 1, old
+        expected = expected.replace(old, new)
+    return expected
+
+
 def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> None:
     """BP-3 left the reads untouched; H1B1 may carry the submission stamp to its final guard.
 
@@ -640,26 +672,7 @@ def test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta() -> No
         before = subprocess.run(
             ["git", "show", f"{base}:{path}"], cwd=_ROOT, capture_output=True, text=True, check=True
         ).stdout
-        expected = before
-        if path == "src/chronos/orders/submission.py":
-            replacements = (
-                (
-                    "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
-                    "def _read_net_liquidation(self) "
-                    "-> tuple[Decimal | None, datetime | None, str]:",
-                ),
-                (
-                    'return None, f"net liquidation unavailable: {error}"',
-                    'return None, None, f"net liquidation unavailable: {error}"',
-                ),
-                (
-                    'return account.net_liquidation, ""',
-                    'return account.net_liquidation, getattr(account, "as_of", None), ""',
-                ),
-            )
-            for old, new in replacements:
-                assert expected.count(old) == 1, old
-                expected = expected.replace(old, new)
+        expected = _expected_read_source(path, before)
         after = (_ROOT / path).read_text(encoding="utf-8")
         assert _account_summary_reads(before), f"{path} at {base[:12]}: no AccountSummary read"
         assert _account_summary_reads(expected) == _account_summary_reads(after), (
@@ -679,6 +692,30 @@ def test_3b7_the_read_pin_still_holds_once_h1b1_is_the_base(
 
     monkeypatch.setenv("CHRONOS_PACKET_BASE_REF", "HEAD")
     test_3b_the_live_account_summary_reads_match_the_approved_h1b1_delta()
+
+
+def test_3b8_a_landed_base_still_catches_an_edited_read() -> None:
+    path = "src/chronos/orders/submission.py"
+    landed = (_ROOT / path).read_text(encoding="utf-8")
+    good = 'return account.net_liquidation, getattr(account, "as_of", None), ""'
+    assert landed.count(good) == 1
+    assert _expected_read_source(path, landed) == landed
+    edited = landed.replace(good, 'return account.cash, getattr(account, "as_of", None), ""')
+    assert _account_summary_reads(_expected_read_source(path, landed)) != _account_summary_reads(
+        edited
+    )
+
+
+def test_3b9_a_base_with_only_part_of_the_delta_text_is_refused() -> None:
+    path = "src/chronos/orders/submission.py"
+    partial = "\n".join(
+        (
+            "def _read_net_liquidation(self) -> tuple[Decimal | None, str]:",
+            '    return account.net_liquidation, ""',
+        )
+    )
+    with pytest.raises(AssertionError, match="net liquidation unavailable"):
+        _expected_read_source(path, partial)
 
 
 @pytest.mark.parametrize(
