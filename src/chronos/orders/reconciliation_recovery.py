@@ -1373,7 +1373,7 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
-            if figure.quantize(Decimal("0.00000001")) < witnessed:
+            if figure.quantize(Decimal("0.00000001")) < witnessed.quantize(Decimal("0.00000001")):
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
