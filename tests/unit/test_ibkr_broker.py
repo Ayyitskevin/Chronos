@@ -1607,6 +1607,7 @@ async def test_ibkr_cleanup_failure_wins_without_discarding_completed_quote() ->
 async def test_ibkr_pacing_event_drives_bounded_manager_retry() -> None:
     client = FakeIB()
     client.market_data_errors.extend([420, 420, None])
+    client.tickers[202] = option_ticker_template(ib_option())
     delays: list[float] = []
 
     async def record_delay(delay: float) -> None:
