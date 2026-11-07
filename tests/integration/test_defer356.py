@@ -159,3 +159,29 @@ def test_the_witnessed_lower_bound_is_compared_at_the_same_eight_place_scale(
     else:
         assert rig.status() is L.CANCEL_PENDING and rig.events() == before
         assert "below the witnessed lower bound" in report.unresolved[0].reason
+
+
+def test_a_blank_execution_on_a_reused_broker_id_holds_then_clears_when_it_leaves_the_snapshot(
+    rig: Rig,
+) -> None:
+    """The behaviour behind the docs/limitations.md reused-broker-id paragraph (DEFER356 P3-3)."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    # another order's fill reported on the same account, client, broker id, side and contract
+    rig.venue.execs = [venue_execution("reused-id", "5", PRIOR, ref=None, perm=None)]
+    before = rig.events()
+
+    held = rig.reconcile()
+
+    assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+    assert held.unresolved[0].reason.startswith("snapshot fill conflict:")
+    assert not held.permits_new_opening_order
+
+    rig.venue.execs = []  # the execution leaves the snapshot
+
+    cleared = rig.reconcile()
+
+    assert rig.status() is L.CANCELLED and cleared.unresolved == ()
+    assert len(cleared.applied_updates) == 1

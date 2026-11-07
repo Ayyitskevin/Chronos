@@ -7,6 +7,12 @@ the contract identity is unverified; the line says it needs checking at the firs
 P3-3: a blank-reference execution on a reused broker id can hold another order's intent; the hold
 fails closed, blocks new opening orders while it lasts, and has no operator exit. Each pin reads the
 source and the document together, so the disclosure cannot outlive the rule it describes.
+
+These are drift tripwires on the text, not evidence of the behaviour. The behaviour is pinned by
+``tests/integration/test_reconfloor_r3.py::test_a_genuinely_different_contract_stays_excluded``
+(the ``symbol`` case: a different symbol on the same ``con_id`` settles CANCELLED@0) and by
+``tests/integration/test_defer356.py::
+test_a_blank_execution_on_a_reused_broker_id_holds_then_clears_when_it_leaves_the_snapshot``.
 """
 
 from __future__ import annotations
