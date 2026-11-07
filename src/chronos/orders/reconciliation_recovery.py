@@ -1373,6 +1373,9 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
+            # DEFER356 P3-4: both sides at the stored eight-place scale. The conductor's RECONFLOOR
+            # R3 decision set this scale for the row-bound comparison below; this extends it to the
+            # witnessed comparison. Not a Kevin ruling: Kevin is told in the DEFER356 PR body.
             if figure.quantize(Decimal("0.00000001")) < witnessed.quantize(Decimal("0.00000001")):
                 return _SettlePlan(
                     "refuse",
