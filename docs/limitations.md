@@ -167,8 +167,10 @@ runbooks.
   broker position holds its symbol at `MANUAL_REVIEW` (`HELD_POSITION_UNPROVEN`), and listed
   broker executions do the same (`EXECUTIONS_UNALLOCATED`;
   `src/chronos/services/reconciliation.py:583-589`). Open broker orders hold readiness at
-  `PENDING` when nothing else does (`src/chronos/runtime.py:299-300`). A `MANUAL_REVIEW` symbol
-  makes the whole portfolio `MANUAL_REVIEW` (`src/chronos/services/reconciliation.py:437`),
+  `PENDING` only when every open order is one exact, zero-fill, owned short put and is the only
+  open order on its symbol (`src/chronos/services/reconciliation.py:591-596`, `:733-748`;
+  `src/chronos/runtime.py:299-300`). Any other open order makes its symbol `MANUAL_REVIEW`,
+  which makes the whole portfolio `MANUAL_REVIEW` (`src/chronos/services/reconciliation.py:437`),
   and readiness reads that portfolio status (`src/chronos/runtime.py:293`), so the block is
   account-wide. Positions stay `MANUAL_REVIEW` until complete allocation provenance exists.
   `MANUAL_REVIEW` is the safe outcome for any ambiguity. After a fill, nothing goes through
