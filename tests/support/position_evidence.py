@@ -66,6 +66,7 @@ class Broker:
     account_in_scope: bool = True
     on_read: Callable[[int], None] | None = None
     position_calls: int = 0
+    summary_as_of: datetime = NOW
     #: The account the summary (and, while in scope, the connection status) names.
     summary_account: str = ACCOUNT
 
@@ -75,6 +76,7 @@ class Broker:
             net_liquidation=Decimal(100_000),
             total_cash=Decimal(60_000),
             buying_power=Decimal(60_000),
+            as_of=self.summary_as_of,
         )
 
     async def connection_status(self) -> SimpleNamespace:
@@ -133,6 +135,7 @@ def runtime(
             autonomy_market_timezone="America/New_York",
             broker_mode=broker_mode,
             broker_adapter=broker_adapter,
+            account_summary_max_age_seconds=30,
         ),
         reconciliation_readiness=readiness or ReconciliationReadiness(session_id="sess-d54"),
         database=database,

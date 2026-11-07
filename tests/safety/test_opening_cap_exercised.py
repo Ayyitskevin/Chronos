@@ -21,7 +21,7 @@ unknown must not read as zero, and the day must be the market's, not UTC's.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -43,7 +43,7 @@ from chronos.orders.risk import OrderRiskEngine, RiskEvidence
 from chronos.persistence.database import Database
 from chronos.persistence.order_repositories import OrderIntentRecord, OrderIntentRepository
 from chronos.utils.identifiers import account_fingerprint
-from tests.support.order_fakes import FakeBroker
+from tests.support.order_fakes import FIXED_NOW, FakeBroker
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _ACCOUNT = "DU1234567"
@@ -322,6 +322,9 @@ def _gathered(intents: Any) -> RiskEvidence:
         connection=cast(Any, _Connection()),
         settings=_settings(),
         intents=intents,
+        # Keep the market-local count at _EVENING while checking the fixture's
+        # account snapshot at its own post-read synthetic time.
+        clock=lambda: FIXED_NOW + timedelta(seconds=1),
     )
     return provider.gather(_intent(), now=_EVENING)
 

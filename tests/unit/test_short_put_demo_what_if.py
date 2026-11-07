@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import cast
@@ -19,6 +19,7 @@ from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import BrokerMode, DemoProfile, OptionRight
 from chronos.domain.models import (
+    AccountSummary,
     BrokerPosition,
     CancellationResult,
     LocalReconciliationEvidence,
@@ -210,13 +211,14 @@ def _service(
     risk: _RiskPreviewer,
     *,
     settings: Settings | None = None,
+    clock: Callable[[], datetime] = demo_now,
 ) -> ShortPutDemoWhatIfService:
     return ShortPutDemoWhatIfService(
         risk,
         harness.connection,
         settings or harness.settings,
         account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
-        clock=demo_now,
+        clock=clock,
         correlation_factory=lambda: CORRELATION_ID,
         persistence_key=TEST_PERSISTENCE_KEY,
     )
@@ -524,6 +526,96 @@ def test_stale_risk_result_is_withheld_before_broker_preview(tmp_path: Path) -> 
         assert result.status is DemoWhatIfStatus.WITHHELD
         assert "chronology" in result.reasons[0]
         assert harness.broker.preview_calls == []
+    finally:
+        harness.close()
+
+
+def test_reconciled_account_summary_honors_a_stricter_setting_before_broker_preview(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    refresh = harness.risk_result.candidate_refresh
+    assert refresh is not None and refresh.reconciliation is not None
+    assert refresh.reconciliation.snapshot is not None
+    snapshot = refresh.reconciliation.snapshot
+    stale_snapshot = snapshot.model_copy(
+        update={
+            "account": snapshot.account.model_copy(
+                update={"as_of": demo_now() - timedelta(seconds=3)}
+            )
+        }
+    )
+    stale_refresh = refresh.model_copy(
+        update={
+            "reconciliation": refresh.reconciliation.model_copy(update={"snapshot": stale_snapshot})
+        }
+    )
+    stale_risk = harness.risk_result.model_copy(update={"candidate_refresh": stale_refresh})
+    risk = _RiskPreviewer(stale_risk)
+    settings = harness.settings.model_copy(update={"account_summary_max_age_seconds": 2})
+    try:
+        result = _service(harness, risk, settings=settings).preview(_request(harness))
+
+        assert result.status is DemoWhatIfStatus.WITHHELD
+        assert result.preview is None
+        assert "Reconciled account capital is not fresh" in result.reasons[0]
+        assert harness.broker.preview_calls == []
+    finally:
+        harness.close()
+
+
+def test_broker_preflight_refuses_account_summary_older_than_its_configured_limit(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    original = harness.broker.account_summary
+
+    async def stale_account_summary() -> AccountSummary:
+        summary = await original()
+        return summary.model_copy(update={"as_of": demo_now() - timedelta(seconds=3)})
+
+    harness.broker.account_summary = stale_account_summary  # type: ignore[method-assign]
+    settings = harness.settings.model_copy(update={"account_summary_max_age_seconds": 2})
+    try:
+        result = _service(
+            harness,
+            _RiskPreviewer(harness.risk_result),
+            settings=settings,
+        ).preview(_request(harness))
+
+        assert result.status is DemoWhatIfStatus.WITHHELD
+        assert "DEMO account summary is not fresh" in result.reasons[0]
+        assert harness.broker.preview_calls == []
+    finally:
+        harness.close()
+
+
+def test_broker_window_rechecks_both_account_summaries_after_preview(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    settings = harness.settings.model_copy(update={"account_summary_max_age_seconds": 2})
+    clock_calls = 0
+
+    def progressing_demo_clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls >= 4:
+            return demo_now() + timedelta(seconds=3)
+        return demo_now()
+
+    try:
+        result = _service(
+            harness,
+            _RiskPreviewer(harness.risk_result),
+            settings=settings,
+            clock=progressing_demo_clock,
+        ).preview(_request(harness))
+
+        assert result.status is DemoWhatIfStatus.WITHHELD
+        assert "A DEMO account summary is not fresh" in result.reasons[0]
+        assert len(harness.broker.preview_calls) == 1
+        assert harness.broker.submit_calls == 0
     finally:
         harness.close()
 

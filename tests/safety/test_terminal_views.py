@@ -214,6 +214,8 @@ def _facts(*, account_id: str = _ACCOUNT_ID) -> CycleFacts:
         evidence_bundle_digest="0" * 64,
         market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         account=AccountEvidence(
+            as_of=_NOW,
+            clock=lambda: _NOW,
             net_liquidation_usd=Decimal(110),
             total_cash_usd=Decimal(110),
             buying_power_usd=Decimal(110),

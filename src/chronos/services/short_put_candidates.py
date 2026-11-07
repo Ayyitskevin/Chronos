@@ -25,6 +25,10 @@ from chronos.config.limits import (
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -174,6 +178,12 @@ class ShortPutCandidateService:
         self._observation_timeout_seconds = observation_timeout_seconds
         self._maximum_specs = maximum_specs
         self._allowlisted_symbols = frozenset(settings.symbol_allowlist)
+
+    @property
+    def account_summary_max_age_seconds(self) -> int:
+        """Decision-age bound shared with the downstream risk-preview boundary."""
+
+        return self._settings.account_summary_max_age_seconds
 
     def evaluate(self, symbol: str) -> ShortPutCandidateEvaluation:
         """Return transparent ranking evidence without writing or invoking an order method."""
@@ -493,6 +503,14 @@ class ShortPutCandidateService:
             return ["The reconciliation timestamp is in the future."]
         if age > self._max_reconciliation_age:
             return ["The reconciliation snapshot is too old for candidate evaluation."]
+        try:
+            require_account_summary_freshness(
+                getattr(snapshot.account, "as_of", None),
+                now=evaluated_at,
+                max_age_seconds=self._settings.account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
+            return [f"The reconciled account summary is not fresh ({error.reason.value})."]
         return []
 
     def _market_evidence_reasons(
@@ -523,6 +541,20 @@ class ShortPutCandidateService:
             or observation.account_second.as_of < observation.account_first.as_of
         ):
             reasons.append("Account observation timestamps were invalid or moved backward.")
+        for account in (observation.account_first, observation.account_second):
+            if not self._is_aware(account.as_of):
+                continue
+            try:
+                require_account_summary_freshness(
+                    getattr(account, "as_of", None),
+                    now=observation.evaluated_at,
+                    max_age_seconds=self._settings.account_summary_max_age_seconds,
+                )
+            except AccountSummaryFreshnessError as error:
+                reasons.append(
+                    "An account summary is not fresh "
+                    f"({error.reason.value}); candidate capital is locked."
+                )
         if self._account_signature(observation.account_second) != (
             snapshot.account.net_liquidation,
             snapshot.account.total_cash,
@@ -602,8 +634,12 @@ class ShortPutCandidateService:
         )
 
     @staticmethod
-    def _is_aware(value: datetime) -> bool:
-        return value.tzinfo is not None and value.utcoffset() is not None
+    def _is_aware(value: datetime | None) -> bool:
+        return (
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None
+        )
 
     def _no_trade(
         self,

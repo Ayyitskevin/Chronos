@@ -499,6 +499,14 @@ class IBKRBroker:
         return normalized
 
     async def account_summary(self) -> AccountSummary:
+        """Read balances and stamp when this adapter completed the local read.
+
+        ``ib_async`` may satisfy ``accountSummaryAsync`` from its populated
+        cache. Therefore ``as_of`` is not the broker's valuation/update time and
+        does not prove that the returned balances changed or were refreshed at
+        the venue.
+        """
+
         account_id = self._require_connection()
         try:
             values = await self._client.accountSummaryAsync(account_id)

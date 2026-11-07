@@ -15,9 +15,12 @@ and recorded, never sent.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,7 +31,8 @@ from worker import model_local, model_xai
 from worker.config import WorkerConfig
 
 from chronos.broker import demo as demo_module
-from chronos.domain.models import BrokerPosition, UnderlyingContract
+from chronos.domain.enums import BrokerMode
+from chronos.domain.models import AccountSummary, BrokerPosition, UnderlyingContract
 from tests.safety.test_evidence_bundles_exercised import (
     PROPOSER_HEADER,
     TOKEN_HEADER,
@@ -126,6 +130,85 @@ def test_the_served_document_carries_no_raw_account_id(
     assert facts["account"]["net_liquidation"] == "250000.00"
     assert facts["positions"][0]["quantity"] == "3"
     assert facts["positions"][0]["contract"]["symbol"] == "SPY"
+
+
+def test_stale_account_summary_refuses_a_served_evidence_bundle(
+    demo_env: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    raw_id_planted: None,
+) -> None:
+    with _boot_with_evidence(monkeypatch, demo_env) as client:
+        original = demo_module.DemoBroker.account_summary
+
+        async def stale_summary(self: Any) -> Any:
+            summary = await original(self)
+            return summary.model_copy(
+                update={"as_of": demo_module.demo_now() - timedelta(seconds=31)}
+            )
+
+        monkeypatch.setattr(demo_module.DemoBroker, "account_summary", stale_summary)
+        response = client.post(
+            "/autonomy/evidence",
+            json={"kind": "backend_served", "symbols": ["SPY"], "lookback_days": 5},
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["refusal"] == "EVIDENCE_UNAVAILABLE"
+
+
+def test_served_document_rechecks_account_age_after_all_blocking_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronos.api.routes import autonomy as served
+
+    now = demo_module.demo_now()
+    summary = AccountSummary(
+        account_id=RAW_ID,
+        net_liquidation=Decimal("250000"),
+        total_cash=Decimal("125000"),
+        buying_power=Decimal("250000"),
+        as_of=now,
+    )
+
+    class _Broker:
+        async def account_summary(self) -> AccountSummary:
+            return summary
+
+        async def positions(self) -> tuple[BrokerPosition, ...]:
+            return ()
+
+        async def server_time(self) -> Any:
+            return now
+
+    broker = _Broker()
+    runtime = SimpleNamespace(
+        broker=broker,
+        connection=SimpleNamespace(run=lambda awaitable: asyncio.run(awaitable)),
+        settings=SimpleNamespace(
+            broker_mode=BrokerMode.DEMO,
+            account_summary_max_age_seconds=30,
+        ),
+        order_management=SimpleNamespace(list_orders=lambda: []),
+    )
+    checks = iter(
+        (
+            now + timedelta(seconds=29),
+            now + timedelta(seconds=31),
+        )
+    )
+    monkeypatch.setattr(served, "account_summary_check_time", lambda **_: next(checks))
+
+    assert (
+        served.compose_served_document(
+            runtime,
+            object(),
+            symbols=(),
+            lookback_days=5,
+            now=now,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("provider", sorted(_PROVIDERS))
