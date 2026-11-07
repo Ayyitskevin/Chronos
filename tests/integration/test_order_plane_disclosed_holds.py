@@ -288,8 +288,18 @@ def _runtime_over(harness: _Harness, venue: ScriptedVenue) -> AppRuntime:
 def test_documents_that_the_recorded_floor_hold_blocks_closing_orders_at_the_paper_boundary(
     hold: bool,
 ) -> None:
-    """The live branch has the identical readiness check (submission.py, the live `readiness.ready`
-    refusal): read, not run, because live stays off."""
+    """What this stubs and what it proves.
+
+    Stubbed: the portfolio half of readiness (``_CleanPortfolio``: reconciled, no broker open
+    orders), the risk evidence (``_StockCloseEvidence``: canned RECONCILED evidence with 100
+    settled shares at readiness' current generation, so the risk engine approves the close) and
+    the venue (the scripted fake broker). Proved: the order half end to end: the real planner holds
+    the intent from persisted rows (FILL_PROGRESS 7 against the venue's CANCELLED@5), the real
+    ``AppRuntime.reconcile_submission_readiness`` publishes PENDING with the restart blockers,
+    and the real paper boundary refuses a real CLOSE_LONG_STOCK with RECONCILIATION_NOT_READY and
+    no broker call; without the hold the same close transmits. Not proved: the portfolio
+    reconciler, evidence gathering, and the live branch, whose identical ``readiness.ready`` check
+    (submission.py) is read, not run, because live stays off."""
 
     venue = ScriptedVenue()
     evidence = _StockCloseEvidence()
