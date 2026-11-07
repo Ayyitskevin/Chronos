@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import Field
 
 from chronos.api.auth import require_token
 from chronos.api.dependencies import BackendState, get_state, require_writer
@@ -39,6 +40,7 @@ from chronos.orders.mutations import OrderMutationError
 from chronos.orders.service import OrderManagementService, OrderPipelineError
 from chronos.orders.submission import SubmissionOutcome
 from chronos.persistence.order_repositories import OrderIntentRecord
+from chronos.runtime import log_fill_floor_holds
 
 _logger = logging.getLogger("chronos.api.orders")
 
@@ -98,6 +100,15 @@ class ResolveRequest(ChronosModel):
     operator_note: str
 
 
+class FillFloorHoldView(ChronosModel):
+    """One fill-floor hold (FLOORHOLD): the intent and both figures, nothing else."""
+
+    intent_id: str
+    basis: str
+    floor_figure: str
+    venue_figure: str
+
+
 class ReconciliationResponse(ChronosModel):
     status: str
     generation: int
@@ -105,6 +116,9 @@ class ReconciliationResponse(ChronosModel):
     proven_count: int
     unresolved_count: int
     remaining_active_count: int
+    # FLOORHOLD: observability only; empty unless a held intent's venue figure is below a recorded
+    # or witnessed one. It offers no exit: see docs/IBKR_RUNBOOK.md section 6.
+    fill_floor_holds: list[FillFloorHoldView] = Field(default_factory=list)
 
 
 def _service(state: BackendState) -> OrderManagementService:
@@ -256,6 +270,7 @@ def reconcile_orders(
             "remaining_active_count": len(restart.remaining_active),
         },
     )
+    log_fill_floor_holds(restart, operation="operator_reconcile")
     return ReconciliationResponse(
         status=readiness.status.value,
         generation=readiness.generation,
@@ -263,6 +278,11 @@ def reconcile_orders(
         proven_count=len(restart.proven),
         unresolved_count=len(restart.unresolved),
         remaining_active_count=len(restart.remaining_active),
+        fill_floor_holds=[
+            FillFloorHoldView(intent_id=item.intent_id, **item.fill_floor_hold.as_dict())
+            for item in restart.fill_floor_holds
+            if item.fill_floor_hold is not None
+        ],
     )
 
 

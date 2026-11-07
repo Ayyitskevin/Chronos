@@ -59,3 +59,22 @@ def test_the_abandoned_draft_cap_count_is_disclosed_where_an_operator_looks() ->
     assert "Daily opening cap refuses after a failed propose" in runbook
     assert "no creation time" in runbook and "only the owner" in runbook
     assert "local midnight in the market timezone" in runbook
+
+
+def test_the_typed_floor_hold_blocker_is_disclosed_as_observability_only_with_no_exit() -> None:
+    """FLOORHOLD: the blocker is named where an operator looks, and the text keeps saying that it
+    adds no exit (the pins above still hold: no operator route, escalate, do not edit)."""
+
+    limitations, runbook = _flat(LIMITATIONS), _flat(RUNBOOK)
+    for text in (limitations, runbook):
+        assert "`FILL_FLOOR_HOLD`" in text
+        assert "`fill_floor_holds`" in text
+        assert "no exit" in text
+        assert "refuse" in text
+    assert "observability only" in limitations
+    assert "there is still no operator route" in runbook
+    assert "`POST /orders/reconcile`" in limitations and "`POST /orders/reconcile`" in runbook
+    assert "no venue figure is below anything" in runbook
+    assert "no venue figure left to be below anything" in limitations
+    recovery = RECOVERY.read_text(encoding="utf-8")
+    assert "FillFloorHold" in recovery and "Observability only" in recovery

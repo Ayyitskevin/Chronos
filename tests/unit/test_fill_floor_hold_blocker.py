@@ -12,6 +12,7 @@ from enum import StrEnum
 from tests.unit.test_runtime_reconciliation_readiness import (
     FIXED_NOW,
     _manual_review_portfolio,
+    _portfolio_result,
     _restart_report,
     _runtime_for,
 )
@@ -41,16 +42,20 @@ def _held(intent_id: str = "intent-held", *, with_hold: bool) -> RestartOrderObs
     )
 
 
-def _publish(observation: RestartOrderObservation):
+def _publish(observation: RestartOrderObservation, *, snapshot: bool = True):
     restart = _restart_report(
         unresolved=(observation,),
         remaining_active=(
             RemainingActiveIntent(intent_id="intent-held", status=OrderLifecycle.CANCEL_PENDING),
         ),
     )
-    return _runtime_for(restart, _manual_review_portfolio()).reconcile_submission_readiness(
-        now=FIXED_NOW
+    portfolio = (
+        _manual_review_portfolio()
+        if snapshot
+        else _portfolio_result(status=ReconciliationStatus.MANUAL_REVIEW, snapshot=None)
     )
+    runtime = _runtime_for(restart, portfolio)
+    return runtime.reconcile_submission_readiness(now=FIXED_NOW)
 
 
 def test_the_blocker_is_added_to_the_restart_blockers_never_replacing_them() -> None:
@@ -103,7 +108,7 @@ def test_the_blocker_vocabulary_is_pinned() -> None:
 def test_the_run_row_names_the_hold_with_the_intent_and_both_figures_and_nothing_else() -> None:
     from chronos.runtime import _reconciliation_run_snapshot
 
-    published = _publish(_held(with_hold=True))
+    published = _publish(_held(with_hold=True), snapshot=False)
     snapshot = _reconciliation_run_snapshot(
         trigger="operator",
         report=published,
@@ -119,7 +124,7 @@ def test_the_run_row_names_the_hold_with_the_intent_and_both_figures_and_nothing
         "venue_figure": "5",
     }
 
-    plain = _publish(_held(with_hold=False))
+    plain = _publish(_held(with_hold=False), snapshot=False)
     plain_snapshot = _reconciliation_run_snapshot(
         trigger="operator",
         report=plain,

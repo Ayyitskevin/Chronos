@@ -480,11 +480,20 @@ def test_documents_that_the_hold_alone_keeps_readiness_pending_on_a_flat_account
 
         assert published.portfolio.status is ReconciliationStatus.RECONCILED
         assert published.readiness.status is ReconciliationStatus.PENDING
+        # FLOORHOLD: the hold now also shows as itself, ADDED to the two restart blockers
         assert published.readiness.blockers == {
             ReadinessBlocker.RESTART_SENT_ACTIVE,
             ReadinessBlocker.RESTART_BROKER_EVIDENCE_INCOMPLETE,
+            ReadinessBlocker.FILL_FLOOR_HOLD,
         }
         assert FLOOR_HOLD in published.restart.unresolved[0].reason
+        (typed,) = published.restart.fill_floor_holds
+        assert typed.intent_id == "intent-1" and typed.fill_floor_hold is not None
+        assert typed.fill_floor_hold.as_dict() == {
+            "basis": "WITNESSED_LOWER_BOUND",
+            "floor_figure": "7",
+            "venue_figure": "5",
+        }
     finally:
         harness.close()
 

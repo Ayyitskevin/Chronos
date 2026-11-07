@@ -124,6 +124,15 @@ to a Chronos fill (UNEXPLAINED_POSITION): resolve that under "Position mismatch"
 the manual trade, and rearm with a note. Stop and escalate to the owner with the intent id, both
 figures and the TWS trade log; do not edit the database.
 
+Chronos names this hold as its own blocker, `FILL_FLOOR_HOLD`, beside `RESTART_SENT_ACTIVE` and
+`RESTART_BROKER_EVIDENCE_INCOMPLETE`, so you do not have to read the two generic ones. The intent
+id and both figures are in the `fill_floor_holds` list of the reply to `POST /orders/reconcile`
+(`intent_id`, `basis`, `floor_figure`, `venue_figure`), in the WARNING `Fill floor hold on intent`
+in the log, and in that pass's reconciliation run row. It only names the hold: there is still no
+operator route, it adds no exit, and it refuses nothing the two restart blockers did not already
+refuse. When the venue row, its execution and any completed record have all left the snapshot, the
+intent stays held but `FILL_FLOOR_HOLD` is not shown, because no venue figure is below anything.
+
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
    ```bash

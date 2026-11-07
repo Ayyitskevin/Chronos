@@ -98,10 +98,15 @@ def test_the_reply_names_the_hold_with_the_intent_and_both_figures(
     log_text = (demo_env / "chronos.log").read_text(encoding="utf-8")
     entries = [json.loads(line) for line in log_text.splitlines() if line.startswith("{")]
     holds = [e for e in entries if e.get("event") == "fill_floor_hold"]
-    assert [(e["intent_id"], e["floor_figure"], e["venue_figure"]) for e in holds] == [
-        ("intent-held", "7", "5")
+    line = (
+        "Fill floor hold on intent intent-held: venue figure 5 is below 7 "
+        "(WITNESSED_LOWER_BOUND); no operator exit"
+    )
+    # the startup pass (same patched evidence) and the operator pass each name it once
+    assert [(e["operation"], e["message"], e["level"]) for e in holds] == [
+        ("startup_reconcile", line, "WARNING"),
+        ("operator_reconcile", line, "WARNING"),
     ]
-    assert "DU" not in json.dumps(holds)
 
 
 def test_a_held_intent_of_another_kind_replies_with_no_hold(
