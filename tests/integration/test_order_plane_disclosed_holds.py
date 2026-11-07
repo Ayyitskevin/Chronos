@@ -54,8 +54,9 @@ from chronos.orders.risk import OrderRiskCheck, OrderRiskDecision, RiskEvidence
 from chronos.orders.submission import SubmissionRefusalCode
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.order_repositories import OrderIntentRepository, OrderTrackerRepository
+from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.runtime import AppRuntime
-from chronos.services.reconciliation import ReconciliationResult
+from chronos.services.reconciliation import ReconciliationCoordinator, ReconciliationResult
 from chronos.services.trading_hours import session_for
 
 FLOOR_HOLD = "below the witnessed lower bound"
@@ -285,21 +286,24 @@ def _runtime_over(harness: _Harness, venue: ScriptedVenue) -> AppRuntime:
 @pytest.mark.parametrize(
     "hold", [False, True], ids=["control-close-transmits", "hold-blocks-close"]
 )
-def test_documents_that_the_recorded_floor_hold_blocks_closing_orders_at_the_paper_boundary(
+def test_documents_the_readiness_gate_has_no_open_close_distinction_with_the_portfolio_stubbed(
     hold: bool,
 ) -> None:
-    """What this stubs and what it proves.
+    """What this stubs and what it proves, and what it does NOT prove.
 
     Stubbed: the portfolio half of readiness (``_CleanPortfolio``: reconciled, no broker open
-    orders), the risk evidence (``_StockCloseEvidence``: canned RECONCILED evidence with 100
-    settled shares at readiness' current generation, so the risk engine approves the close) and
-    the venue (the scripted fake broker). Proved: the order half end to end: the real planner holds
-    the intent from persisted rows (FILL_PROGRESS 7 against the venue's CANCELLED@5), the real
-    ``AppRuntime.reconcile_submission_readiness`` publishes PENDING with the restart blockers,
+    orders, no positions seen), the risk evidence (``_StockCloseEvidence``: canned RECONCILED
+    evidence with 100 settled shares at readiness' current generation, so the risk engine approves
+    the close) and the venue (the scripted fake broker). Proved: the readiness gate has no
+    open/close distinction: with only the order half able to block, the real planner's hold
+    (FILL_PROGRESS 7 against the venue's CANCELLED@5) makes the real
+    ``AppRuntime.reconcile_submission_readiness`` publish PENDING on the restart blockers alone,
     and the real paper boundary refuses a real CLOSE_LONG_STOCK with RECONCILIATION_NOT_READY and
-    no broker call; without the hold the same close transmits. Not proved: the portfolio
-    reconciler, evidence gathering, and the live branch, whose identical ``readiness.ready`` check
-    (submission.py) is read, not run, because live stays off."""
+    no broker call, while the same close transmits without the hold. NOT proved: that the hold is
+    what stops closes in a real runtime. It is not: the real portfolio half refuses a close for any
+    held position, with or without the hold (the next pin), because a nonzero broker position is
+    MANUAL_REVIEW with HELD_POSITION_UNPROVEN (services/reconciliation.py). The live branch's
+    identical ``readiness.ready`` check (submission.py) is read, not run, because live stays off."""
 
     venue = ScriptedVenue()
     evidence = _StockCloseEvidence()
@@ -353,6 +357,134 @@ def test_documents_that_the_recorded_floor_hold_blocks_closing_orders_at_the_pap
             assert outcome.submitted and outcome.refusal is SubmissionRefusalCode.NOT_REFUSED
             sent = [(r.side.value, str(r.quantity), r.transmit) for r in venue.submit_calls]
             assert sent == [("SELL", "100", True)]
+    finally:
+        harness.close()
+
+
+def _held_five_shares(venue: ScriptedVenue) -> None:
+    venue._positions = (
+        BrokerPosition(
+            account_id=PAPER_ACCOUNT,
+            contract=stock_contract(),
+            quantity=Decimal(5),
+            average_cost=Decimal("100"),
+            market_price=Decimal("100"),
+        ),
+    )
+
+
+@pytest.mark.parametrize("hold", [False, True], ids=["position-no-hold", "position-and-hold"])
+def test_documents_that_a_held_position_alone_is_manual_review_and_refuses_a_close_hold_or_not(
+    hold: bool,
+) -> None:
+    """The fact an operator needs: through the REAL portfolio half (``ReconciliationCoordinator``
+    over the harness's own database and the fake broker's positions), a 5-share position with no
+    hold anywhere publishes MANUAL_REVIEW with HELD_POSITION_UNPROVEN and a real close is refused
+    with no broker call; the floor hold only adds its restart blockers. Closes through Chronos are
+    unavailable for every held position today, hold or not (docs/limitations.md, the reconciliation
+    bullet); the exit for a position is TWS."""
+
+    venue = ScriptedVenue()
+    evidence = _StockCloseEvidence()
+    harness = _Harness(venue, paper_settings(), evidence_provider=cast(Any, evidence))
+    evidence.readiness = harness.readiness
+    try:
+        _held_five_shares(venue)
+        if hold:
+            book = Rig(
+                harness.db,
+                venue,
+                harness.intents,
+                harness.tracker_repo,
+                harness.tracker,
+                harness.readiness,
+                harness.connection,
+                cast(Any, None),
+                PAPER_ACCOUNT,
+            )
+            _recorded_seven_then_venue_five(book)
+        runtime = _runtime_over(harness, venue)
+        runtime.reconciliation = cast(
+            Any,
+            ReconciliationCoordinator(
+                harness.connection, LocalReconciliationRepository(harness.db.sessions), ("AAPL",)
+            ),
+        )
+        published = runtime.reconcile_submission_readiness(now=FIXED_NOW, trigger="operator")
+        close = build_stock_intent(
+            account_id=PAPER_ACCOUNT,
+            intent=OrderIntent.CLOSE_LONG_STOCK,
+            contract=stock_contract(),
+            quantity=5,
+            limit_price=Decimal("100"),
+            correlation_id="CHR-ORD-" + "H" * 32,
+            intent_id="close-held",
+        )
+        proposal = harness.service.propose(close, now=FIXED_NOW)
+        assert proposal.risk.approved
+        harness.service.preview(close, now=FIXED_NOW)
+        harness.service.confirm(close, risk_decision_id=proposal.risk.decision_id, now=FIXED_NOW)
+
+        outcome = harness.service.submit(close, writer_lease_held=True, now=FIXED_NOW)
+
+        assert published.readiness.status is ReconciliationStatus.MANUAL_REVIEW
+        assert ReadinessBlocker.HELD_POSITION_UNPROVEN in published.readiness.blockers
+        restart_blockers = {
+            ReadinessBlocker.RESTART_SENT_ACTIVE,
+            ReadinessBlocker.RESTART_BROKER_EVIDENCE_INCOMPLETE,
+        }
+        if hold:
+            assert restart_blockers <= published.readiness.blockers
+        else:
+            assert not (restart_blockers & published.readiness.blockers)
+        assert not outcome.submitted
+        assert outcome.refusal is SubmissionRefusalCode.RECONCILIATION_NOT_READY
+        assert venue.submit_calls == []
+    finally:
+        harness.close()
+
+
+def test_documents_that_the_hold_alone_keeps_readiness_pending_on_a_flat_account() -> None:
+    """What the hold adds beyond what already exists: with the venue row and its execution gone
+    and no position anywhere, the REAL portfolio half is reconciled and readiness stays PENDING on
+    the restart blockers alone, so no new opening order can be submitted on a flat account."""
+
+    venue = ScriptedVenue()
+    harness = _Harness(venue, paper_settings())
+    try:
+        book = Rig(
+            harness.db,
+            venue,
+            harness.intents,
+            harness.tracker_repo,
+            harness.tracker,
+            harness.readiness,
+            harness.connection,
+            cast(Any, None),
+            PAPER_ACCOUNT,
+        )
+        _recorded_seven_then_venue_five(book)
+        venue.open, venue.execs = [], []
+        venue.completed = [venue_order(L.CANCELLED, "5")]
+        runtime = _runtime_over(harness, venue)
+        runtime.reconciliation = cast(
+            Any,
+            ReconciliationCoordinator(
+                harness.connection, LocalReconciliationRepository(harness.db.sessions), ("AAPL",)
+            ),
+        )
+
+        published = runtime.reconcile_submission_readiness(
+            now=FIXED_NOW + timedelta(days=1), trigger="operator"
+        )
+
+        assert published.portfolio.status is ReconciliationStatus.RECONCILED
+        assert published.readiness.status is ReconciliationStatus.PENDING
+        assert published.readiness.blockers == {
+            ReadinessBlocker.RESTART_SENT_ACTIVE,
+            ReadinessBlocker.RESTART_BROKER_EVIDENCE_INCOMPLETE,
+        }
+        assert FLOOR_HOLD in published.restart.unresolved[0].reason
     finally:
         harness.close()
 
