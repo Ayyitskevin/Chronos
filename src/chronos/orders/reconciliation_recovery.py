@@ -1436,6 +1436,10 @@ class OrderRestartReconciler:
             )
         )
         if not identity_ok:
+            # FLOORHOLD: the floor reasons follow the identity checks in the reason function, so
+            # an identity refusal reaches them only if the two identity tests ever disagree. The
+            # tag is kept so a hold found there would still be typed; no test reaches it (an
+            # assertion here ran over the unit, integration and safety suites and never fired).
             identity_holds: list[FillFloorHold] = []
             identity_reason = _unresolved_evidence_reason(
                 intent,
