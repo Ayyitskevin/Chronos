@@ -1396,14 +1396,14 @@ class OrderRestartReconciler:
                     Decimal("0"),
                 )
                 if row_bound > quantity:
-                    # DEFER356 P3-1: a row-bound sum above the order quantity is not credible
-                    # evidence (ibapi placeholder sizes reach 1e20 and up, where quantize would
-                    # raise and abort the whole pass): refuse this intent, typed, before quantizing
+                    # DEFER356 P3-1: a row-bound sum above the order quantity is never settled: it
+                    # is a genuine overfill or a placeholder (ibapi sizes reach 1e20 and up, where
+                    # quantize would raise and abort the whole pass). Refuse this intent, typed,
+                    # before quantizing, and leave the judgement to review.
                     return _SettlePlan(
                         "refuse",
                         f"snapshot fill conflict: row-bound snapshot executions {row_bound} exceed "
-                        f"the order quantity {quantity}; the venue's execution figures are not "
-                        "credible",
+                        f"the order quantity {quantity}; held for review",
                     )
                 if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
                     Decimal("0.00000001")
