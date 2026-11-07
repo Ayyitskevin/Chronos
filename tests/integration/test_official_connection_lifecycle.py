@@ -337,6 +337,32 @@ def test_the_handshake_names_the_code_even_when_the_notice_window_is_saturated_w
     assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(raised.value)
 
 
+def test_a_later_handshake_failure_does_not_name_an_earlier_sessions_code(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    """REVIEW-TIDY P3-1: only notices appended after this connect's marker may be named.
+
+    The first connect fails with the client-id-in-use code (326). The second fails for a
+    different reason (no next-valid-id) and the gateway sends no coded notice; the error must
+    not borrow 326 from the first session. Marker 0 (every notice since the bridge was
+    built) would name it.
+    """
+
+    gateway.held_client_ids = {fake_ibapi.CLIENT_ID}
+    broker = _hooked(_SpyReadiness())
+    with pytest.raises(BrokerConnectionError) as first:
+        asyncio.run(broker.connect())
+    assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(first.value)
+
+    gateway.held_client_ids = set()
+    gateway.handshake = "no_next_valid_id"
+    with pytest.raises(BrokerConnectionError) as second:
+        asyncio.run(broker.connect())
+    assert "did not complete the connection handshake" in str(second.value)
+    assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) not in str(second.value)
+    assert "Recent broker notice codes" not in str(second.value)
+
+
 def test_notice_codes_are_counted_by_appends_not_by_window_diff() -> None:
     saturated = ["[326] same"] * 200
     assert official_module._new_gateway_notice_codes(saturated, 1, limit=3) == (326,)
