@@ -157,6 +157,8 @@ def _facts(**overrides: Any) -> CycleFacts:
         "evidence_bundle_digest": "b" * 64,
         "market_data": MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         "account": AccountEvidence(
+            as_of=_NOW,
+            clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
             total_cash_usd=Decimal(60_000),
             buying_power_usd=Decimal(60_000),
@@ -327,6 +329,8 @@ def test_an_unsizeable_proposal_stops_at_sizing(session: Session) -> None:
     _activate(session, mandate)
     facts = _facts(
         account=AccountEvidence(
+            as_of=_NOW,
+            clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
             total_cash_usd=Decimal(1_000),  # exactly the cash floor: nothing spendable
             buying_power_usd=Decimal(500),
@@ -470,6 +474,8 @@ def test_a_loss_limit_breach_stops_the_next_cycle_but_permits_closing(
         ),
         facts=_facts(
             account=AccountEvidence(
+                as_of=_NOW,
+                clock=lambda: _NOW,
                 net_liquidation_usd=Decimal(100_000),
                 total_cash_usd=Decimal(60_000),
                 buying_power_usd=Decimal(60_000),
@@ -975,6 +981,7 @@ def _production_gatherers(mandate: AutonomyMandate, database: Database) -> tuple
         7,
         mandate=mandate,
         mandate_digest="d" * 64,
+        clock=lambda: _NOW,
     )
     facts = gatherers.cycle_facts(mandate)(_NOW)
     assert facts is not None
@@ -1091,6 +1098,8 @@ def test_d17_a_close_under_a_set_limit_compiles_when_position_evidence_is_suppli
         ),
         facts=_facts(
             account=AccountEvidence(
+                as_of=_NOW,
+                clock=lambda: _NOW,
                 net_liquidation_usd=Decimal(100_000),
                 total_cash_usd=Decimal(60_000),
                 buying_power_usd=Decimal(60_000),

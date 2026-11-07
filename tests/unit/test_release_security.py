@@ -197,11 +197,15 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # XFIX-C branch-side history: 58 and 59 at XFIX-C and XFIX-C-R1 (official_ibkr.py).
     # 74 at the XFIX-C/main merge: main's 71 plus three official_ibkr.py fingerprints the merged
     # file supersedes (main's, XFIX-C's and XFIX-C-R1's); XFIX-C's other entry was already on main.
-    # 75 at TIDY-R2: official_ibkr.py's source-inventory fingerprint is superseded by the
-    # NoticeLog change (the old one is on main 33bb082, which the history entry names).
-    # 76 at TIDY-R3: the NoticeLog composition and modify changes supersede that fingerprint
-    # again; the intermediate value is committed in this branch (8cc781c), so it is history too.
-    assert len(historical_candidates) == 76
+    # H1B1 branch-side history:
+    # 60 at H1B1 (settings.py, runtime.py and api/autonomy_wiring.py each rotate a
+    # source-inventory fingerprint for the account-summary freshness guard).
+    # 63 at H1B1-R1 (settings.py, api/autonomy_wiring.py and the ib_async adapter
+    # disclosure each rotate their generated source-inventory fingerprint).
+    # 64 at H1B1-R2: 1 superseded generated source fingerprints.
+    # 82 at the H1B1/main merge: main's 74 plus the branch's six history entries it did not share
+    # and the two runtime.py fingerprints the merged file supersedes (main's and H1B1's).
+    assert len(historical_candidates) == 82
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
