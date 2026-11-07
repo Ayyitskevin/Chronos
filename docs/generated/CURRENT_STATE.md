@@ -137,7 +137,7 @@ These change without a commit, so this page carries the command that measures ea
 
 | Namespace | Highest allocated |
 | --- | --- |
-| `DECISIONS.md` D-nn | D-75 |
+| `DECISIONS.md` D-nn | D-77 |
 | `docs/adr/` ADR-nnnn | ADR-0059 |
 | `RISK_REGISTER.md` R-nn | R-83 |
 
@@ -206,7 +206,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 
 | Source | SHA-256 |
 | --- | --- |
-| DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
+| DECISIONS.md | `f0fe6ab5ee1f4aa5bcf87d7c0db2ae1d068332710e750c400385025053dd3bef` |
 | RISK_REGISTER.md | `81bfd22f266c26c0c82d003f514454b5bab1c06a8911b77d95e9220e36f5f521` |
 | docs/VISION_COMPLETION_PLAN.md | `733c85bca37f7c1af6bb5e5a82b9d5ba304f687001a25b9240be8c6513239802` |
 | src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
