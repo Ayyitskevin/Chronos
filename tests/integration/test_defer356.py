@@ -113,3 +113,32 @@ def test_the_legacy_route_already_holds_a_placeholder_sized_execution_without_ab
     assert rig.status() is L.SUBMITTED and rig.events() == before
     assert rig.status("intent-2") is L.CANCELLED
     assert {item.intent_id for item in report.unresolved} == {"intent-1"}
+
+
+@pytest.mark.parametrize(
+    "figure,own_fill,outcome",
+    [
+        ("5.000000001", "5.000000001", "settle"),  # equal beyond eight places: ruled to settle
+        ("5", "5.000000004", "settle"),  # below by less than one eighth place: equal at scale
+        ("5", "5.00000001", "refuse"),  # below by one representable tick: still refused
+        ("5.00000001", "5", "settle"),  # above the bound: settles before and after
+    ],
+    ids=["equal-9dp", "under-by-4e-9", "under-by-1e-8", "over-by-1e-8"],
+)
+def test_the_witnessed_lower_bound_is_compared_at_the_same_eight_place_scale(
+    rig: Rig, figure: str, own_fill: str, outcome: str
+) -> None:
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, figure)]
+    rig.venue.execs = [venue_execution("own-fill", own_fill, PRIOR)]  # referenced: an OWN fill
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    if outcome == "settle":
+        assert rig.status() is L.CANCELLED and report.unresolved == ()
+        assert len(report.applied_updates) == 1
+    else:
+        assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+        assert "below the witnessed lower bound" in report.unresolved[0].reason
