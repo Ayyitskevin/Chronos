@@ -326,7 +326,7 @@ async def test_the_manager_independently_refuses_and_does_not_cache_an_empty_liv
         await broker.disconnect()
 
 
-@pytest.mark.parametrize("field", ["bid", "ask", "last", "close"])
+@pytest.mark.parametrize("field", ["bid", "ask", "last"])
 async def test_the_manager_accepts_a_live_quote_with_one_price(
     gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch, field: str
 ) -> None:
@@ -347,6 +347,33 @@ async def test_the_manager_accepts_a_live_quote_with_one_price(
         monkeypatch.setattr(broker, "request_underlying_quote", return_quote)
         assert (await manager.underlying_quote(underlying)).quote == quote
         assert (await manager.underlying_quote(underlying)).from_cache is True
+    finally:
+        await broker.disconnect()
+
+
+async def test_the_manager_rejects_a_close_only_quote(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker = await _connected()
+    manager = MarketDataManager(broker, sleep=_Sleeps())
+    try:
+        underlying = await _aapl(broker)
+        quote = MarketQuote(
+            contract=underlying,
+            timestamp=datetime.now(tz=UTC),
+            data_quality=DataQuality.LIVE,
+            close=Decimal("1.00"),
+        )
+
+        async def return_quote(_contract: UnderlyingContract) -> MarketQuote:
+            return quote
+
+        monkeypatch.setattr(broker, "request_underlying_quote", return_quote)
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.underlying_quote(underlying)
+        assert raised.value.contract_ids == (underlying.con_id,)
+        assert raised.value.observed_values == (quote,)
+        assert manager.cache_entry_count == 0
     finally:
         await broker.disconnect()
 
