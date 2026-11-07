@@ -164,14 +164,21 @@ halted (`STATE_CORRUPTION` / `UNKNOWN_ORDER` in `src/chronos/control/halt.py`).
 4. Record what you found (docs/INCIDENT_RESPONSE.md evidence capture).
 5. Rearm with a note describing the resolution.
 
-### Daily opening cap refuses after broker errors at propose time
+### Daily opening cap refuses after a failed propose (broker error or stale account summary)
 
-Meaning: `max_opening_orders_per_day` counts every opening intent created today, including a
-`DRAFT` left behind when a broker read failed inside `POST /orders/propose` (the row is created
-before evidence is gathered, so the request returned an error and no risk decision exists). Three
-such failures spend a cap of three; the count resets at the market-day boundary. Check
-`GET /orders` for today's `DRAFT` rows without a risk decision and record them. The cap is a
-safety limit: raising it for the day is the owner's decision, not a workaround.
+Meaning: `max_opening_orders_per_day` counts every opening intent created since local midnight in
+the market timezone, including a `DRAFT` left behind when `POST /orders/propose` failed inside
+evidence gathering: a broker read error (the route answers 500) or, since #353, an account summary
+older than `account_summary_max_age_seconds` (409). The row is created before evidence is
+gathered, so no risk decision exists for it. Three such failures spend a cap of three.
+
+What you can do: nothing clears or completes the draft through a route. Proposing the same order
+again makes a new intent with new ids, which the draft's idempotency key refuses as a duplicate for
+the rest of the trading day (the route answers 500); propose a different order, or wait. `GET
+/orders` shows `DRAFT` rows with no `risk_snapshot_id` but no creation time, so it cannot tell
+today's drafts from older ones; if that matters, only the owner can check, from the database. The
+count resets at local midnight in the market timezone. The cap is a safety limit: raising it for
+the day is the owner's decision, not a workaround.
 
 ### Position mismatch (UNEXPLAINED_POSITION)
 

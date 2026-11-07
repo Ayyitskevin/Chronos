@@ -41,6 +41,7 @@ from tests.support.settle_rig import (
 )
 
 from chronos.broker.base import BrokerError
+from chronos.domain.account_freshness import AccountSummaryFreshnessError
 from chronos.domain.enums import OrderIntent, OrderSide, ProductFamily, ReconciliationStatus
 from chronos.domain.enums import OrderLifecycle as L
 from chronos.domain.models import AccountSummary, BrokerPosition, CancellationResult
@@ -349,12 +350,21 @@ def test_documents_that_the_recorded_floor_hold_blocks_closing_orders_at_the_pap
 # --- INTEGRATION P3-2 ------------------------------------------------------------------------
 
 
-class _FailsPositionsOnce(FakeBroker):
-    """A broker whose positions read fails once when told to (a transient outage at propose)."""
+class _FailsOnce(FakeBroker):
+    """A broker that, when told to, fails the next propose: a positions read error, or an account
+    summary older than ``account_summary_max_age_seconds`` (the #353 freshness refusal)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.fail_next = 0
+        self.stale_next = 0
+
+    async def account_summary(self) -> AccountSummary:
+        summary = await super().account_summary()
+        if self.stale_next > 0:
+            self.stale_next -= 1
+            return summary.model_copy(update={"as_of": FIXED_NOW - timedelta(hours=1)})
+        return summary
 
     async def positions(self) -> tuple[BrokerPosition, ...]:
         if self.fail_next > 0:
@@ -377,11 +387,19 @@ def _cap_check(decision: OrderRiskDecision) -> OrderRiskCheck:
     return next(check for check in decision.checks if check.name == "max_opening_orders_per_day")
 
 
-@pytest.mark.parametrize("failures", [0, 3], ids=["control", "three-abandoned-drafts"])
-def test_documents_that_a_draft_abandoned_by_a_broker_read_failure_counts_against_the_cap(
-    failures: int,
+@pytest.mark.parametrize(
+    "failures,cause",
+    [(0, None), (3, "broker-read-failure"), (3, "stale-account-summary")],
+    ids=["control", "three-drafts-broker-read-failure", "three-drafts-stale-account"],
+)
+def test_documents_that_a_draft_abandoned_inside_propose_counts_against_the_cap(
+    failures: int, cause: str | None
 ) -> None:
-    broker = _FailsPositionsOnce()
+    """Since #353 a stale account summary refuses inside evidence gathering exactly where a broker
+    read error does: after the DRAFT row exists. Either leaves a draft with no decision that the
+    cap counts, and the draft holds the order's idempotency key for the rest of the day."""
+
+    broker = _FailsOnce()
     settings = paper_settings(max_opening_orders_per_day=3)
     late = _LateProvider()
     harness = _Harness(broker, settings, evidence_provider=late)
@@ -393,14 +411,18 @@ def test_documents_that_a_draft_abandoned_by_a_broker_read_failure_counts_agains
             intents=harness.intents,
         )
         account = harness.service.account_id
+        expected = AccountSummaryFreshnessError if cause == "stale-account-summary" else BrokerError
         for index in range(1, failures + 1):
-            broker.fail_next = 1
+            if cause == "stale-account-summary":
+                broker.stale_next = 1
+            else:
+                broker.fail_next = 1
             intent = _short_put_intent(
                 "CHR-ORD-" + chr(64 + index) * 32,
                 intent_id=f"intent-{index}",
                 limit_price=Decimal(f"1.{20 + index}"),
             )
-            with pytest.raises(BrokerError):
+            with pytest.raises(expected):
                 harness.service.propose(intent, now=FIXED_NOW)  # type: ignore[arg-type]
             abandoned = harness.intents.get(f"intent-{index}", current_account_id=account)
             assert abandoned is not None and abandoned.status is L.DRAFT
@@ -417,5 +439,13 @@ def test_documents_that_a_draft_abandoned_by_a_broker_read_failure_counts_agains
         else:
             assert check.status.value == "PASS"
             assert check.detail == "1 <= 3"
+        if failures:
+            # the abandoned draft holds the order's idempotency key: a fresh propose of the same
+            # order (new intent and correlation ids, as the route always makes) is a duplicate
+            same_order_again = _short_put_intent(
+                "CHR-ORD-" + "Y" * 32, intent_id="intent-again", limit_price=Decimal("1.21")
+            )
+            with pytest.raises(ValueError, match="Idempotency key already maps"):
+                harness.service.propose(same_order_again, now=FIXED_NOW)  # type: ignore[arg-type]
     finally:
         harness.close()

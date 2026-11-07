@@ -50,4 +50,8 @@ def test_the_abandoned_draft_cap_count_is_disclosed_where_an_operator_looks() ->
 
     limitations, runbook = _flat(LIMITATIONS), _flat(RUNBOOK)
     assert "leaves a DRAFT with no risk decision that still counts" in limitations
-    assert "Daily opening cap refuses after broker errors at propose time" in runbook
+    assert "stale account summary" in limitations and "refused as a duplicate" in limitations
+    assert "local midnight in the market timezone" in limitations
+    assert "Daily opening cap refuses after a failed propose" in runbook
+    assert "no creation time" in runbook and "only the owner" in runbook
+    assert "local midnight in the market timezone" in runbook
