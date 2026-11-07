@@ -20,7 +20,7 @@ import logging
 import math
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -343,23 +343,58 @@ class UnsolicitedObservationClassifier:
         return True
 
 
-class NoticeLog(deque[str]):
+class NoticeLog:
     """The bounded notice window plus a monotonic count of every notice ever appended.
 
     RECHECK-348 P3-2: a reader that wants "what arrived since this marker" must not diff
     two windows. A full window of identical text looks unchanged after an append evicts
     its twin, so the new code was lost. ``appended`` only goes up, whatever the window holds.
+
+    REVIEW-TIDY P3-2: the window is held, not inherited. A ``deque`` subclass would let
+    ``appendleft``, ``insert`` or ``extend`` change the window without the counter seeing it, and
+    would break ``copy``. Here the only writers are :meth:`append` and :meth:`extend`, both
+    counted under one lock, and the read side is a plain read-only sequence.
     """
 
+    __slots__ = ("_count_lock", "_window", "appended")
+
     def __init__(self, maxlen: int = 200) -> None:
-        super().__init__(maxlen=maxlen)
         self._count_lock = threading.Lock()
+        self._window: deque[str] = deque(maxlen=maxlen)
         self.appended = 0
 
     def append(self, notice: str) -> None:
         with self._count_lock:
             self.appended += 1
-            super().append(notice)
+            self._window.append(notice)
+
+    def extend(self, notices: Iterable[str]) -> None:
+        for notice in notices:
+            self.append(notice)
+
+    def __len__(self) -> int:
+        return len(self._window)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(tuple(self._window))
+
+    def __getitem__(self, index: Any) -> Any:
+        snapshot = tuple(self._window)
+        return snapshot[index]
+
+    def __repr__(self) -> str:
+        return f"NoticeLog(appended={self.appended}, window={list(self._window)!r})"
+
+    def __copy__(self) -> NoticeLog:
+        with self._count_lock:
+            twin = NoticeLog(maxlen=self._window.maxlen or 0)
+            twin._window.extend(self._window)
+            twin.appended = self.appended
+        return twin
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> NoticeLog:
+        del memo
+        return self.__copy__()
 
 
 class CallbackBridge:

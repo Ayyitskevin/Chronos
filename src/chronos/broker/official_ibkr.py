@@ -28,7 +28,7 @@ import math
 import re
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
@@ -294,7 +294,7 @@ _INSTALL_GUIDANCE = (
 
 
 def _new_gateway_notice_codes(
-    notices: Sequence[str],
+    notices: Iterable[str],
     appended: int,
     *,
     limit: int,
@@ -305,10 +305,11 @@ def _new_gateway_notice_codes(
     diff of two windows (RECHECK-348 P3-2). Only notices still in the window can be read.
     """
 
-    if limit <= 0 or appended <= 0 or not notices:
+    window = tuple(notices)
+    if limit <= 0 or appended <= 0 or not window:
         return ()
     codes: list[int] = []
-    for notice in tuple(notices)[-min(appended, len(notices)) :]:
+    for notice in window[-min(appended, len(window)) :]:
         match = _NOTICE_CODE.match(notice)
         if match:
             codes.append(int(match.group(1)))
