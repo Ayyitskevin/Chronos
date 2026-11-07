@@ -196,6 +196,7 @@ class _Harness:
                 intents=intents,
                 tracker=tracker,
                 tracker_repo=tracker_repo,
+                reconciliation_readiness=self.readiness,
             ),
             tracker=tracker,
             tracker_repo=tracker_repo,

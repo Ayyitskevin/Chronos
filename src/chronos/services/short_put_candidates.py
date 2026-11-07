@@ -16,6 +16,7 @@ from pydantic import AwareDatetime
 from chronos.broker.market_data import (
     ManagedQuote,
     MarketDataManager,
+    MarketDataUnavailableError,
     OptionChainSnapshot,
 )
 from chronos.config.limits import (
@@ -112,6 +113,7 @@ class _MarketObservation:
     chain: OptionChainParameters
     option_contracts: tuple[OptionContract, ...]
     option_quotes: tuple[ManagedQuote, ...]
+    option_quote_refusal: MarketDataUnavailableError | None
     positions_second: tuple[BrokerPosition, ...]
     orders_second: tuple[BrokerOrder, ...]
     executions_second: tuple[BrokerExecution, ...]
@@ -244,7 +246,15 @@ class ShortPutCandidateService:
                     evaluated_at=observation.evaluated_at,
                 )
             )
+            option_quote_refusal_reason = (
+                "Option quote evidence was refused "
+                f"({type(observation.option_quote_refusal).__name__})."
+                if observation.option_quote_refusal is not None
+                else None
+            )
             if evidence_reasons:
+                if option_quote_refusal_reason is not None:
+                    evidence_reasons.append(option_quote_refusal_reason)
                 return self._no_trade(
                     normalized_symbol,
                     evaluated_at=observation.evaluated_at,
@@ -301,6 +311,8 @@ class ShortPutCandidateService:
             )
 
         reasons = resolution.no_trade_reasons
+        if option_quote_refusal_reason is not None:
+            reasons = tuple(dict.fromkeys((*reasons, option_quote_refusal_reason)))
         _LOGGER.info(
             "Read-only short-put candidates evaluated",
             extra={
@@ -384,10 +396,15 @@ class ShortPutCandidateService:
             raise _CandidateEvidenceError(
                 "No qualified option contract has a verified standard deliverable."
             )
-        option_quotes = await self._market_data.option_quotes(
-            option_contracts,
-            force_refresh=True,
-        )
+        option_quote_refusal: MarketDataUnavailableError | None = None
+        try:
+            option_quotes = await self._market_data.option_quotes(
+                option_contracts,
+                force_refresh=True,
+            )
+        except MarketDataUnavailableError as error:
+            option_quotes = ()
+            option_quote_refusal = error
 
         positions_second = await self._broker.positions()
         orders_second = await self._broker.open_orders()
@@ -407,6 +424,7 @@ class ShortPutCandidateService:
             chain=chain,
             option_contracts=option_contracts,
             option_quotes=option_quotes,
+            option_quote_refusal=option_quote_refusal,
             positions_second=positions_second,
             orders_second=orders_second,
             executions_second=executions_second,
@@ -565,9 +583,11 @@ class ShortPutCandidateService:
             )
         if observation.underlying_quote.quote.contract != observation.underlying:
             reasons.append("The underlying quote does not match the qualified contract.")
-        if len(observation.option_contracts) != len(observation.option_quotes):
+        if observation.option_quote_refusal is None and len(observation.option_contracts) != len(
+            observation.option_quotes
+        ):
             reasons.append("Option quote evidence is incomplete.")
-        elif any(
+        elif observation.option_quote_refusal is None and any(
             quote.quote.contract != contract
             for contract, quote in zip(
                 observation.option_contracts,

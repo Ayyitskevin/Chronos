@@ -191,6 +191,14 @@ same skip with `DB-PREFLIGHT` lines is a verdict; if neither is visible, the cau
 
 ## A running backend that refuses proposals: `503 AUTONOMY_NOT_RUNNING` (OPS-3)
 
+Autonomy maintenance is ON by default. With a configured mandate it is another cause of
+`503 AUTONOMY_NOT_RUNNING`: no runtime is built, `/health` carries `autonomy_maintenance`,
+and readiness is 503. This readiness fault also appears with no mandate, intentionally.
+For an owner-approved normal start, configure `CHRONOS_AUTONOMY_MAINTENANCE=off` in the
+process environment and restart. Repo-root `.env` is ignored for this switch; systemd
+operators must use the discovered EnvironmentFile and ON/OFF pre-start proof documented in
+`docs/ops/N3-CUTOVER.md`, with the cutover removal retained until Kevin authorizes step 9.
+
 > **In effect on `main` since #294 (merged 2026-10-07 UTC, merge `b7097da`).** A merge is not
 > deployment evidence: this describes the pinned source, and a host runs it only after it has
 > pulled and restarted. Nothing here was run for this document.
@@ -199,7 +207,7 @@ This is **not** the preflight skip above. A skipped unit is `inactive` and no ba
 backend **is running**: `GET /health/live` answers, and the autonomy runtime was simply not started
 at boot, because `build_autonomy_runtime` returned nothing or raised and the lifespan carried on
 (`src/chronos/api/main.py`, the comment "a broken grant alerts and boots inert"), or was not called
-at all under a recovery hold. A missing, invalid, mismatched, revoked or unsafe mandate, and an
+at all under maintenance or a recovery hold. A missing, invalid, mismatched, revoked or unsafe mandate, and an
 unsafe proposer-registry file, therefore do **not** stop the backend from booting; they leave it up
 with autonomy inert.
 
@@ -211,8 +219,9 @@ Two neighbouring conditions do **not** produce this refusal, because the route r
   effect at the next start (the response says `effective: "next start"`); it does not release the
   hold in the running process, so the 409 continues until the backend is restarted. The acknowledgement
   itself does not activate a mandate, disengage the kill switch, arm or grant trading authority. The
-  restart it requires is an ordinary start: it can auto-activate a configured, valid persistent mandate
-  (ADR-0017), which the hold skipped. Neither step clears the kill switch, arming or the live gates;
+  restart it requires can activate a configured, valid persistent mandate (ADR-0017) only when
+  maintenance is explicitly lifted and the remaining startup gates pass. During cutover keep
+  maintenance ON through this restart. Neither step clears the kill switch, arming or the live gates;
   those keep their own acts.
 - **Broken proposer registry** (configured but unreadable or invalid). `require_proposer` answers a
   different HTTP 503, `{"detail": "the proposer registry is configured but unreadable or invalid; proposals

@@ -743,6 +743,7 @@ def _build_order_management(
             intents=intents,
             tracker=tracker,
             tracker_repo=tracker_repo,
+            reconciliation_readiness=reconciliation_readiness,
         ),
         tracker=tracker,
         tracker_repo=tracker_repo,

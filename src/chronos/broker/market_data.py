@@ -704,6 +704,13 @@ class MarketDataManager:
                 observed_values=(quote,),
                 observed_at=self._now(),
             )
+        if self._quote_is_empty(quote):
+            raise MarketDataUnavailableError(
+                f"Broker returned an empty quote for {contract.symbol}",
+                contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
+            )
         fetched_at = self._now()
         entry = _CacheEntry(quote, fetched_at)
         self._quote_cache[contract.con_id] = entry
@@ -741,6 +748,13 @@ class MarketDataManager:
         if quote.contract.con_id != contract.con_id:
             raise MarketDataUnavailableError(
                 f"Broker returned a mismatched quote for {contract.symbol}",
+                contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
+            )
+        if self._quote_is_empty(quote):
+            raise MarketDataUnavailableError(
+                f"Broker returned an empty quote for {contract.symbol}",
                 contract_ids=(contract.con_id,),
                 observed_values=(quote,),
                 observed_at=self._now(),
@@ -871,6 +885,15 @@ class MarketDataManager:
                         ),
                     )
                 )[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                observed_at=self._now(),
+                truncated=len(quotes) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+            )
+        empty_quotes = tuple(quote for quote in quotes if self._quote_is_empty(quote))
+        if empty_quotes:
+            raise MarketDataUnavailableError(
+                "Broker returned an empty quote for one or more option contracts",
+                contract_ids=tuple(quote.contract.con_id for quote in empty_quotes),
+                observed_values=quotes[:MAX_CANDIDATE_REQUEST_CONTRACTS],
                 observed_at=self._now(),
                 truncated=len(quotes) > MAX_CANDIDATE_REQUEST_CONTRACTS,
             )
@@ -1035,6 +1058,10 @@ class MarketDataManager:
             timedelta(0) <= source_age <= self._max_quote_age
             and quote.data_quality is not DataQuality.STALE
         )
+
+    @staticmethod
+    def _quote_is_empty(quote: MarketQuote) -> bool:
+        return quote.bid is None and quote.ask is None and quote.last is None
 
     def _quote_is_transmission_eligible(
         self,

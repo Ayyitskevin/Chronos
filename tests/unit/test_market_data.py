@@ -919,22 +919,221 @@ async def test_crypto_quote_fetches_and_always_cancels_subscription() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_quote_values_are_preserved_without_fabrication() -> None:
+@pytest.mark.parametrize("quality", tuple(DataQuality))
+@pytest.mark.parametrize("close", (None, Decimal("1.95")))
+async def test_empty_underlying_quote_is_refused_before_cache(
+    quality: DataQuality,
+    close: Decimal | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = MutableClock()
     broker = FakeMarketDataBroker(clock)
-    broker.missing_values = True
+    manager = make_manager(broker)
+    contract = UnderlyingContract(con_id=3000, symbol="TEST")
+    empty = MarketQuote(
+        contract=contract,
+        timestamp=clock(),
+        data_quality=quality,
+        close=close,
+    )
+
+    async def return_empty(_contract: UnderlyingContract) -> MarketQuote:
+        return empty
+
+    monkeypatch.setattr(broker, "request_underlying_quote", return_empty)
+
+    for _ in range(2):
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.underlying_quote(contract)
+        assert raised.value.contract_ids == (3000,)
+        assert raised.value.observed_values == (empty,)
+
+    assert manager.cache_entry_count == 0
+    assert broker.cancellation_calls == [(3000,), (3000,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality", tuple(DataQuality))
+@pytest.mark.parametrize("close", (None, Decimal("1.95")))
+async def test_empty_crypto_quote_is_refused_before_cache(
+    quality: DataQuality,
+    close: Decimal | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contract = CryptoContract(con_id=3001, symbol="BTC")
+    empty = MarketQuote(
+        contract=contract,
+        timestamp=clock(),
+        data_quality=quality,
+        close=close,
+    )
+
+    async def return_empty(_contract: CryptoContract) -> MarketQuote:
+        return empty
+
+    monkeypatch.setattr(broker, "request_crypto_quote", return_empty)
+
+    for _ in range(2):
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.crypto_quote(contract)
+        assert raised.value.contract_ids == (3001,)
+        assert raised.value.observed_values == (empty,)
+
+    assert manager.cache_entry_count == 0
+    assert broker.cancellation_calls == [(3001,), (3001,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality", tuple(DataQuality))
+@pytest.mark.parametrize("close", (None, Decimal("1.95")))
+async def test_empty_option_batch_quote_is_refused_before_cache(
+    quality: DataQuality,
+    close: Decimal | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contract = make_contract(901)
+    empty = MarketQuote(
+        contract=contract,
+        timestamp=clock(),
+        data_quality=quality,
+        close=close,
+    )
+
+    def return_empty(
+        _contract: UnderlyingContract | OptionContract | CryptoContract,
+    ) -> MarketQuote:
+        return empty
+
+    monkeypatch.setattr(broker, "_quote", return_empty)
+
+    for _ in range(2):
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.option_quotes((contract,))
+        assert raised.value.contract_ids == (901,)
+        assert raised.value.observed_values == (empty,)
+
+    assert manager.cache_entry_count == 0
+    assert broker.option_quote_calls == [(901,), (901,)]
+    assert broker.cancellation_calls == [(901,), (901,)]
+
+
+@pytest.mark.asyncio
+async def test_empty_later_option_batch_member_refuses_every_member_before_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contracts = (make_contract(901), make_contract(902))
+    valid = broker._quote(contracts[0])
+    empty = MarketQuote(contract=contracts[1], timestamp=clock(), data_quality=DataQuality.LIVE)
+
+    def quote_for(
+        contract: UnderlyingContract | OptionContract | CryptoContract,
+    ) -> MarketQuote:
+        return valid if contract.con_id == 901 else empty
+
+    monkeypatch.setattr(broker, "_quote", quote_for)
+
+    for _ in range(2):
+        with pytest.raises(MarketDataUnavailableError) as raised:
+            await manager.option_quotes(contracts)
+        assert raised.value.contract_ids == (902,)
+        assert raised.value.observed_values == (valid, empty)
+        assert manager.cache_entry_count == 0
+
+    assert broker.option_quote_calls == [(901, 902), (901, 902)]
+    assert broker.cancellation_calls == [(901, 902), (901, 902)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality", (DataQuality.LIVE, DataQuality.FROZEN, DataQuality.DELAYED))
+@pytest.mark.parametrize("family", ("underlying", "crypto", "option"))
+async def test_zero_prices_are_present_and_remain_cacheable(
+    quality: DataQuality,
+    family: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
     manager = make_manager(broker)
 
-    managed = (await manager.option_quotes((make_contract(901),)))[0]
+    def zero_quote(
+        contract: UnderlyingContract | OptionContract | CryptoContract,
+    ) -> MarketQuote:
+        return MarketQuote(
+            contract=contract,
+            timestamp=clock(),
+            data_quality=quality,
+            bid=Decimal(0),
+            ask=Decimal(0),
+            last=Decimal(0),
+        )
 
-    assert managed.quote.bid is None
-    assert managed.quote.ask is None
-    assert managed.quote.last is None
-    assert managed.quote.greeks is None
-    assert managed.quote.volume is None
-    assert managed.quote.open_interest is None
-    assert managed.fresh is True
-    assert managed.transmission_eligible is False
+    monkeypatch.setattr(broker, "_quote", zero_quote)
+
+    if family == "underlying":
+        contract = UnderlyingContract(con_id=3000, symbol="TEST")
+        first = await manager.underlying_quote(contract)
+        second = await manager.underlying_quote(contract)
+    elif family == "crypto":
+        contract = CryptoContract(con_id=3001, symbol="BTC")
+        first = await manager.crypto_quote(contract)
+        second = await manager.crypto_quote(contract)
+    else:
+        contract = make_contract(901)
+        first = (await manager.option_quotes((contract,)))[0]
+        second = (await manager.option_quotes((contract,)))[0]
+
+    assert (first.quote.bid, first.quote.ask, first.quote.last) == (0, 0, 0)
+    assert first.quote.data_quality is quality
+    assert first.from_cache is False
+    assert second.from_cache is True
+    assert second.quote == first.quote
+    assert manager.cache_entry_count == 1
+    assert broker.cancellation_calls == [(contract.con_id,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality", (DataQuality.FROZEN, DataQuality.DELAYED))
+@pytest.mark.parametrize("family", ("underlying", "crypto", "option"))
+async def test_non_empty_non_live_quotes_remain_cacheable(
+    quality: DataQuality,
+    family: str,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.data_quality = quality
+    manager = make_manager(broker)
+
+    if family == "underlying":
+        contract_id = 3000
+        contract = UnderlyingContract(con_id=contract_id, symbol="TEST")
+        first = await manager.underlying_quote(contract)
+        second = await manager.underlying_quote(contract)
+    elif family == "crypto":
+        contract_id = 3001
+        contract = CryptoContract(con_id=contract_id, symbol="BTC")
+        first = await manager.crypto_quote(contract)
+        second = await manager.crypto_quote(contract)
+    else:
+        contract_id = 901
+        contract = make_contract(contract_id)
+        first = (await manager.option_quotes((contract,)))[0]
+        second = (await manager.option_quotes((contract,)))[0]
+
+    assert first.quote.data_quality is quality
+    assert first.quote.last == Decimal("1.05")
+    assert first.from_cache is False
+    assert second.from_cache is True
+    assert manager.cache_entry_count == 1
+    assert broker.cancellation_calls == [(contract_id,)]
 
 
 @pytest.mark.asyncio

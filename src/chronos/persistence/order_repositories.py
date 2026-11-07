@@ -20,13 +20,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily, RiskCheckStatus
+from chronos.domain.enums import (
+    TERMINAL_ORDER_LIFECYCLES,
+    OrderLifecycle,
+    OrderSide,
+    ProductFamily,
+    RiskCheckStatus,
+)
 from chronos.persistence.repositories import _require_matching_account_scope
 from chronos.persistence.schema import (
     OrderConfirmationRow,
@@ -35,6 +41,10 @@ from chronos.persistence.schema import (
     RiskCheckResultRow,
     RiskDecisionRow,
 )
+
+if TYPE_CHECKING:
+    from chronos.orders.intent import WheelOrderIntent
+
 
 # Intent statuses that mean the order is still working (not yet terminal) and
 # therefore still encumbers cash/shares for the next order's risk evaluation.
@@ -287,7 +297,13 @@ class OrderIntentRepository:
             )
             return tuple(_intent_row_to_record(row) for row in rows)
 
-    def count_opening_since(self, *, current_account_id: str, since: datetime) -> int:
+    def count_opening_since(
+        self,
+        *,
+        current_account_id: str,
+        since: datetime,
+        evaluated_intent: WheelOrderIntent | None = None,
+    ) -> int:
         """Count opening intents created on/after ``since``, whatever their side.
 
         **The side filter this used to carry was a bug (R-25).** It matched
@@ -306,20 +322,52 @@ class OrderIntentRepository:
         moving the counter would be bounded by nothing at all. Counting
         *attempts to open* is the conservative reading and the one that matches
         what the limit is for.
+
+        U3F1: exclude only the persisted candidate whose immutable economic fields
+        match the supplied evaluation. An id alone is not authority to subtract a
+        row. A mismatch refuses; an unpersisted candidate subtracts nothing. The
+        scope check, identity read and count share this session. No lifecycle
+        filter is applied: rejected prior attempts still consume the limit.
         """
 
         with self._sessions() as session:
             fingerprint = _require_matching_account_scope(
                 session, current_account_id
             ).account_fingerprint
-            count = session.scalar(
+            excluded_id = None
+            if evaluated_intent is not None:
+                if evaluated_intent.account_id != current_account_id:
+                    raise ValueError("Evaluated intent account does not match the count scope")
+                row = session.get(OrderIntentRow, evaluated_intent.intent_id)
+                if row is not None:
+                    expected = (
+                        fingerprint,
+                        str(evaluated_intent.product_family),
+                        evaluated_intent.symbol,
+                        getattr(evaluated_intent.contract, "con_id", None),
+                        str(evaluated_intent.side),
+                        evaluated_intent.open_close_effect,
+                        evaluated_intent.quantity,
+                        evaluated_intent.limit_price,
+                        evaluated_intent.order_type,
+                        evaluated_intent.time_in_force,
+                        evaluated_intent.outside_rth,
+                        row.environment,
+                        evaluated_intent.correlation_id,
+                    )
+                    if _economic_signature(row) != expected:
+                        raise ValueError("Evaluated intent does not match its persisted identity")
+                    excluded_id = row.intent_id
+            query = (
                 select(func.count())
                 .select_from(OrderIntentRow)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
                 .where(OrderIntentRow.open_close_effect == "OPEN")
                 .where(OrderIntentRow.created_at >= since)
             )
-            return int(count or 0)
+            if excluded_id is not None:
+                query = query.where(OrderIntentRow.intent_id != excluded_id)
+            return int(session.scalar(query) or 0)
 
     def set_status(
         self,
@@ -391,12 +439,12 @@ def _record_to_intent_row(record: OrderIntentRecord) -> OrderIntentRow:
 
 
 class RecordedFillsAdvanced(ValueError):
-    """LEGACY-5 r1: a write that carries FEWER fills than the intent's durable record was refused.
+    """A write that carries FEWER fills than the intent's durable record was refused.
 
-    Raised by :meth:`OrderTrackerRepository.record_transition` with
-    ``refuse_below_recorded_fills=True`` from INSIDE the transition's transaction, so the check and
-    the write are one atomic decision: nothing was written. A ``ValueError``, so an operator path
-    surfaces it through its existing refusal mapping.
+    Raised by :meth:`OrderTrackerRepository.record_transition` for every terminal lifecycle, or
+    for any lifecycle when ``refuse_below_recorded_fills=True``. The check runs INSIDE the
+    transition's transaction, so the check and the write are one atomic decision: nothing was
+    written. The repository does not map this refusal for the operator; the caller must handle it.
     """
 
     def __init__(self, intent_id: str, *, recorded: Decimal, attempted: Decimal) -> None:
@@ -409,6 +457,17 @@ class RecordedFillsAdvanced(ValueError):
             f"recorded fills advanced: intent {intent_id!r} has {recorded_text} filled on record, "
             f"above the {attempted_text} this write carries; nothing was written and the intent "
             "stays locked"
+        )
+
+
+class IdentityHistoryAdvanced(ValueError):
+    """A settlement write observed identity history beyond the planner's snapshot."""
+
+    def __init__(self, intent_id: str) -> None:
+        self.intent_id = intent_id
+        super().__init__(
+            f"identity history advanced for intent {intent_id!r} before the settle write; "
+            "nothing was written and the intent stays locked"
         )
 
 
@@ -440,6 +499,9 @@ class OrderTrackerRepository:
         occurred_at: datetime,
         enforce_from_status: bool = False,
         refuse_below_recorded_fills: bool = False,
+        expected_identity_sets: (
+            tuple[frozenset[int], frozenset[int], frozenset[int]] | None
+        ) = None,
     ) -> bool:
         """Write one order_events row and set the intent status in one txn.
 
@@ -464,12 +526,20 @@ class OrderTrackerRepository:
         USER_CONFIRMED while gate evidence was being gathered can never be
         clobbered back into the submit path.
 
-        With ``refuse_below_recorded_fills=True`` (LEGACY-5 r1) the largest ``filled_quantity`` on
-        the intent's events is read inside this row's savepoint, after its INSERT took the
-        write lock; when this write's figure (a missing figure counts as zero) is below it,
-        :class:`RecordedFillsAdvanced` is raised, the savepoint rolls back and nothing is written
-        -- a fill recorded after the caller read the maximum cannot be overwritten by a lower
-        terminal figure.
+        Every terminal lifecycle (FILLED, CANCELLED, REJECTED) enforces the recorded-fill floor
+        regardless of caller flags. ``refuse_below_recorded_fills=True`` additionally preserves
+        the explicit floor for any non-terminal write, as used by existing recovery callers. The
+        largest ``filled_quantity`` is read inside this row's savepoint, after its INSERT took
+        the write lock. A terminal write without a figure inherits that recorded maximum when one
+        exists; if no fill figure is recorded, the terminal row remains figureless. An explicit
+        lower figure raises :class:`RecordedFillsAdvanced`, the savepoint rolls back, and nothing
+        is written.
+
+        ``expected_identity_sets`` closes the same-status history race for reconciliation
+        settlements. After the candidate INSERT takes the write lock, the transaction rereads
+        the permanent/client/broker-order id sets from every earlier event. Any difference from
+        the planner's captured sets rolls the candidate event back before the fill-floor check:
+        identity provenance is established before quantity evidence is interpreted.
         """
 
         with self._sessions.begin() as session:
@@ -506,7 +576,18 @@ class OrderTrackerRepository:
                 with session.begin_nested():
                     session.add(row)
                     session.flush()
-                    if refuse_below_recorded_fills:
+                    if to_status in TERMINAL_ORDER_LIFECYCLES and row.filled_quantity is None:
+                        recorded = self._max_recorded_fills(session, intent_id)
+                        if recorded is not None:
+                            row.filled_quantity = Decimal(recorded)
+                            session.flush()
+                    if expected_identity_sets is not None:
+                        self._refuse_moved_identity_history(
+                            session,
+                            row,
+                            expected=expected_identity_sets,
+                        )
+                    if refuse_below_recorded_fills or to_status in TERMINAL_ORDER_LIFECYCLES:
                         self._refuse_below_recorded_fills(session, row)
                     if enforce_from_status:
                         session.refresh(intent)  # the CAS read above ran before the lock
@@ -523,6 +604,35 @@ class OrderTrackerRepository:
                 return False  # the CAS lost inside the transaction: nothing was written
             return True
 
+    @staticmethod
+    def _refuse_moved_identity_history(
+        session: Session,
+        row: OrderEventRow,
+        *,
+        expected: tuple[frozenset[int], frozenset[int], frozenset[int]],
+    ) -> None:
+        columns = (
+            OrderEventRow.permanent_id,
+            OrderEventRow.client_id,
+            OrderEventRow.broker_order_id,
+        )
+        observed = tuple(
+            frozenset(
+                int(value)
+                for value in session.scalars(
+                    select(column).where(
+                        OrderEventRow.intent_id == row.intent_id,
+                        OrderEventRow.id != row.id,
+                        column.is_not(None),
+                    )
+                )
+                if value is not None
+            )
+            for column in columns
+        )
+        if observed != expected:
+            raise IdentityHistoryAdvanced(row.intent_id)
+
     def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
         with self._sessions() as session:
             _require_matching_account_scope(session, current_account_id)
@@ -534,10 +644,22 @@ class OrderTrackerRepository:
             return tuple(_event_row_to_record(row) for row in rows)
 
     @staticmethod
-    def _refuse_below_recorded_fills(session: Session, row: OrderEventRow) -> None:
-        """LEGACY-5 r1: raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than
-        the largest figure on the intent's events (``row`` itself included: its own figure is
-        never above itself, so it cannot change the answer).
+    def _max_recorded_fills(
+        session: Session, intent_id: str, *, excluding_event_id: int | None = None
+    ) -> Decimal | None:
+        statement = select(func.max(OrderEventRow.filled_quantity)).where(
+            OrderEventRow.intent_id == intent_id
+        )
+        if excluding_event_id is not None:
+            statement = statement.where(OrderEventRow.id != excluding_event_id)
+        return session.scalar(statement)
+
+    @classmethod
+    def _refuse_below_recorded_fills(cls, session: Session, row: OrderEventRow) -> None:
+        """Raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than the
+        largest figure on the intent's prior events, excluding ``row``. The column stores eight
+        decimal places, so compare at that scale while retaining the original attempted figure in
+        the typed refusal.
 
         Called inside the row's savepoint, after its flush: the INSERT took the write lock, so no
         other writer can commit between this read and the commit, and raising rolls the savepoint
@@ -545,13 +667,10 @@ class OrderTrackerRepository:
         transaction before the first statement, so a savepoint RELEASE would commit it).
         """
 
-        recorded = session.scalar(
-            select(func.max(OrderEventRow.filled_quantity)).where(
-                OrderEventRow.intent_id == row.intent_id
-            )
-        )
+        recorded = cls._max_recorded_fills(session, row.intent_id, excluding_event_id=row.id)
         attempted = row.filled_quantity if row.filled_quantity is not None else Decimal(0)
-        if recorded is not None and attempted < recorded:
+        stored_scale_attempt = attempted.quantize(Decimal("0.00000001"))
+        if recorded is not None and stored_scale_attempt < recorded:
             raise RecordedFillsAdvanced(
                 row.intent_id, recorded=Decimal(recorded), attempted=Decimal(attempted)
             )

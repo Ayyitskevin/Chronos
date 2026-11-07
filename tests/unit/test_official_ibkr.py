@@ -296,6 +296,52 @@ class TestChainAndQuoteNormalizers:
         assert quote.bid is None  # missing stays missing — never invented
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["bid", "ask", "last", "close"])
+async def test_snapshot_quote_accepts_a_live_quote_with_one_price(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    state = QuoteState(data_quality=DataQuality.LIVE, completed_at=NOW)
+    setattr(state, field, Decimal("1.00"))
+
+    class Registry:
+        def open(self) -> int:
+            return 7
+
+        async def wait(self, request_id: int, *, timeout: float) -> tuple[()]:
+            assert (request_id, timeout) == (7, official_ibkr_module._QUOTE_TIMEOUT_S)
+            return ()
+
+        def abandon(self, request_id: int) -> None:
+            assert request_id == 7
+
+    class Bridge:
+        def open_quote(self, request_id: int) -> None:
+            assert request_id == 7
+
+        def close_quote(self, request_id: int) -> QuoteState:
+            assert request_id == 7
+            return state
+
+    app = SimpleNamespace(reqMktData=lambda *_args: None)
+    broker = object.__new__(OfficialIBKRBroker)
+    broker.registry = Registry()  # type: ignore[assignment]
+    broker.bridge = Bridge()  # type: ignore[assignment]
+    monkeypatch.setattr(broker, "_require_app", lambda: app)
+    monkeypatch.setattr(
+        official_ibkr_module,
+        "_load_ibapi",
+        lambda: (object, object, SimpleNamespace, object),
+    )
+    underlying = UnderlyingContract(con_id=5, symbol="SPY")
+
+    quote = await broker._snapshot_quote(underlying, con_id=5, generic_ticks="")
+
+    assert quote.data_quality is DataQuality.LIVE
+    assert getattr(quote, field) == Decimal("1.00")
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (("liquidHours", "x" * 10_000), ("timeZoneId", "x" * 1_000)),

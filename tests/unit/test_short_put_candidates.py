@@ -581,6 +581,53 @@ def test_stale_reconciled_account_summary_locks_capital_before_market_reads() ->
     assert runner.run_calls == 0
 
 
+@pytest.mark.parametrize("quality", [DataQuality.FROZEN, DataQuality.DELAYED])
+@pytest.mark.parametrize("close_only", [False, True])
+def test_unpriced_option_refusal_preserves_read_only_display_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    quality: DataQuality,
+    close_only: bool,
+) -> None:
+    broker = _CandidateBroker()
+    request_option_quotes = broker.request_option_quotes
+
+    async def return_unpriced_quotes(
+        contracts: Sequence[OptionContract],
+    ) -> tuple[MarketQuote, ...]:
+        quotes = await request_option_quotes(contracts)
+        return tuple(
+            quote.model_copy(
+                update={
+                    "bid": None,
+                    "ask": None,
+                    "last": None,
+                    "close": Decimal("1.95") if close_only else None,
+                    "data_quality": quality,
+                }
+            )
+            for quote in quotes
+        )
+
+    monkeypatch.setattr(broker, "request_option_quotes", return_unpriced_quotes)
+    service, _runner, _reader, market_data = _service(broker, _reconciliation())
+
+    result = service.evaluate("AAPL")
+
+    assert result.status is EligibilityStatus.NO_TRADE
+    assert result.opening_actions_locked is True
+    assert set(broker.option_quote_contract_ids[-1]).isdisjoint(market_data._quote_cache)
+    assert result.underlying_quote is not None
+    assert result.chain is not None
+    assert result.resolution is not None
+    assert result.resolution.status is EligibilityStatus.NO_TRADE
+    assert result.resolution.candidates == ()
+    assert result.resolution.rejected == ()
+    assert "No qualified option quotes were supplied for evaluation." in result.reasons
+    assert any("MarketDataUnavailableError" in reason for reason in result.reasons)
+    assert market_data.active_subscription_count == 0
+    assert len(broker.cancellations) == 2
+
+
 def test_snapshot_captured_during_reconciliation_uses_post_reconcile_clock() -> None:
     clock_calls = 0
 

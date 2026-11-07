@@ -59,7 +59,13 @@ class _OpeningCounter(Protocol):
     dependency edge.
     """
 
-    def count_opening_since(self, *, current_account_id: str, since: datetime) -> int: ...
+    def count_opening_since(
+        self,
+        *,
+        current_account_id: str,
+        since: datetime,
+        evaluated_intent: WheelOrderIntent | None = None,
+    ) -> int: ...
 
 
 class BrokerRiskEvidenceProvider:
@@ -211,7 +217,10 @@ class BrokerRiskEvidenceProvider:
         )
 
     def _opening_today(self, intent: WheelOrderIntent, *, now: datetime) -> int | None:
-        """Opening intents created so far in this market-local day (R-25).
+        """Other opening attempts in this market-local day (R-25, U3F1).
+
+        Propose persists before gathering; the risk check adds this candidate once.
+        The repository verifies its identity before excluding its persisted row.
 
         Before M10 nothing set this at all, so ``RiskEvidence.opening_orders_today``
         took its ``0`` default and ``max_opening_orders_per_day`` passed
@@ -238,6 +247,7 @@ class BrokerRiskEvidenceProvider:
             return self._intents.count_opening_since(
                 current_account_id=intent.account_id,
                 since=local_midnight.astimezone(UTC),
+                evaluated_intent=intent,
             )
         except Exception:
             _logger.exception(
