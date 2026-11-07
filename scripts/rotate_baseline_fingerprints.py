@@ -1,9 +1,36 @@
 """Rotate reviewed matrix fingerprints from committed parent baselines only.
 
-The operator fetches origin first, then pins the reviewed record:
-    python scripts/rotate_baseline_fingerprints.py \\
-        --reviewed "$(git rev-parse origin/main)" --parent HEAD --check
-For a merge, supply two --parent arguments. Inventory sources must be indexed.
+Run from inside the repository, after `git fetch origin`. Without --check, a changed
+.secrets.baseline is replaced atomically; with --check nothing is written.
+
+Exit codes:
+    0  already current, or rotated (without --check)
+    1  would change (--check only; this is not an error)
+    2  refused, with the reason on stderr; nothing is written
+
+NOTE lines report carried history entries. They are information and do not change the
+exit code.
+
+Before running:
+  - Regenerate the docs with scripts/build_current_state.py. The tool reads the capability
+    matrix from the working tree, not from a commit.
+  - Resolve conflict markers. A marker in the matrix is refused (exit 2). A marker in
+    .secrets.baseline is not checked: --check then reports "would change" (exit 1).
+  - The count pin in tests/unit/test_release_security.py is not updated by the tool. Set it
+    by hand.
+
+--reviewed takes a full 40-hex commit, not a ref name. It must be an ancestor of
+origin/main. Pass "$(git rev-parse origin/main)"; the text origin/main is refused.
+
+--parent takes a commit whose committed baseline matches its committed matrix. At least
+one --parent must contain the --reviewed commit.
+  - Merge into main: --reviewed as above, with two --parent arguments: the branch's last
+    such commit, and origin/main.
+  - Branch rotating its own fingerprint: --reviewed as above, with one --parent: the
+    branch's last such commit. --parent HEAD is refused once the regenerated matrix is
+    committed, because HEAD's baseline no longer matches it.
+  - Do not use --parent origin/main on a branch that has already committed a rotated value:
+    --check can pass, and the git-history scan in the release security gate then fails.
 """
 
 from __future__ import annotations
@@ -477,9 +504,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Validate before atomic replacement; crash durability after replace is not guaranteed."""
     try:
         parser = Parser(description=__doc__)
-        parser.add_argument("--parent", action="append", required=True)
-        parser.add_argument("--reviewed", required=True)
-        parser.add_argument("--check", action="store_true")
+        parser.add_argument(
+            "--parent",
+            action="append",
+            required=True,
+            help="commit whose committed baseline matches its committed matrix; "
+            "one, or two for a merge",
+        )
+        parser.add_argument(
+            "--reviewed",
+            required=True,
+            help='full 40-hex commit (not a ref name), e.g. "$(git rev-parse origin/main)"; '
+            "an ancestor of origin/main",
+        )
+        parser.add_argument(
+            "--check",
+            action="store_true",
+            help="report only: 0 current, 1 would change, 2 refused; write nothing",
+        )
         args = parser.parse_args(argv)
         if len(args.parent) not in (1, 2):
             raise RotationError("one or two parents required")

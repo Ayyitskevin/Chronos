@@ -165,10 +165,23 @@ runbooks.
   backend restart. The restarted process remains unreconciled until a later startup, operator, or
   periodic pass proves parity. The refused read still counts as a failed broker call and freezes
   other intents' planned writes until that restart.
-- The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
-  basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
-  positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
-  exists. `MANUAL_REVIEW` is the safe outcome for any ambiguity.
+- The local reader marks a symbol unresolved only when a persisted cycle, strategy state,
+  draft, or basis entry names it (`src/chronos/persistence/repositories.py:324`, `:347`,
+  `:367`, `:461`). Fills are not collected as unresolved (BP-1b r1, `:416-417`). No code in
+  `src` writes cycles, strategy states, or drafts, and the basis repository's `append` is
+  called only from tests, so those rules are latent in production. In practice a nonzero
+  broker position holds its symbol at `MANUAL_REVIEW` (`HELD_POSITION_UNPROVEN`), and listed
+  broker executions do the same (`EXECUTIONS_UNALLOCATED`;
+  `src/chronos/services/reconciliation.py:586-592`). Open broker orders hold readiness at
+  `PENDING` only when every open order is one exact, zero-fill, owned short put and is the only
+  open order on its symbol (`src/chronos/services/reconciliation.py:594-599`, `:736-751`;
+  `src/chronos/runtime.py:299-300`). Any other open order makes its symbol `MANUAL_REVIEW`,
+  which makes the whole portfolio `MANUAL_REVIEW` (`src/chronos/services/reconciliation.py:440`),
+  and readiness reads that portfolio status (`src/chronos/runtime.py:293`), so the block is
+  account-wide. Positions stay `MANUAL_REVIEW` until complete allocation provenance exists.
+  `MANUAL_REVIEW` is the safe outcome for any ambiguity. After a fill, nothing goes through
+  Chronos account-wide, closes included, until the position is flat and its executions have
+  left the broker's snapshot.
 - A `SUBMISSION_UNKNOWN` order (an ambiguous failure after a send may have started) blocks
   further live submissions until reconciliation resolves it from positive broker truth. The
   audited operator endpoint (`POST /orders/{id}/resolve`) refreshes evidence but cannot turn
