@@ -65,6 +65,7 @@ from chronos.broker.base import (
     OptionChainResponse,
 )
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -381,6 +382,7 @@ class SimBroker:
             total_cash=self._cash,
             buying_power=max(self._cash, Decimal("0")),
             as_of=self._clock(),
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         )
 
     async def positions(self) -> tuple[BrokerPosition, ...]:

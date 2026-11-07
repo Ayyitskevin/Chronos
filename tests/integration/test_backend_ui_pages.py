@@ -178,6 +178,44 @@ def test_portfolio_renders_account_metrics(monkeypatch: pytest.MonkeyPatch) -> N
     assert metrics.get("Broker mode") == "DEMO"
 
 
+@pytest.mark.parametrize("provenance", ["UNKNOWN", None, "UNRECOGNIZED", "VERIFIED_RESPONSE"])
+def test_portfolio_marks_account_provenance_and_local_read_time(
+    monkeypatch: pytest.MonkeyPatch, provenance: str | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = _canned(request)
+        if request.url.path == "/account/summary" and provenance is not None:
+            return httpx.Response(200, json={**response.json(), "provenance": provenance})
+        return response
+
+    _patch_from_settings(
+        monkeypatch,
+        lambda *_a, **_k: ApiClient(
+            "http://127.0.0.1:8765", "test-token", transport=httpx.MockTransport(handler)
+        ),
+    )
+    app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
+    assert not app.exception
+    warnings = " ".join(w.value for w in app.warning)
+    captions = " ".join(c.value for c in app.caption)
+    metrics = {m.label: m.value for m in app.metric}
+    if provenance == "VERIFIED_RESPONSE":
+        assert "VERIFIED_RESPONSE" in captions
+        assert "unverified cache" not in warnings.lower()
+        suffix = ""
+    else:
+        assert "UNKNOWN" in warnings
+        assert "unverified cache" in warnings.lower()
+        assert "read-only" in warnings.lower()
+        suffix = " (unverified)"
+    assert metrics[f"Net liquidation{suffix}"] == "250000.00 USD"
+    assert metrics[f"Total cash{suffix}"] == "100000.00 USD"
+    assert metrics[f"Buying power{suffix}"] == "480000.00 USD"
+    assert "local read completion time" in captions.lower()
+    assert "not broker valuation time" in captions.lower()
+    assert "2026-07-17T15:00:00+00:00" in captions
+
+
 def test_symbol_detail_shows_regime_disclaimer() -> None:
     # st.navigation callable pages can't be reached by switch_page, so render
     # the page directly inside a real ScriptRunContext.

@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import cast
 
 import pytest
+from streamlit.testing.v1 import AppTest
 from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.config.settings import Settings
@@ -94,3 +95,76 @@ def test_dashboard_withholds_interactive_workspace_for_invalid_runtime_scope(
     dashboard.render_dashboard(cast(AppRuntime, _ExplodingRuntime(runtime_scope)))
 
     assert calls == ["unavailable"]
+
+
+def _run_reconciliation_account(provenance: str) -> None:
+    # AppTest executes this body in a standalone module; no broker is constructed.
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from chronos.domain.enums import (
+        AccountSummaryProvenance,
+        DataQuality,
+        DisplayEnvironment,
+        ReconciliationStatus,
+    )
+    from chronos.services.reconciliation import (
+        ReconciliationAccountView,
+        ReconciliationResult,
+        ReconciliationSnapshotView,
+    )
+    from chronos.ui.dashboard import _render_portfolio
+
+    observed_at = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
+    result = ReconciliationResult(
+        status=ReconciliationStatus.RECONCILED,
+        reasons=(),
+        symbols=(),
+        snapshot=ReconciliationSnapshotView(
+            environment=DisplayEnvironment.PAPER,
+            data_quality=DataQuality.UNKNOWN,
+            account=ReconciliationAccountView(
+                masked_account_id="DU•••4567",
+                net_liquidation=Decimal("250000"),
+                total_cash=Decimal("100000"),
+                buying_power=Decimal("480000"),
+                currency="USD",
+                as_of=observed_at,
+                provenance=AccountSummaryProvenance(provenance),
+            ),
+            positions=(),
+            open_orders=(),
+            execution_count=0,
+            server_time_start=observed_at,
+            server_time_end=observed_at,
+            captured_at=observed_at,
+            window_seconds=0,
+            server_window_seconds=0,
+        ),
+    )
+    _render_portfolio(result)
+
+
+@pytest.mark.parametrize("provenance", ["UNKNOWN", "VERIFIED_RESPONSE"])
+def test_reconciliation_dashboard_marks_account_provenance(provenance: str) -> None:
+    app = AppTest.from_function(_run_reconciliation_account, args=(provenance,)).run(timeout=60)
+    assert not app.exception
+    warnings = " ".join(w.value for w in app.warning)
+    captions = " ".join(c.value for c in app.caption)
+    metrics = {m.label: m.value for m in app.metric}
+    if provenance == "VERIFIED_RESPONSE":
+        assert "VERIFIED_RESPONSE" in captions
+        assert "unverified cache" not in warnings.lower()
+        suffix = ""
+    else:
+        assert "UNKNOWN" in warnings
+        assert "unverified cache" in warnings.lower()
+        assert "read-only" in warnings.lower()
+        suffix = " (unverified)"
+    assert metrics[f"Net liquidation{suffix}"] == "250,000.00 USD"
+    assert metrics[f"Cash{suffix}"] == "100,000.00 USD"
+    assert metrics[f"Buying power{suffix}"] == "480,000.00 USD"
+    assert "local read completion time" in captions.lower()
+    assert "not broker valuation time" in captions.lower()
+    assert metrics["Open account orders"] == "0"
+    assert metrics["Observed executions"] == "0"

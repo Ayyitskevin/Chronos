@@ -67,9 +67,15 @@ runbooks.
 - **Account-summary `as_of` is local-read time, not broker valuation time.** Every adapter stamps
   when its local read completes. In particular, the non-default `ib_async` adapter may return
   already-populated `accountSummaryAsync` cache rows and then apply a new local stamp without a
-  broker-side update. The age guard therefore bounds how long Chronos carries one local read
-  across blocking work; it does not prove venue freshness. Broker-side update timestamps or an
-  explicitly forced-refresh contract remain an open follow-up before this limitation can narrow.
+  broker-side update. Such summaries carry `UNKNOWN` provenance: display remains available,
+  while risk, cash/capital checks, autonomy sizing, drawdown and served financial evidence refuse
+  them. Refusal does not update or trip the drawdown breaker. Missing provenance also defaults
+  to `UNKNOWN`, including reconciliation projections and persisted account facts. The official
+  adapter labels its existing completed request response `VERIFIED_RESPONSE`; DEMO and sim label
+  their controlled responses explicitly. That label does not attest broker valuation time. The
+  unchanged age guard still bounds how long Chronos carries a local read across blocking work.
+  No forced refresh, extra request or callback collection is added; that separate option remains
+  owner-gated. Broker update-time evidence remains an open follow-up.
 
 - **A close-only underlying quote is now refused at the manager.** Since QEMPTY (D-78), a quote
   with no bid, ask or last is refused even when it carries a prior `close` (for example the

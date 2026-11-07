@@ -64,6 +64,7 @@ from chronos.api.auth import require_proposer, require_token
 from chronos.api.dependencies import BackendState, admission_accepts, require_writer
 from chronos.domain.account_freshness import (
     account_summary_check_time,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import BrokerMode
@@ -564,6 +565,7 @@ def compose_served_document(
         )
         require_account_summary_freshness(
             getattr(summary, "as_of", None),
+            provenance=account_summary_provenance(summary),
             now=account_summary_check_time(broker_mode=broker_mode, demo_now=demo_clock),
             max_age_seconds=getattr(settings, "account_summary_max_age_seconds", 30),
         )
@@ -611,6 +613,7 @@ def compose_served_document(
         # its balances enter the served artifact.
         require_account_summary_freshness(
             getattr(summary, "as_of", None),
+            provenance=account_summary_provenance(summary),
             now=account_summary_check_time(broker_mode=broker_mode, demo_now=demo_clock),
             max_age_seconds=getattr(settings, "account_summary_max_age_seconds", 30),
         )

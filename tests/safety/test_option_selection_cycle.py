@@ -34,7 +34,7 @@ from chronos.config.limits import (
     MAX_OPTION_SELECTION_PAYLOAD_JSON_CHARS,
     MAX_OPTION_SELECTION_RECEIPT_BYTES,
 )
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality
 from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
 from chronos.persistence.schema import HashChainRow
@@ -617,6 +617,7 @@ def test_receipt_is_persisted_even_when_later_sizing_refuses(session: Session) -
     facts = _facts(
         now=_NOW,
         account=AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal("100000"),

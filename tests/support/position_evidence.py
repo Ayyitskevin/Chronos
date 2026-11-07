@@ -18,7 +18,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from chronos.domain.enums import BrokerAdapter, BrokerMode, DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, BrokerAdapter, BrokerMode, DataQuality
 from chronos.domain.models import BrokerPosition, CryptoContract, MarketQuote, UnderlyingContract
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.persistence.database import Database
@@ -77,6 +77,7 @@ class Broker:
             total_cash=Decimal(60_000),
             buying_power=Decimal(60_000),
             as_of=self.summary_as_of,
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         )
 
     async def connection_status(self) -> SimpleNamespace:

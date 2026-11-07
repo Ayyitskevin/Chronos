@@ -23,7 +23,10 @@ from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
-from chronos.domain.account_freshness import require_account_summary_freshness
+from chronos.domain.account_freshness import (
+    account_summary_provenance,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     OptionRight,
     OrderIntent,
@@ -95,6 +98,7 @@ class BrokerRiskEvidenceProvider:
         account = self._connection.run(self._connection.broker.account_summary())
         require_account_summary_freshness(
             getattr(account, "as_of", None),
+            provenance=account_summary_provenance(account),
             now=self._clock() if self._clock is not None else now,
             max_age_seconds=self._settings.account_summary_max_age_seconds,
         )
@@ -173,6 +177,7 @@ class BrokerRiskEvidenceProvider:
         # balances enter the synchronous risk decision.
         require_account_summary_freshness(
             getattr(account, "as_of", None),
+            provenance=account_summary_provenance(account),
             now=self._clock() if self._clock is not None else now,
             max_age_seconds=self._settings.account_summary_max_age_seconds,
         )

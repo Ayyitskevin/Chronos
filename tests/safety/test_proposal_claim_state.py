@@ -46,7 +46,7 @@ from chronos.autonomy import (
     TradableAssetClass,
     VersionPins,
 )
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality
 from chronos.domain.models import UnderlyingContract
 from chronos.persistence.database import Database
 from chronos.persistence.schema import AutonomyOwnerAlertRow, AutonomyProposalQueueRow
@@ -156,6 +156,7 @@ def facts(now: datetime) -> CycleFacts:
         evidence_bundle_digest="b" * 64,
         market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         account=AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=NOW,
             clock=lambda: NOW,
             net_liquidation_usd=Decimal(100_000),

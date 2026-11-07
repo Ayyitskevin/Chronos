@@ -12,7 +12,7 @@ import streamlit as st
 
 from chronos.broker.base import BrokerError
 from chronos.broker.demo import DemoBroker
-from chronos.domain.enums import BrokerMode, EligibilityStatus
+from chronos.domain.enums import AccountSummaryProvenance, BrokerMode, EligibilityStatus
 from chronos.domain.models import OptionContract
 from chronos.services.reconciliation import ReconciliationResult
 from chronos.services.short_put_candidates import ShortPutCandidateEvaluation
@@ -148,13 +148,25 @@ def _render_portfolio(result: ReconciliationResult) -> None:
         return
 
     account = snapshot.account
+    verified_response = account.provenance is AccountSummaryProvenance.VERIFIED_RESPONSE
+    if verified_response:
+        st.caption("Account provenance: VERIFIED_RESPONSE (direct response; read-only display).")
+    else:
+        st.warning(
+            "Account provenance UNKNOWN: balances may come from an unverified cache. "
+            "Read-only display only; unavailable for financial decisions."
+        )
+    suffix = "" if verified_response else " (unverified)"
+    st.caption(
+        f"Local read completion time: {account.as_of.isoformat()} (not broker valuation time)."
+    )
     columns = st.columns(5)
     columns[0].metric(
-        "Net liquidation",
+        f"Net liquidation{suffix}",
         format_money(account.net_liquidation, account.currency),
     )
-    columns[1].metric("Cash", format_money(account.total_cash, account.currency))
-    columns[2].metric("Buying power", format_money(account.buying_power, account.currency))
+    columns[1].metric(f"Cash{suffix}", format_money(account.total_cash, account.currency))
+    columns[2].metric(f"Buying power{suffix}", format_money(account.buying_power, account.currency))
     columns[3].metric("Open account orders", str(len(snapshot.open_orders)))
     columns[4].metric("Observed executions", str(snapshot.execution_count))
 

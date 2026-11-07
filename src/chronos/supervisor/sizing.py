@@ -55,9 +55,10 @@ from chronos.autonomy import (
 from chronos.domain.account_freshness import (
     AccountSummaryFreshnessError,
     AccountSummaryFreshnessReason,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
-from chronos.domain.enums import OrderSide
+from chronos.domain.enums import AccountSummaryProvenance, OrderSide
 from chronos.supervisor.compiler import closing_side
 
 #: Asset classes whose quantity is a contract count with a multiplier, rather
@@ -90,6 +91,7 @@ class AccountEvidence:
     max_age_seconds: int = 30
     #: A process-owned completion clock, not a model input or a frozen tick time.
     clock: Callable[[], datetime] | None = field(default=None, repr=False, compare=False)
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN
     #: Current exposure to this instrument, in USD notional.
     symbol_exposure_usd: Decimal | None = None
     #: Current gross exposure across the account, in USD notional.
@@ -123,7 +125,10 @@ class AccountEvidence:
                 AccountSummaryFreshnessReason.INVALID_CLOCK
             ) from None
         require_account_summary_freshness(
-            self.as_of, now=checked_at, max_age_seconds=self.max_age_seconds
+            self.as_of,
+            now=checked_at,
+            max_age_seconds=self.max_age_seconds,
+            provenance=account_summary_provenance(self),
         )
 
 

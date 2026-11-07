@@ -53,7 +53,7 @@ from chronos.autonomy import (
     VersionPins,
 )
 from chronos.autonomy.enforcement import ENFORCED, INERT, LIMIT_ENFORCEMENT
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality
 from chronos.supervisor import (
     MAX_RESUBMISSIONS,
     AccountEvidence,
@@ -214,6 +214,7 @@ def _evidence(**overrides: Any) -> AccountEvidence:
         "total_cash_usd": Decimal(60_000),
         "buying_power_usd": Decimal(60_000),
         "as_of": _NOW,
+        "provenance": AccountSummaryProvenance.VERIFIED_RESPONSE,
         "clock": lambda: _NOW,
         "symbol_exposure_usd": Decimal(0),
         "gross_exposure_usd": Decimal(0),
