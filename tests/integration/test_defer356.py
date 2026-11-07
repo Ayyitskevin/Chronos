@@ -1,0 +1,115 @@
+"""DEFER356: the deferred #356 reconciliation notes, P3-1 (placeholder sizes) and P3-4 (scale).
+
+Every case drives the REAL ``OrderRestartReconciler`` over the settle rig's in-memory book and a
+scripted venue. ``ibapi`` placeholder sizes: ``UNSET_DECIMAL`` is ``2**127 - 1`` and
+``UNSET_DOUBLE`` is ``1.7976931348623157e308``; ``execution_from_pair`` accepts any positive size,
+so a blank-reference execution can carry one (ASSUMED-IB). Before the P3-1 fix, ``quantize`` raised
+``decimal.InvalidOperation`` on such a row-bound sum and the whole pass aborted: one bad row stopped
+every other intent. The fix refuses, typed, before quantizing, and the clean second intent settles.
+"""
+
+from collections.abc import Iterator
+from decimal import Decimal
+
+import pytest
+from tests.support.settle_rig import (
+    BROKER_ID,
+    PERM_ID,
+    PRIOR,
+    Rig,
+    make_rig,
+    venue_execution,
+    venue_order,
+)
+
+from chronos.domain.enums import OrderLifecycle as L
+
+UNSET_DECIMAL = Decimal(2**127 - 1)  # ibapi.const.UNSET_DECIMAL
+UNSET_DOUBLE = Decimal("1.7976931348623157E+308")  # ibapi.const.UNSET_DOUBLE
+OTHER_REF = "CHR-ORD-" + "T" * 32
+
+
+@pytest.fixture
+def rig() -> Iterator[Rig]:
+    instance = make_rig()
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+def _seed_clean_second_intent(rig: Rig) -> None:
+    """A second SUBMITTED intent with its own ids and a clean CANCELLED@0 row: it must settle."""
+
+    rig.seed(intent_id="intent-2", ref=OTHER_REF, permanent_id=PERM_ID + 1, broker_id=BROKER_ID + 1)
+    rig.venue.open.append(
+        venue_order(L.CANCELLED, "0", ref=OTHER_REF, perm=PERM_ID + 1, broker_id=BROKER_ID + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    "size",
+    [Decimal("1E+20"), UNSET_DECIMAL, UNSET_DOUBLE],
+    ids=["1e20", "UNSET_DECIMAL", "UNSET_DOUBLE"],
+)
+def test_a_placeholder_sized_blank_execution_holds_one_intent_and_the_other_still_settles(
+    rig: Rig, size: Decimal
+) -> None:
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    _seed_clean_second_intent(rig)
+    rig.venue.execs = [venue_execution("placeholder", size, PRIOR, ref=None, perm=None)]
+    before = rig.events()
+
+    report = rig.reconcile()  # before the fix: decimal.InvalidOperation aborts the whole pass
+
+    assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+    held = {item.intent_id: item.reason for item in report.unresolved}
+    assert set(held) == {"intent-1"}
+    assert held["intent-1"].startswith("snapshot fill conflict:")
+    assert "exceed the order quantity" in held["intent-1"]
+    assert rig.status("intent-2") is L.CANCELLED
+    assert {item.intent_id for item in report.applied_updates} == {"intent-2"}
+    assert not report.permits_new_opening_order
+
+
+@pytest.mark.parametrize(
+    "sizes,exceeds",
+    [(("6", "4"), False), (("6", "4.00000001"), True)],
+    ids=["equal-to-quantity", "one-tick-over"],
+)
+def test_the_quantity_bound_refuses_only_above_the_order_quantity(
+    rig: Rig, sizes: tuple[str, str], exceeds: bool
+) -> None:
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    rig.venue.execs = [
+        venue_execution(f"blank-{index}", size, PRIOR, ref=None, perm=None)
+        for index, size in enumerate(sizes)
+    ]
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+    reason = report.unresolved[0].reason
+    assert reason.startswith("snapshot fill conflict:")
+    assert ("exceed the order quantity" in reason) is exceeds
+
+
+def test_the_legacy_route_already_holds_a_placeholder_sized_execution_without_aborting(
+    rig: Rig,
+) -> None:
+    rig.seed()  # SUBMITTED: the legacy resolver sums the witnesses without quantizing
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    _seed_clean_second_intent(rig)
+    rig.venue.execs = [venue_execution("placeholder", UNSET_DECIMAL, PRIOR, ref=None, perm=None)]
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.SUBMITTED and rig.events() == before
+    assert rig.status("intent-2") is L.CANCELLED
+    assert {item.intent_id for item in report.unresolved} == {"intent-1"}
