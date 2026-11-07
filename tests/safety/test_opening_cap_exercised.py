@@ -139,7 +139,12 @@ class _Exploding:
     """A repository that fails the way a real one fails: at call time."""
 
     def count_opening_since(
-        self, *, current_account_id: str, since: datetime, evaluated_intent: Any = None
+        self,
+        *,
+        current_account_id: str,
+        since: datetime,
+        evaluated_intent: Any = None,
+        environment: str | None = None,
     ) -> int:
         raise RuntimeError("database is gone")
 

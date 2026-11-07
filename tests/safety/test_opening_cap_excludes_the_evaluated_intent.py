@@ -122,7 +122,10 @@ def test_repository_rejects_a_foreign_evaluation_in_a_valid_count_scope() -> Non
     _persist(repo, intent)
     assert (
         repo.count_opening_since(
-            current_account_id=_ACCOUNT, since=_MORNING, evaluated_intent=intent
+            current_account_id=_ACCOUNT,
+            since=_MORNING,
+            evaluated_intent=intent,
+            environment=IBEnvironment.PAPER.value,
         )
         == 0
     )
@@ -133,6 +136,7 @@ def test_repository_rejects_a_foreign_evaluation_in_a_valid_count_scope() -> Non
             current_account_id=_ACCOUNT,
             since=_MORNING,
             evaluated_intent=intent.model_copy(update={"account_id": "DU7654321"}),
+            environment=IBEnvironment.PAPER.value,
         )
     assert repo.count_opening_since(current_account_id=_ACCOUNT, since=_MORNING) == 1
 
