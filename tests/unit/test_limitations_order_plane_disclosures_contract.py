@@ -24,11 +24,21 @@ def test_the_recorded_floor_hold_is_disclosed_with_no_operator_route_and_an_esca
     assert "operator resolution applies only to SUBMISSION_UNKNOWN intents" in recovery
 
     limitations, runbook = _flat(LIMITATIONS), _flat(RUNBOOK)
-    assert "holds the intent in `CANCEL_PENDING` and blocks all new opening orders" in limitations
+    assert (
+        "holds the intent in `CANCEL_PENDING` and blocks every new order submission through "
+        "Chronos, closing orders included"
+    ) in limitations
+    assert (
+        "clears only if the venue later reports a figure at or above the recorded one"
+        in limitations
+    )
     assert "no operator route" in limitations
     assert "stops and escalates" in limitations
     assert "`below the witnessed lower bound` hold" in runbook
     assert "do not edit the database" in runbook
+    assert "closing orders included" in runbook
+    assert "close the position in TWS" in runbook
+    assert "at or above the recorded one" in runbook
     assert "escalate to the owner" in runbook
 
 
