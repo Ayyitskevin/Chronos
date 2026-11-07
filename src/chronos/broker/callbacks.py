@@ -343,6 +343,25 @@ class UnsolicitedObservationClassifier:
         return True
 
 
+class NoticeLog(deque[str]):
+    """The bounded notice window plus a monotonic count of every notice ever appended.
+
+    RECHECK-348 P3-2: a reader that wants "what arrived since this marker" must not diff
+    two windows. A full window of identical text looks unchanged after an append evicts
+    its twin, so the new code was lost. ``appended`` only goes up, whatever the window holds.
+    """
+
+    def __init__(self, maxlen: int = 200) -> None:
+        super().__init__(maxlen=maxlen)
+        self._count_lock = threading.Lock()
+        self.appended = 0
+
+    def append(self, notice: str) -> None:
+        with self._count_lock:
+            self.appended += 1
+            super().append(notice)
+
+
 class CallbackBridge:
     """Connection-level state and callback routing for the official adapter."""
 
@@ -370,7 +389,7 @@ class CallbackBridge:
         self.managed_accounts: tuple[str, ...] = ()
         self.managed_accounts_event = threading.Event()
         self.connection_closed = threading.Event()
-        self.notices: deque[str] = deque(maxlen=200)
+        self.notices = NoticeLog(maxlen=200)
         self._current_time: _SingleFlight | None = None
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None

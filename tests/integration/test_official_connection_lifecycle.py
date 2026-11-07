@@ -301,15 +301,52 @@ def test_handshake_diagnostics_select_only_bounded_current_gateway_codes() -> No
     )
 
     assert official_module._new_gateway_notice_codes(
-        old_notices,
         old_notices + current_notices,
+        len(current_notices),
         limit=3,
     ) == (902, 903, 904)
     assert official_module._new_gateway_notice_codes(
-        old_notices,
         (*old_notices, "[326] current-session refusal"),
+        1,
         limit=3,
     ) == (326,)
+
+
+def test_the_handshake_names_the_code_even_when_the_notice_window_is_saturated_with_that_text(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    """RECHECK-348 P3-2: a window diff sees no change when 200 identical notices evict 1.
+
+    The notice deque holds 200; once it is full of the very text the gateway sends next, the
+    before/after windows are equal and the old diff returned no code. A monotonic counter of
+    appended notices does not depend on the window's contents.
+    """
+
+    gateway.held_client_ids = {fake_ibapi.CLIENT_ID}
+    broker = _hooked(_SpyReadiness())
+    with pytest.raises(BrokerConnectionError):
+        asyncio.run(broker.connect())
+    same_text = next(
+        n for n in broker.bridge.notices if n.startswith(f"[{fake_ibapi.CODE_CLIENT_ID_IN_USE}]")
+    )
+    for _ in range(200):
+        broker.bridge.notices.append(same_text)
+    assert list(broker.bridge.notices) == [same_text] * 200
+    with pytest.raises(BrokerConnectionError) as raised:
+        asyncio.run(broker.connect())
+    assert str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in str(raised.value)
+
+
+def test_notice_codes_are_counted_by_appends_not_by_window_diff() -> None:
+    saturated = ["[326] same"] * 200
+    assert official_module._new_gateway_notice_codes(saturated, 1, limit=3) == (326,)
+    assert official_module._new_gateway_notice_codes(saturated, 0, limit=3) == ()
+    # more appended than the window holds: only what survives can be read, bounded by limit
+    assert official_module._new_gateway_notice_codes(["[1] a", "[2] b"], 500, limit=3) == (1, 2)
+    # non-code notices are ignored, and the newest codes win the limit
+    assert official_module._new_gateway_notice_codes(
+        ["[901] a", "[foreign-order] x", "[902] b", "[903] c", "[904] d"], 5, limit=3
+    ) == (902, 903, 904)
 
 
 # --- 4. handshake timeouts, wrong account -------------------------------------------------
