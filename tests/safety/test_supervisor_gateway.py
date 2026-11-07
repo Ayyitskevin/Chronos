@@ -213,6 +213,8 @@ def _evidence(**overrides: Any) -> AccountEvidence:
         "net_liquidation_usd": Decimal(100_000),
         "total_cash_usd": Decimal(60_000),
         "buying_power_usd": Decimal(60_000),
+        "as_of": _NOW,
+        "clock": lambda: _NOW,
         "symbol_exposure_usd": Decimal(0),
         "gross_exposure_usd": Decimal(0),
         "net_exposure_usd": Decimal(0),

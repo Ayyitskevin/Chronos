@@ -493,6 +493,51 @@ def test_fresh_empty_account_ranks_puts_in_one_serialized_read_only_run() -> Non
     assert market_data.active_subscription_count == 0
 
 
+@pytest.mark.parametrize(
+    ("as_of", "reason"),
+    [
+        (NOW - timedelta(seconds=31), "STALE"),
+        (NOW + timedelta(microseconds=1), "FUTURE_DATED"),
+    ],
+)
+def test_stale_or_future_account_summary_locks_candidate_capital(
+    as_of: datetime,
+    reason: str,
+) -> None:
+    summary = _account(as_of=as_of)
+    broker = _CandidateBroker(account_first=summary, account_second=summary)
+    service, runner, _reader, _market_data = _service(broker, _reconciliation())
+
+    result = service.evaluate("AAPL")
+
+    assert result.status is EligibilityStatus.NO_TRADE
+    assert result.resolution is None
+    assert any(reason in refusal for refusal in result.reasons)
+    assert runner.run_calls == 1
+
+
+def test_stale_reconciled_account_summary_locks_capital_before_market_reads() -> None:
+    reconciliation = _reconciliation()
+    assert reconciliation.snapshot is not None
+    stale_snapshot = reconciliation.snapshot.model_copy(
+        update={
+            "account": reconciliation.snapshot.account.model_copy(
+                update={"as_of": NOW - timedelta(seconds=31)}
+            )
+        }
+    )
+    stale_reconciliation = reconciliation.model_copy(update={"snapshot": stale_snapshot})
+    broker = _CandidateBroker()
+    service, runner, _reader, _market_data = _service(broker, stale_reconciliation)
+
+    result = service.evaluate("AAPL")
+
+    assert result.status is EligibilityStatus.NO_TRADE
+    assert result.resolution is None
+    assert any("reconciled account summary is not fresh (STALE)" in r for r in result.reasons)
+    assert runner.run_calls == 0
+
+
 @pytest.mark.parametrize("quality", [DataQuality.FROZEN, DataQuality.DELAYED])
 @pytest.mark.parametrize("close_only", [False, True])
 def test_unpriced_option_refusal_preserves_read_only_display_evidence(

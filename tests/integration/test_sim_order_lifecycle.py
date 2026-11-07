@@ -99,6 +99,7 @@ from chronos.persistence.order_repositories import (
 from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.persistence.schema import FillRow
 from chronos.services.reconciliation import ReconciliationCoordinator
+from chronos.utils.time import utc_now
 
 #: Monday 2026-10-12, 10:30 New York: inside regular trading hours.
 T0 = datetime(2026, 10, 12, 14, 30, tzinfo=UTC)
@@ -388,6 +389,9 @@ class _SimHarness:
                 settings=self.settings,
                 reconciliation_readiness=self.readiness,
                 intents=self.intents,
+                # The official adapter stamps the fake gateway's account summary
+                # with wall time; the lifecycle's SimClock is intentionally historical.
+                clock=utc_now if self.kind == "official_fake" else None,
             ),
             risk_engine=OrderRiskEngine(self.settings, persistence_key=TEST_PERSISTENCE_KEY),
             preview_service=OrderPreviewService(self.connection),

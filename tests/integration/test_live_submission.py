@@ -570,6 +570,39 @@ def test_unreadable_nlv_blocks_without_engaging_kill_switch(live: _LiveHarness) 
     assert not live.kill_switch.is_engaged()  # cannot-evaluate != breached
 
 
+def test_account_summary_aging_during_live_gate_walk_blocks_without_drawdown_side_effects(
+    live: _LiveHarness,
+) -> None:
+    class _DrawdownSpy:
+        called = False
+
+        def check(self, _nlv: Decimal, *, now: datetime) -> object:
+            self.called = True
+            return type("Decision", (), {"breached": False, "reason": ""})()
+
+    live.arm()
+    intent = _live_intent()
+    _confirmed(live, intent)
+    live.broker.nlv = Decimal("100000")
+    checks = iter((FIXED_NOW + timedelta(seconds=29), FIXED_NOW + timedelta(seconds=31)))
+    live.boundary._clock = lambda: next(checks)
+    live.quote = MarketQuote(
+        contract=intent.contract,
+        timestamp=FIXED_NOW + timedelta(seconds=31),
+        data_quality=DataQuality.LIVE,
+        bid=Decimal("1.15"),
+        ask=Decimal("1.25"),
+    )
+    drawdown = _DrawdownSpy()
+    live.boundary._session_drawdown = drawdown  # type: ignore[assignment]
+
+    outcome = _submit(live, intent)
+
+    _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
+    assert "account summary freshness refused: stale" in outcome.detail
+    assert not drawdown.called
+
+
 def test_stale_quote_blocks(live: _LiveHarness) -> None:
     live.arm()
     intent = _live_intent()

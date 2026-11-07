@@ -304,8 +304,16 @@ def _request(*, commission: str = "5.00", contract_id: int = 2002) -> ShortPutRi
     )
 
 
-def _service(evaluator: _Evaluator) -> ShortPutRiskPreviewService:
-    return ShortPutRiskPreviewService(evaluator, clock=lambda: NOW)
+def _service(
+    evaluator: _Evaluator,
+    *,
+    account_summary_max_age_seconds: int = 30,
+) -> ShortPutRiskPreviewService:
+    return ShortPutRiskPreviewService(
+        evaluator,
+        account_summary_max_age_seconds=account_summary_max_age_seconds,
+        clock=lambda: NOW,
+    )
 
 
 def test_ready_preview_uses_exact_fresh_identity_and_decimal_payoff_grid() -> None:
@@ -623,6 +631,18 @@ def test_stale_reconciliation_or_account_timestamp_is_withheld(timestamp: str) -
 
     assert result.status is RiskPreviewStatus.WITHHELD
     assert result.preview is None
+
+
+def test_account_summary_honors_a_stricter_configured_age_than_quote_policy() -> None:
+    refresh = _shift_refresh(_refresh(), delta=timedelta(seconds=-3))
+    result = _service(
+        _Evaluator(refresh),
+        account_summary_max_age_seconds=2,
+    ).preview(_request())
+
+    assert result.status is RiskPreviewStatus.WITHHELD
+    assert result.preview is None
+    assert "account summary is not fresh (STALE)" in result.reasons[-1]
 
 
 @pytest.mark.parametrize("case", ["disappeared", "duplicate", "ineligible"])

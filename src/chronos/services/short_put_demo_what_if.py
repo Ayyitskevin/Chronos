@@ -24,6 +24,10 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 from chronos.broker.base import Broker
 from chronos.broker.demo import DemoBroker
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import (
+    AccountSummaryFreshnessError,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     BrokerMode,
     ConnectionState,
@@ -635,6 +639,16 @@ class ShortPutDemoWhatIfService:
             raise _DemoWhatIfEvidenceError(
                 "The DEMO broker account does not match the bound local scope."
             )
+        try:
+            require_account_summary_freshness(
+                getattr(account, "as_of", None),
+                now=observed_at,
+                max_age_seconds=settings.account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
+            raise _DemoWhatIfEvidenceError(
+                f"The DEMO account summary is not fresh ({error.reason.value})."
+            ) from error
         if (
             self._account_signature(account) != self._account_signature(snapshot_account)
             or mask_account_id(account.account_id) != snapshot_account.masked_account_id
@@ -704,6 +718,16 @@ class ShortPutDemoWhatIfService:
             raise _DemoWhatIfEvidenceError("Fresh risk evidence is incomplete or inconsistent.")
         snapshot = reconciliation.snapshot
         underlying_quote = refresh.underlying_quote
+        try:
+            require_account_summary_freshness(
+                getattr(snapshot.account, "as_of", None),
+                now=attempted_at,
+                max_age_seconds=settings.account_summary_max_age_seconds,
+            )
+        except AccountSummaryFreshnessError as error:
+            raise _DemoWhatIfEvidenceError(
+                f"Reconciled account capital is not fresh ({error.reason.value})."
+            ) from error
         matches = tuple(
             (rank, candidate)
             for rank, candidate in enumerate(refresh.resolution.candidates, start=1)
@@ -1095,6 +1119,17 @@ class ShortPutDemoWhatIfService:
             or window.broker_preview.previewed_at > window.received_at
         ):
             raise _DemoWhatIfEvidenceError("The DEMO what-if observation clock moved backward.")
+        for account in (first_account, second_account):
+            try:
+                require_account_summary_freshness(
+                    getattr(account, "as_of", None),
+                    now=completed_at,
+                    max_age_seconds=settings.account_summary_max_age_seconds,
+                )
+            except AccountSummaryFreshnessError as error:
+                raise _DemoWhatIfEvidenceError(
+                    f"A DEMO account summary is not fresh ({error.reason.value})."
+                ) from error
         max_age = min(
             Decimal(settings.max_quote_age_seconds),
             MAX_RISK_PREVIEW_EVIDENCE_AGE_SECONDS,

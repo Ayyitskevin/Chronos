@@ -73,7 +73,12 @@ from chronos.autonomy import (
     TradableAssetClass,
 )
 from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
+from chronos.broker.demo import demo_now
 from chronos.config.settings import Settings
+from chronos.domain.account_freshness import (
+    account_summary_check_time,
+    require_account_summary_freshness,
+)
 from chronos.domain.enums import (
     BrokerAdapter,
     BrokerMode,
@@ -718,11 +723,13 @@ class BackendGatherers:
         *,
         mandate: AutonomyMandate,
         mandate_digest: str,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._runtime = runtime
         self._fingerprint = fingerprint
         self._generation = generation
         self._mandate = mandate
+        self._clock = clock
         self._managed_contracts: frozenset[tuple[int, str]] | None = None
         self._exits_this_tick: set[tuple[int, str]] = set()
         self._tick_account_id: str | None = None
@@ -745,6 +752,13 @@ class BackendGatherers:
             self._managed_contracts = self._read_managed_contracts()
             try:
                 summary = runtime.connection.run(runtime.broker.account_summary())
+                require_account_summary_freshness(
+                    getattr(summary, "as_of", None),
+                    now=self._clock() if self._clock is not None else now,
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                )
                 self._tick_account_id = summary.account_id
                 status = runtime.connection.run(runtime.broker.connection_status())
                 probe = self._probe_symbol(mandate)
@@ -752,6 +766,15 @@ class BackendGatherers:
                     return None
                 contract = runtime.connection.run(runtime.broker.qualify_underlying(probe))
                 quote = runtime.connection.run(runtime.broker.request_underlying_quote(contract))
+                # Qualification and quote retrieval may block long enough for
+                # the account balances to age out before sizing consumes them.
+                require_account_summary_freshness(
+                    getattr(summary, "as_of", None),
+                    now=self._clock() if self._clock is not None else now,
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                )
             except Exception:
                 _logger.exception("Autonomy fact gathering failed")
                 return None
@@ -771,6 +794,16 @@ class BackendGatherers:
                     net_liquidation_usd=summary.net_liquidation,
                     total_cash_usd=summary.total_cash,
                     buying_power_usd=summary.buying_power,
+                    as_of=getattr(summary, "as_of", None),
+                    max_age_seconds=getattr(
+                        runtime.settings, "account_summary_max_age_seconds", 30
+                    ),
+                    clock=self._clock
+                    or (
+                        lambda: account_summary_check_time(
+                            broker_mode=runtime.settings.broker_mode, demo_now=now
+                        )
+                    ),
                 ),
                 quote=probe_quote,
                 contract=contract,
@@ -1213,6 +1246,11 @@ def build_autonomy_runtime(
         process_generation,
         mandate=mandate,
         mandate_digest=canonical_digest(mandate),
+        clock=(
+            demo_now
+            if getattr(settings, "broker_mode", BrokerMode.IBKR) is BrokerMode.DEMO
+            else utc_now
+        ),
     )
     return AutonomyRuntime(
         sessions=runtime.database.sessions,
