@@ -122,8 +122,19 @@ def test_the_legacy_route_already_holds_a_placeholder_sized_execution_without_ab
         ("5", "5.000000004", "settle"),  # below by less than one eighth place: equal at scale
         ("5", "5.00000001", "refuse"),  # below by one representable tick: still refused
         ("5.00000001", "5", "settle"),  # above the bound: settles before and after
+        ("4.999999996", "5", "settle"),  # figure under 5 by 4e-9: equal at the stored scale
+        ("4.999999999", "5", "settle"),  # figure one nine-place tick under: equal at scale
+        ("4.99999999", "5", "refuse"),  # figure one representable tick under: refused
     ],
-    ids=["equal-9dp", "under-by-4e-9", "under-by-1e-8", "over-by-1e-8"],
+    ids=[
+        "equal-9dp",
+        "under-by-4e-9",
+        "under-by-1e-8",
+        "over-by-1e-8",
+        "figure-under-by-4e-9",
+        "figure-one-9dp-tick-under",
+        "figure-one-tick-under",
+    ],
 )
 def test_the_witnessed_lower_bound_is_compared_at_the_same_eight_place_scale(
     rig: Rig, figure: str, own_fill: str, outcome: str
