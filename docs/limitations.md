@@ -65,6 +65,15 @@ runbooks.
   adapter types each of these per row instead (`SUBMISSION_UNKNOWN`, `CANCEL_PENDING` for
   `PendingCancel`); D-43 changed only the official path.
 
+- **A close-only underlying quote is now refused at the manager.** Since QEMPTY (D-78), a quote
+  with no bid, ask or last is refused even when it carries a prior `close` (for example the
+  market is closed and only the previous close is delivered). At #348 `close` counted as a price.
+  The refusal raises `MarketDataUnavailableError`, so the read-only short-put evaluation drops
+  to its generic "could not be captured safely" outcome and shows no underlying display until a
+  live bid/ask/last arrives. Option batches are different: a refused batch keeps the underlying
+  and chain evidence and reports NO_TRADE. The refusal is the intended fail-closed behaviour,
+  not a defect; the cost is availability of the display outside market hours.
+
 ## Operational health
 
 - `/health` schema v2 separates liveness, service readiness, and PAPER/LIVE/autonomous
