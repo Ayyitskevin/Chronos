@@ -108,6 +108,13 @@ are a local history conflict, also refused by SUBMISSION_UNKNOWN operator resolu
 both IDs in TWS, preserve the event history, and keep the intent held for owner review; cancelling
 a venue row does not erase that persisted conflict.
 
+A `below the witnessed lower bound` hold means the venue's terminal figure is below the largest fill
+figure already recorded for the intent. It has no operator route: `POST /orders/{id}/resolve`
+applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconciling again holds again,
+across restarts, because the recorded floor never lowers and the venue will not report a higher
+figure. New opening orders stay blocked while it lasts. Stop and escalate to the owner with the
+intent id, both figures and the TWS trade log; do not edit the database.
+
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
    ```bash
@@ -149,6 +156,15 @@ halted (`STATE_CORRUPTION` / `UNKNOWN_ORDER` in `src/chronos/control/halt.py`).
    the broker if it should not be working.
 4. Record what you found (docs/INCIDENT_RESPONSE.md evidence capture).
 5. Rearm with a note describing the resolution.
+
+### Daily opening cap refuses after broker errors at propose time
+
+Meaning: `max_opening_orders_per_day` counts every opening intent created today, including a
+`DRAFT` left behind when a broker read failed inside `POST /orders/propose` (the row is created
+before evidence is gathered, so the request returned an error and no risk decision exists). Three
+such failures spend a cap of three; the count resets at the market-day boundary. Check
+`GET /orders` for today's `DRAFT` rows without a risk decision and record them. The cap is a
+safety limit: raising it for the day is the owner's decision, not a workaround.
 
 ### Position mismatch (UNEXPLAINED_POSITION)
 
