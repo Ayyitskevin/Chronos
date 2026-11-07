@@ -395,6 +395,17 @@ class OrderIntentRepository:
             row = session.get(OrderIntentRow, intent_id)
             if row is None:
                 raise ValueError(f"Unknown order intent {intent_id!r}")
+            # RECHECK-355 P3-4: a terminal status is never overwritten by a status-only
+            # write (it has no event row, so nothing would record the change). A terminal
+            # repeating itself is not an overwrite.
+            if (
+                row.status != status.value
+                and OrderLifecycle(row.status) in TERMINAL_ORDER_LIFECYCLES
+            ):
+                raise ValueError(
+                    f"Order intent {intent_id!r} is already terminal ({row.status}); "
+                    f"refusing to overwrite it with {status.value}"
+                )
             row.status = status.value
             if confirmation_hash is not None:
                 row.confirmation_hash = confirmation_hash

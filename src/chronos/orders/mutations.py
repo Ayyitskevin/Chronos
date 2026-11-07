@@ -103,8 +103,10 @@ class OrderModificationService:
                 )
             )
         )
-        # Record a MODIFIED event without changing the lifecycle status.
-        self._tracker_repo.record_transition(
+        # Record a MODIFIED event without changing the lifecycle status. A true CAS
+        # (RECHECK-355 P3-4): a fill or cancel that landed while the broker call was in
+        # flight must not be put back to the status read before the call.
+        recorded = self._tracker_repo.record_transition(
             intent_id=intent_id,
             event_key=f"{intent_id}:{broker_order_id}:MODIFIED:{new_limit_price}",
             source="MODIFY",
@@ -114,7 +116,13 @@ class OrderModificationService:
             broker_order_id=broker_order_id,
             evidence={"new_limit_price": format(new_limit_price, "f")},
             occurred_at=now,
+            enforce_from_status=True,
         )
+        if not recorded:
+            logger.warning(
+                "modify_event_not_recorded: order status moved while the modify was in flight",
+                extra={"event": "modify_event_not_recorded", "intent_id": intent_id},
+            )
         return submission
 
 
