@@ -207,10 +207,17 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # source fingerprints).
     # 82 at the H1B1/main merge: main's 74 plus the branch's six history entries it did not share
     # and the two runtime.py fingerprints the merged file supersedes (main's and H1B1's).
+    # 84 at TIDY-R4: main's 82 plus this branch's two (the superseded official_ibkr.py
+    # inventory values at 72e404a and at 8cc781c, which exists only on this branch: land
+    # by a real merge commit).
+    # ACCTFRESH-C branch-side history:
     # 89 at the ACCTFRESH-C/H1B1 merge: H1B1's 82, two the C branch retired (ibkr.py and
     # api/autonomy_wiring.py) and five the merged files supersede: both sides' demo.py and
     # official_ibkr.py, and C's domain/enums.py.
-    assert len(historical_candidates) == 89
+    # 92 at the ACCTFRESH-C/TIDY merge: main's 84, six this branch carried (C's enums.py, demo.py
+    # and official_ibkr.py, H1B1's ibkr.py and autonomy_wiring.py, #353's demo.py) and the two
+    # official_ibkr.py values the merged file supersedes (this branch's and main's).
+    assert len(historical_candidates) == 92
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
