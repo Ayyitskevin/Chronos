@@ -43,7 +43,7 @@ from chronos.autonomy import (
 )
 from chronos.autonomy import evidence as ev
 from chronos.autonomy import tools as tool_module
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality
 from chronos.domain.models import UnderlyingContract
 from chronos.supervisor import AccountEvidence, queue, size_order
 from chronos.supervisor.compiler import QuoteEvidence, compile_order
@@ -357,6 +357,7 @@ def test_an_injected_size_is_still_clamped_by_the_mandate() -> None:
         reference_price=Decimal(100),
         multiplier=Decimal(1),
         evidence=AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),

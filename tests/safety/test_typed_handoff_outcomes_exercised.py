@@ -70,7 +70,7 @@ from chronos.autonomy import (
     TradableAssetClass,
     VersionPins,
 )
-from chronos.domain.enums import DataQuality, OrderLifecycle
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality, OrderLifecycle
 from chronos.domain.models import OrderSubmission, UnderlyingContract
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.persistence import hash_chain
@@ -191,6 +191,7 @@ def _facts(**overrides: Any) -> CycleFacts:
         "evidence_bundle_digest": "b" * 64,
         "market_data": MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         "account": AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),

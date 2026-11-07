@@ -77,6 +77,7 @@ from chronos.broker.demo import demo_now
 from chronos.config.settings import Settings
 from chronos.domain.account_freshness import (
     account_summary_check_time,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import (
@@ -754,6 +755,7 @@ class BackendGatherers:
                 summary = runtime.connection.run(runtime.broker.account_summary())
                 require_account_summary_freshness(
                     getattr(summary, "as_of", None),
+                    provenance=account_summary_provenance(summary),
                     now=self._clock() if self._clock is not None else now,
                     max_age_seconds=getattr(
                         runtime.settings, "account_summary_max_age_seconds", 30
@@ -770,6 +772,7 @@ class BackendGatherers:
                 # the account balances to age out before sizing consumes them.
                 require_account_summary_freshness(
                     getattr(summary, "as_of", None),
+                    provenance=account_summary_provenance(summary),
                     now=self._clock() if self._clock is not None else now,
                     max_age_seconds=getattr(
                         runtime.settings, "account_summary_max_age_seconds", 30
@@ -795,6 +798,7 @@ class BackendGatherers:
                     total_cash_usd=summary.total_cash,
                     buying_power_usd=summary.buying_power,
                     as_of=getattr(summary, "as_of", None),
+                    provenance=account_summary_provenance(summary),
                     max_age_seconds=getattr(
                         runtime.settings, "account_summary_max_age_seconds", 30
                     ),

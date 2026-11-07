@@ -10,6 +10,7 @@ from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import BrokerDataError
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     DataQuality,
     DisplayEnvironment,
     EligibilityStatus,
@@ -163,6 +164,7 @@ def _reconciliation() -> ReconciliationResult:
             environment=DisplayEnvironment.DEMO,
             data_quality=DataQuality.DEMO,
             account=ReconciliationAccountView(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 masked_account_id=mask_account_id(ACCOUNT_ID),
                 net_liquidation=Decimal("250000"),
                 total_cash=Decimal("125000"),
@@ -1064,3 +1066,38 @@ def test_ready_serialization_excludes_raw_account_identity_and_fingerprint() -> 
     assert ACCOUNT_ID not in serialized
     assert ACCOUNT_FINGERPRINT not in serialized
     assert mask_account_id(ACCOUNT_ID) in serialized
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_snapshot_provenance_gates_short_put_capital_preview(verified: bool) -> None:
+    evaluator = _Evaluator()
+    result = evaluator.result
+    assert result.reconciliation is not None
+    snapshot = result.reconciliation.snapshot
+    assert snapshot is not None
+    account = snapshot.account.model_copy(
+        update={
+            "provenance": (
+                AccountSummaryProvenance.VERIFIED_RESPONSE
+                if verified
+                else AccountSummaryProvenance.UNKNOWN
+            ),
+        }
+    )
+    evaluator.result = result.model_copy(
+        update={
+            "reconciliation": result.reconciliation.model_copy(
+                update={
+                    "snapshot": snapshot.model_copy(update={"account": account}),
+                }
+            ),
+        }
+    )
+    preview = _service(evaluator).preview(_request())
+    if verified:
+        assert preview.status is RiskPreviewStatus.READY
+        assert preview.preview is not None
+    else:
+        assert preview.status is not RiskPreviewStatus.READY
+        assert preview.preview is None
+        assert "UNVERIFIED_PROVENANCE" in str(preview.reasons)

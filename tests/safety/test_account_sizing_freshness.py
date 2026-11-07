@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -12,11 +13,22 @@ import pytest
 
 from chronos.api.autonomy_wiring import BackendGatherers
 from chronos.autonomy import DecisionKind, TradableAssetClass
+from chronos.domain.enums import AccountSummaryProvenance
 from chronos.persistence.database import Database
 from chronos.supervisor import durable, loop
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 from tests.safety import test_d54_position_evidence as d54
 from tests.support import position_evidence as pe
+
+
+@pytest.fixture
+def database() -> Iterator[Database]:
+    value = Database("sqlite+pysqlite:///:memory:")
+    value.initialize()
+    try:
+        yield value
+    finally:
+        value.dispose()
 
 
 @pytest.mark.parametrize("delay", [0, 2])
@@ -121,6 +133,7 @@ def _evidence(**updates: Any) -> AccountEvidence:
         "buying_power_usd": Decimal("60000"),
         "position_quantity": Decimal("10"),
         "as_of": pe.NOW,
+        "provenance": AccountSummaryProvenance.VERIFIED_RESPONSE,
         "clock": lambda: pe.NOW,
     }
     base.update(updates)
@@ -216,6 +229,7 @@ def test_backend_carries_stamp_maximum_and_dynamic_clock() -> None:
         assert facts.account.as_of == pe.NOW
         assert facts.account.max_age_seconds == 1
         assert facts.account.clock is clock
+        assert facts.account.provenance is AccountSummaryProvenance.VERIFIED_RESPONSE
         assert _size(replace(facts.account, position_quantity=Decimal("10"))).quantity == 10
         moment[0] += timedelta(seconds=1)
         result = _size(facts.account)
@@ -283,3 +297,85 @@ def test_later_decision_rechecks_the_same_tick_account(elapsed: int) -> None:
                 assert second.sizing is not None and second.sizing.quantity == 10
     finally:
         database.dispose()
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        AccountSummaryProvenance.VERIFIED_RESPONSE,
+        AccountSummaryProvenance.UNKNOWN,
+        None,
+        "VERIFIED_RESPONSE",
+    ],
+)
+def test_direct_sizing_requires_verified_account_provenance(proof) -> None:
+    result = _size(_evidence(provenance=proof))
+    if proof is AccountSummaryProvenance.VERIFIED_RESPONSE:
+        assert result.quantity == 10
+        assert result.refusal_code == ""
+    else:
+        assert result.quantity is None
+        assert result.refusal_code == "UNVERIFIED_PROVENANCE"
+
+
+def test_missing_sizing_provenance_defaults_unverified() -> None:
+    evidence = AccountEvidence(
+        net_liquidation_usd=Decimal("100000"),
+        total_cash_usd=Decimal("60000"),
+        buying_power_usd=Decimal("60000"),
+        position_quantity=Decimal("10"),
+        as_of=pe.NOW,
+        clock=lambda: pe.NOW,
+    )
+    assert evidence.provenance is AccountSummaryProvenance.UNKNOWN
+    result = _size(evidence)
+    assert result.quantity is None
+    assert result.refusal_code == "UNVERIFIED_PROVENANCE"
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        AccountSummaryProvenance.VERIFIED_RESPONSE,
+        AccountSummaryProvenance.UNKNOWN,
+        None,
+        "VERIFIED_RESPONSE",
+    ],
+)
+def test_cycle_quarantines_provenance_lost_after_tick_gather(database: Database, proof) -> None:
+    with database.sessions() as session:
+        pe.bind_managed(session, con_id=111, symbol="SPY", tag="B")
+        mandate = d54._mandate()
+        durable.activate(
+            session,
+            account_fingerprint=pe.FINGERPRINT,
+            mandate=mandate,
+            owner_event_id="synthetic-sizing-provenance",
+            now=pe.NOW,
+            process_generation=7,
+        )
+        session.commit()
+        rows = (pe.held("SPY", "10"),)
+        gatherers = BackendGatherers(
+            pe.runtime(pe.Broker(reads=[rows, rows]), database),
+            pe.FINGERPRINT,
+            7,
+            mandate=mandate,
+            mandate_digest="d" * 64,
+            clock=lambda: pe.NOW,
+        )
+        facts = gatherers.cycle_facts(mandate)(pe.NOW)
+        assert facts is not None
+        assert facts.account.provenance is AccountSummaryProvenance.VERIFIED_RESPONSE
+        # Model a broken account projection after the initial guarded gather.
+        facts = replace(facts, account=replace(facts.account, provenance=proof))
+        tick = d54._Tick.__new__(d54._Tick)
+        tick.session, tick.gatherers, tick.mandate, tick.facts = session, gatherers, mandate, facts
+        result = tick.run(d54._exit())
+        if proof is AccountSummaryProvenance.VERIFIED_RESPONSE:
+            assert result.stage is loop.CycleStage.HANDOFF
+            assert result.sizing is not None and result.sizing.quantity == 10
+        else:
+            assert result.stage is loop.CycleStage.SIZING
+            assert result.refusal == "UNVERIFIED_PROVENANCE"
+            assert result.sizing is None

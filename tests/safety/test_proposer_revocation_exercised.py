@@ -55,6 +55,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.api.autonomy_wiring import build_identity_resolver
+from chronos.domain.enums import AccountSummaryProvenance
 from chronos.persistence.database import Database
 from chronos.persistence.schema import AutonomyProposerRevocationRow, HashChainRow
 from chronos.supervisor import revocation
@@ -465,6 +466,7 @@ def _facts() -> Any:
         evidence_bundle_digest="b" * 64,
         market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         account=AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
