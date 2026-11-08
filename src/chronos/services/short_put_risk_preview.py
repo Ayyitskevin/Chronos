@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from chronos.domain.account_freshness import (
     AccountSummaryFreshnessError,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import (
@@ -485,6 +486,7 @@ class ShortPutRiskPreviewService:
         try:
             require_account_summary_freshness(
                 getattr(snapshot.account, "as_of", None),
+                provenance=account_summary_provenance(snapshot.account),
                 now=attempted_at,
                 max_age_seconds=account_summary_max_age_seconds,
             )

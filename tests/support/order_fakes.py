@@ -17,6 +17,7 @@ from decimal import Decimal
 from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend, BrokerSendGuard
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DisplayEnvironment,
     OptionRight,
@@ -93,6 +94,7 @@ class FakeBroker:
             total_cash=Decimal("80000"),
             buying_power=Decimal("160000"),
             as_of=FIXED_NOW,
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         )
 
     async def positions(self) -> tuple[BrokerPosition, ...]:

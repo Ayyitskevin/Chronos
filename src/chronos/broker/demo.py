@@ -18,6 +18,7 @@ from chronos.broker.base import (
 )
 from chronos.broker.callbacks import StreamEvent, StreamKind, UnsolicitedObservationClassifier
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DemoCase,
@@ -188,6 +189,7 @@ class DemoBroker:
             total_cash=Decimal("125000.00"),
             buying_power=Decimal("240000.00"),
             as_of=self._last_sync or self._clock().astimezone(UTC),
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         )
 
     async def positions(self) -> tuple[BrokerPosition, ...]:

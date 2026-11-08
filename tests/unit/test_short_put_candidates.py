@@ -14,6 +14,7 @@ from chronos.broker.market_data import MarketDataManager
 from chronos.config.limits import MAX_CANDIDATE_EXPIRATIONS
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -320,6 +321,7 @@ class _CandidateBroker:
 
 def _account(*, cash: str = "125000", as_of: datetime = NOW) -> AccountSummary:
     return AccountSummary(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=ACCOUNT_ID,
         net_liquidation=Decimal("250000"),
         total_cash=Decimal(cash),
@@ -367,6 +369,7 @@ def _reconciliation(
             environment=DisplayEnvironment.DEMO,
             data_quality=data_quality,
             account=ReconciliationAccountView(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 masked_account_id=mask_account_id(account_value.account_id),
                 net_liquidation=account_value.net_liquidation,
                 total_cash=account_value.total_cash,
@@ -446,6 +449,45 @@ def _rejection_codes(result: Any) -> set[CandidateRejectionCode]:
     }
 
 
+@pytest.mark.parametrize("unverified_source", [None, "snapshot", "first_read", "second_read"])
+def test_unverified_account_provenance_locks_candidate_capital(
+    unverified_source: str | None,
+) -> None:
+    reconciliation = _reconciliation()
+    assert reconciliation.snapshot is not None
+    snapshot = reconciliation.snapshot
+    if unverified_source == "snapshot":
+        reconciliation = reconciliation.model_copy(
+            update={
+                "snapshot": snapshot.model_copy(
+                    update={
+                        "account": snapshot.account.model_copy(
+                            update={
+                                "provenance": AccountSummaryProvenance.UNKNOWN,
+                            }
+                        ),
+                    }
+                ),
+            }
+        )
+    known = _account()
+    unknown = known.model_copy(update={"provenance": AccountSummaryProvenance.UNKNOWN})
+    broker = _CandidateBroker(
+        account_first=unknown if unverified_source == "first_read" else known,
+        account_second=unknown if unverified_source == "second_read" else known,
+    )
+    service, _, _, _ = _service(broker, reconciliation)
+    result = service.evaluate("AAPL")
+    if unverified_source is None:
+        assert result.status is EligibilityStatus.ELIGIBLE
+        assert result.resolution is not None
+        assert result.resolution.selected is not None
+    else:
+        assert result.status is not EligibilityStatus.ELIGIBLE
+        assert result.resolution is None
+        assert "UNVERIFIED_PROVENANCE" in str(result.reasons)
+
+
 def test_fresh_empty_account_ranks_puts_in_one_serialized_read_only_run() -> None:
     broker = _CandidateBroker()
     service, runner, reader, market_data = _service(broker, _reconciliation())
@@ -468,6 +510,7 @@ def test_fresh_empty_account_ranks_puts_in_one_serialized_read_only_run() -> Non
     serialized = result.model_dump_json()
     assert ACCOUNT_ID not in serialized
     assert account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY) not in serialized
+
     assert reader.calls == 1
     assert runner.run_calls == 1
     assert runner.timeouts == [30.0]
@@ -834,6 +877,7 @@ def test_account_observation_time_must_not_move_backward() -> None:
 def test_account_observation_time_must_remain_timezone_aware() -> None:
     valid = _account()
     naive = AccountSummary.model_construct(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=valid.account_id,
         net_liquidation=valid.net_liquidation,
         total_cash=valid.total_cash,

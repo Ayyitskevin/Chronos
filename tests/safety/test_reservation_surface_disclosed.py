@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from chronos.domain.enums import OrderIntent, ProductFamily, ReconciliationStatus, RiskCheckStatus
+from chronos.domain.enums import (
+    AccountSummaryProvenance,
+    OrderIntent,
+    ProductFamily,
+    ReconciliationStatus,
+    RiskCheckStatus,
+)
 from chronos.domain.models import AccountSummary
 from chronos.orders.intent import build_option_intent
 from chronos.orders.risk import OrderRiskEngine, RiskEvidence
@@ -133,6 +139,7 @@ def _cash_secured_put_status(**evidence: Decimal) -> RiskCheckStatus:
         correlation_id="CHR-ORD-" + "R" * 32,
     )
     account = AccountSummary(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=PAPER_ACCOUNT,
         net_liquidation=Decimal("100000"),
         total_cash=Decimal("80000"),

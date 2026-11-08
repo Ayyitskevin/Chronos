@@ -389,14 +389,16 @@ def test_phase_a_cycle_obeys_the_evidence_contract(
                 "interval": "1d",
                 "lookback": "5",
             }
-            # SDOC-1: the snapshot is the raw reads MINUS the broker account id (the raw
-            # routes still carry it; the model-view contract lets identity appear only as a
-            # fingerprint), so the expectation drops that one key by name, independently
-            # of the worker's allow-list.
+            # SDOC-1: the model view omits the raw id. C also adds internal adapter
+            # provenance to the raw domain response; it is enforced by the backend,
+            # not added to the worker's published account schema. Name both omitted
+            # fields independently of the worker's allow-list; compare every other value.
             raw_account, raw_positions = responses[1].json(), responses[2].json()
             assert "account_id" in raw_account
+            assert raw_account["provenance"] == "VERIFIED_RESPONSE"
+            assert "provenance" not in snapshot["account"]
             assert snapshot["account"] == {
-                k: v for k, v in raw_account.items() if k != "account_id"
+                k: v for k, v in raw_account.items() if k not in {"account_id", "provenance"}
             }
             assert snapshot["positions"] == [
                 {k: v for k, v in position.items() if k != "account_id"}
