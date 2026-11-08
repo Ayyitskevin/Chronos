@@ -41,6 +41,17 @@ runbooks.
   `order_events` figures are `Numeric(20, 8)`, which SQLite stores as REAL: above 2^53 precision
   is lost and a figure beyond float range reads back as `Infinity`. The reachable path is the
   executions leg (next bullet); open-orders figures are bounded by the order's own quantity.
+  Since DEFER356 R7 the `CANCEL_PENDING` settle planner bounds every figure it scales by the
+  order quantity before any eight-place quantize (`src/chronos/orders/reconciliation_recovery.py`,
+  `unbounded`): a venue figure, a working-row figure or the witnessed lower bound that is not
+  finite or exceeds the order quantity holds that one intent typed (`... exceeds the order
+  quantity Q; held for review`) instead of aborting the whole pass, as a row-bound execution sum
+  above the quantity already did (P3-1). The adapter boundaries are unchanged, and the
+  `orderStatus` callback can still record such a figure: the consumer's placeholder threshold is
+  1e100 (`src/chronos/orders/callback_consumer.py`, `_UNSET_THRESHOLD`, sized for `UNSET_DOUBLE`),
+  which ibapi's `UNSET_DECIMAL` (2^127 - 1) passes, and the tracker has no magnitude bound, so the
+  book can carry a placeholder fill figure; the planner then holds the intent on its witnessed
+  bound, and nothing in Chronos lowers a recorded figure (D-67).
 - **The positions and executions legs are outside D-43 (Q4).** A NaN position quantity, or an
   execution whose `shares` is NaN, zero or negative, still fails `BrokerPosition` /
   `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
