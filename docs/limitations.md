@@ -41,6 +41,17 @@ runbooks.
   `order_events` figures are `Numeric(20, 8)`, which SQLite stores as REAL: above 2^53 precision
   is lost and a figure beyond float range reads back as `Infinity`. The reachable path is the
   executions leg (next bullet); open-orders figures are bounded by the order's own quantity.
+  Since DEFER356 R7 the `CANCEL_PENDING` settle planner bounds every figure it scales by the
+  order quantity before any eight-place quantize (`src/chronos/orders/reconciliation_recovery.py`,
+  `unbounded`): a venue figure, a working-row figure or the witnessed lower bound that is not
+  finite or exceeds the order quantity holds that one intent typed (`... exceeds the order
+  quantity Q; held for review`) instead of aborting the whole pass, as a row-bound execution sum
+  above the quantity already did (P3-1). The adapter boundaries are unchanged, and the
+  `orderStatus` callback can still record such a figure: the consumer's placeholder threshold is
+  1e100 (`src/chronos/orders/callback_consumer.py`, `_UNSET_THRESHOLD`, sized for `UNSET_DOUBLE`),
+  which ibapi's `UNSET_DECIMAL` (2^127 - 1) passes, and the tracker has no magnitude bound, so the
+  book can carry a placeholder fill figure; the planner then holds the intent on its witnessed
+  bound, and nothing in Chronos lowers a recorded figure (D-67).
 - **The positions and executions legs are outside D-43 (Q4).** A NaN position quantity, or an
   execution whose `shares` is NaN, zero or negative, still fails `BrokerPosition` /
   `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
@@ -207,6 +218,14 @@ runbooks.
   does not provide them yet.
 
 The reconciler's snapshot fill hold keeps no memory between passes. It compares a terminal row with the executions in the current broker snapshot only, so if an execution leaves the snapshot while the terminal row stays listed, a later pass can settle below the fills seen earlier (for example CANCELLED@0), and nothing records that they were seen. Whether a real gateway can produce that sequence is unverified (K4).
+
+The reconciler's snapshot witnesses match a contract by `con_id` and symbol together, as ruled (RECONFLOOR r2): an execution with the same `con_id` but a different symbol (for example `BRK B` against `BRK.B`) is treated as a different contract, so a terminal row settles (for example CANCELLED@0) instead of holding on it. If IBKR's `con_id` alone is the contract identity, `con_id`-only matching would be the fail-closed choice; this needs checking at the first paper session (K4).
+
+A blank-reference execution that shares an order's account, client, broker id, side and contract counts as a snapshot witness even when it belongs to another order that reused the broker id (ASSUMED-IB). Such a hold fails closed and writes nothing; it keeps the orders-plane permit refused while the execution stays in the snapshot, so no new order can be submitted even on an otherwise flat account (closes are a separate matter: see the INTEGRATION P3-1 paragraph), clears when the execution leaves, and has no operator exit. Whether IBKR reuses a broker id within one snapshot window is unverified (K4).
+
+INTEGRATION P3-1 (read of 2026-11-06; disclosed, not changed): a recorded fill figure above the venue's final terminal figure (a `FILL_PROGRESS` row of 7 against a venue that ends at `CANCELLED@5`) holds the intent in `CANCEL_PENDING` and keeps the orders-plane permit refused across reconciliation passes, restarts and the next session, with no operator route: `POST /orders/{id}/resolve` applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused as already pending, and reconciling again holds again because the floor is the largest recorded figure. It clears only if the venue later reports a figure at or above the recorded one (a record of `CANCELLED@7` or `@9` against a recorded 7 settles); nothing else clears it. Its own effect is a permanent lock on new opening orders on an otherwise flat account: once the venue row and its execution have left the snapshot, readiness stays `PENDING` on the restart blockers alone. Closing orders are not what it takes away: Chronos refuses every submission, closes included, for any held position today, hold or not, because a nonzero broker position is `MANUAL_REVIEW` with `HELD_POSITION_UNPROVEN` until allocation provenance exists (the reconciliation bullet above), so the exit for a position goes through TWS regardless. Reaching it needs the venue's final figure to fall below a figure it, or a local writer, reported earlier (a correction after a fill callback, or a wrong local row; ASSUMED-IB, unverified until a paper session). The operator stops and escalates to the owner, and closes any position that must be closed in TWS (a manual trade that does not clear the hold and that Chronos records nowhere; see the runbook); whether to add an audited exit is the owner's decision (`tests/integration/test_order_plane_disclosed_holds.py`).
+
+INTEGRATION P3-2 (read of 2026-11-06; disclosed, not changed): `propose` creates the `DRAFT` row before it gathers risk evidence, and the daily opening cap counts every opening intent created since local midnight in the market timezone, whatever its status (R-25: attempts count). A propose abandoned inside evidence gathering, by a broker read failure or, since #353, by a stale account summary (older than `account_summary_max_age_seconds`), leaves a DRAFT with no risk decision that still counts, so three such refusals spend a cap of three. The abandoned draft also holds the order's idempotency key for the rest of that trading day: a fresh propose of the same order (the route makes new intent and correlation ids every time) is refused as a duplicate and the route answers 500, and no route completes or clears the draft. `GET /orders` shows status and `risk_snapshot_id` but no creation time, so it cannot tell today's drafts from older ones; only the owner can, from the database. Gathering before creating, or excluding undecided drafts, is the owner's decision.
 
 ## Persistence and migrations
 
