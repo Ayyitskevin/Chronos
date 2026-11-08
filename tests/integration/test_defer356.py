@@ -205,12 +205,14 @@ def _placeholder_row(lifecycle: L, size: Decimal):
     )
 
 
-def _held_typed_and_the_other_settles(rig: Rig, report, before, *, label: str) -> str:
+def _held_typed_and_the_other_settles(
+    rig: Rig, report, before, *, label: str, detail: str = "exceeds the order quantity 10"
+) -> str:
     assert rig.status() is L.CANCEL_PENDING and rig.events() == before
     held = {item.intent_id: item.reason for item in report.unresolved}
     assert set(held) == {"intent-1"}
     assert held["intent-1"].startswith(label)
-    assert "exceeds the order quantity 10" in held["intent-1"]  # the book's scale: 10.00000000
+    assert detail in held["intent-1"]  # the quantity prints at the book's scale: 10.00000000
     assert held["intent-1"].endswith("; held for review")
     assert rig.status("intent-2") is L.CANCELLED
     assert {item.intent_id for item in report.applied_updates} == {"intent-2"}
@@ -259,19 +261,25 @@ def test_a_placeholder_working_figure_holds_typed_on_both_working_paths(
 
 
 @pytest.mark.parametrize(
+    "recorded,detail",
+    [("1E+20", "exceeds the order quantity 10"), ("1E+400", "is not finite")],
+    ids=["1e20", "beyond-float-range"],
+)
+@pytest.mark.parametrize(
     "venue_row", [L.CANCELLED, L.SUBMITTED], ids=["terminal-path", "working-path"]
 )
 def test_a_placeholder_recorded_figure_holds_typed_instead_of_aborting(
-    rig: Rig, venue_row: L
+    rig: Rig, venue_row: L, recorded: str, detail: str
 ) -> None:
     """The witnessed lower bound reads the book's recorded figures. A status callback carrying
     ibapi's UNSET_DECIMAL passes the consumer's 1e100 placeholder threshold and the tracker's
     finite-and-non-negative check, so the book can hold one; the planner must hold the intent
-    typed, not abort on quantizing the bound (and ``order_events`` stores REAL, so 1E+20 reads
-    back exactly)."""
+    typed, not abort on quantizing the bound. ``order_events`` stores REAL: 1E+20 reads back
+    exactly, and a figure beyond float range reads back as ``Infinity`` (docs/limitations.md,
+    D-43 Q3), which the bound carries and the planner must also hold typed."""
 
     rig.seed()
-    rig.event(L.PARTIALLY_FILLED, at=PRIOR, filled="1E+20", quantity=Decimal("1E+20"))
+    rig.event(L.PARTIALLY_FILLED, at=PRIOR, filled=recorded, quantity=Decimal(recorded))
     rig.pending()
     rig.venue.open = [venue_order(venue_row, "0")]
     _seed_clean_second_intent(rig)
@@ -279,7 +287,9 @@ def test_a_placeholder_recorded_figure_holds_typed_instead_of_aborting(
 
     report = rig.reconcile()
 
-    reason = _held_typed_and_the_other_settles(rig, report, before, label="witnessed lower bound")
+    reason = _held_typed_and_the_other_settles(
+        rig, report, before, label="witnessed lower bound", detail=detail
+    )
     assert "below the witnessed lower bound" not in reason
 
 
@@ -309,9 +319,12 @@ def test_the_working_row_comparison_uses_the_same_eight_place_scale(
 
     assert rig.status() is L.CANCEL_PENDING
     if outcome == "progress":
-        assert report.unresolved == () and len(report.applied_updates) == 1
+        assert report.unresolved == ()
+        reasons = [item.reason for item in report.proven if item.intent_id == "intent-1"]
+        assert reasons == ["fill progress recorded in place"]  # in place: no lifecycle change
         assert len(rig.events()) == len(before) + 1
-        assert rig.events()[-1].filled_quantity == Decimal(figure)
+        stored = Decimal(figure).quantize(Decimal("0.00000001"))  # the book keeps eight places
+        assert rig.events()[-1].filled_quantity == stored
     else:
         assert rig.events() == before
         assert "below the witnessed lower bound" in report.unresolved[0].reason

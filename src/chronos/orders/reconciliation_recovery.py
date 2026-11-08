@@ -1532,7 +1532,11 @@ class OrderRestartReconciler:
             )
             if why is not None:
                 return _SettlePlan("refuse", why)
-            if figure < lower:
+            # DEFER356 R7 P3 (Kimi, #361): the working row at the same stored eight-place scale as
+            # the terminal comparison in ``settle``: a figure under the bound by less than one
+            # representable tick is equal at the scale the book keeps. The conductor's RECONFLOOR
+            # R3 scale, extended once more; Kevin was told in the DEFER356 PR body.
+            if figure.quantize(Decimal("0.00000001")) < lower.quantize(Decimal("0.00000001")):
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {lower}",
