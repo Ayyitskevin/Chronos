@@ -185,3 +185,132 @@ def test_a_blank_execution_on_a_reused_broker_id_holds_then_clears_when_it_leave
 
     assert rig.status() is L.CANCELLED and cleared.unresolved == ()
     assert len(cleared.applied_updates) == 1
+
+
+# --- R7: Kimi's #361 findings. P2: a placeholder in the venue's OWN figure, or in a recorded
+# figure, still aborted the pass. P3: the working-row comparison was not at the stored scale.
+
+
+def _placeholder_row(lifecycle: L, size: Decimal):
+    """A venue row whose figure is a placeholder but whose quantity is still the order's.
+
+    ``BrokerOrder`` validates ``filled + remaining == quantity`` with both non-negative, and the
+    official adapter's open-orders read fails the whole snapshot on that (D-43 R4), so this shape
+    is built past validation with ``model_copy``: it is what Kimi's reproduction put on the book,
+    and the planner must hold it typed, never raise.
+    """
+
+    return venue_order(lifecycle, "0").model_copy(
+        update={"filled_quantity": size, "remaining_quantity": Decimal("0")}
+    )
+
+
+def _held_typed_and_the_other_settles(rig: Rig, report, before, *, label: str) -> str:
+    assert rig.status() is L.CANCEL_PENDING and rig.events() == before
+    held = {item.intent_id: item.reason for item in report.unresolved}
+    assert set(held) == {"intent-1"}
+    assert held["intent-1"].startswith(label)
+    assert "exceeds the order quantity 10; held for review" in held["intent-1"]
+    assert rig.status("intent-2") is L.CANCELLED
+    assert {item.intent_id for item in report.applied_updates} == {"intent-2"}
+    return held["intent-1"]
+
+
+@pytest.mark.parametrize(
+    "size",
+    [Decimal("1E+20"), UNSET_DECIMAL, UNSET_DOUBLE],
+    ids=["1e20", "UNSET_DECIMAL", "UNSET_DOUBLE"],
+)
+@pytest.mark.parametrize("lifecycle", [L.CANCELLED, L.FILLED], ids=["cancelled", "filled"])
+def test_a_placeholder_terminal_figure_holds_one_intent_and_the_other_still_settles(
+    rig: Rig, lifecycle: L, size: Decimal
+) -> None:
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [_placeholder_row(lifecycle, size)]
+    _seed_clean_second_intent(rig)
+    before = rig.events()
+
+    report = rig.reconcile()  # before the fix: decimal.InvalidOperation aborts the whole pass
+
+    _held_typed_and_the_other_settles(rig, report, before, label="venue fill figure")
+
+
+@pytest.mark.parametrize(
+    "lifecycle", [L.SUBMITTED, L.CANCEL_PENDING], ids=["filled-by-quantity", "pending-cancel"]
+)
+def test_a_placeholder_working_figure_holds_typed_on_both_working_paths(
+    rig: Rig, lifecycle: L
+) -> None:
+    """SUBMITTED at a placeholder is "filled by quantity" (C3) and reaches the settle; a
+    PendingCancel row (C1) takes the in-place path, where the placeholder was WRITTEN as fill
+    progress before the fix (the C3 one raised)."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [_placeholder_row(lifecycle, UNSET_DECIMAL)]
+    _seed_clean_second_intent(rig)
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    _held_typed_and_the_other_settles(rig, report, before, label="venue fill figure")
+
+
+@pytest.mark.parametrize(
+    "venue_row", [L.CANCELLED, L.SUBMITTED], ids=["terminal-path", "working-path"]
+)
+def test_a_placeholder_recorded_figure_holds_typed_instead_of_aborting(
+    rig: Rig, venue_row: L
+) -> None:
+    """The witnessed lower bound reads the book's recorded figures. A status callback carrying
+    ibapi's UNSET_DECIMAL passes the consumer's 1e100 placeholder threshold and the tracker's
+    finite-and-non-negative check, so the book can hold one; the planner must hold the intent
+    typed, not abort on quantizing the bound (and ``order_events`` stores REAL, so 1E+20 reads
+    back exactly)."""
+
+    rig.seed()
+    rig.event(L.PARTIALLY_FILLED, at=PRIOR, filled="1E+20", quantity=Decimal("1E+20"))
+    rig.pending()
+    rig.venue.open = [venue_order(venue_row, "0")]
+    _seed_clean_second_intent(rig)
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    reason = _held_typed_and_the_other_settles(rig, report, before, label="witnessed lower bound")
+    assert "below the witnessed lower bound" not in reason
+
+
+@pytest.mark.parametrize(
+    "figure,own_fill,outcome",
+    [
+        ("5", "5.000000004", "progress"),  # Kimi's P3 case: equal at the stored scale
+        ("5.000000001", "5.000000001", "progress"),  # equal beyond eight places
+        ("5", "5.00000001", "refuse"),  # below by one representable tick: still refused
+    ],
+    ids=["under-by-4e-9", "equal-9dp", "under-by-1e-8"],
+)
+def test_the_working_row_comparison_uses_the_same_eight_place_scale(
+    rig: Rig, figure: str, own_fill: str, outcome: str
+) -> None:
+    """A working SUBMITTED row is compared to the witnessed bound at the same scale as a terminal
+    one (P3-4 extended, Kimi P3). Equal at eight places records the venue figure as fill
+    progress in place; one tick under refuses."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.SUBMITTED, figure)]
+    rig.venue.execs = [venue_execution("own-fill", own_fill, PRIOR)]  # referenced: an OWN fill
+    before = rig.events()
+
+    report = rig.reconcile()
+
+    assert rig.status() is L.CANCEL_PENDING
+    if outcome == "progress":
+        assert report.unresolved == () and len(report.applied_updates) == 1
+        assert len(rig.events()) == len(before) + 1
+        assert rig.events()[-1].filled_quantity == Decimal(figure)
+    else:
+        assert rig.events() == before
+        assert "below the witnessed lower bound" in report.unresolved[0].reason
