@@ -223,7 +223,10 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # history entries main does not share, rotated from both committed parents; the merged
     # matrix supersedes nothing new (runtime.py is the branch's, enums.py and
     # autonomy_wiring.py are main's, each side's other value already in history).
-    assert len(historical_candidates) == 94
+    # 96 at FLOORHOLD-R2 on the fill-floor-hold-blocker branch (merge of #361 R7): two retired
+    # generated fingerprints observed at 8529c99a and at 134e57ad (the R7 head), rotated from both
+    # committed parents (134e57ad and 8529c99a). Both are branch-only commits: land by a real merge.
+    assert len(historical_candidates) == 96
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

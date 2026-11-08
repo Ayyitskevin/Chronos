@@ -1244,7 +1244,7 @@ def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_in
     assert set(found) == {
         "src/chronos/api/main.py:343",
         "src/chronos/api/reconciliation_loop.py:102",
-        "src/chronos/api/routes/orders.py:217",
+        "src/chronos/api/routes/orders.py:231",
     }, found
     assert set(found.values()) <= set(TRIGGERS)
 

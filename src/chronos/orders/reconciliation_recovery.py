@@ -22,6 +22,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
+from enum import StrEnum
 from functools import partial
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
@@ -82,6 +83,45 @@ def _fills_without_a_working_lifecycle(order: BrokerOrder) -> bool:
     return order.filled_quantity > 0 and order.lifecycle not in _QUANTITY_REFINES
 
 
+class FillFloorBasis(StrEnum):
+    """Which figure the venue's fill figure was found below (FLOORHOLD)."""
+
+    RECORDED_FILLS = "RECORDED_FILLS"  # the largest figure on the intent's own events (legacy)
+    WITNESSED_LOWER_BOUND = "WITNESSED_LOWER_BOUND"  # recorded figures plus owned executions
+    SNAPSHOT_EXECUTIONS = "SNAPSHOT_EXECUTIONS"  # row-bound executions in the same snapshot
+    ROW_BOUND_EXECUTIONS = "ROW_BOUND_EXECUTIONS"  # the planner's row-bound witnesses
+    WRITE_FLOOR = "WRITE_FLOOR"  # the atomic floor refused the write itself
+
+
+@dataclass(frozen=True, slots=True)
+class FillFloorHold:
+    """The venue's fill figure is below a figure Chronos recorded or witnessed (FLOORHOLD).
+
+    Observability only: it names a refusal that already happened. It changes no decision, offers
+    no exit, and is never read to allow anything. ``floor`` is the figure the venue is below;
+    ``venue`` is what the venue (or the write) carried.
+    """
+
+    basis: FillFloorBasis
+    floor: Decimal
+    venue: Decimal
+
+    def as_dict(self) -> dict[str, str]:
+        """Plain text, no identifiers: the shape the operator reply, the run row and the log use."""
+
+        return {
+            "basis": self.basis.value,
+            "floor_figure": _plain_figure(self.floor),
+            "venue_figure": _plain_figure(self.venue),
+        }
+
+
+def _plain_figure(value: Decimal) -> str:
+    """A figure as plain text, trailing zeros dropped (the book stores eight places)."""
+
+    return format(value.normalize(), "f")
+
+
 @dataclass(frozen=True, slots=True)
 class RestartOrderObservation:
     """Broker proof (or lack of it) for one sent-active local intent."""
@@ -91,6 +131,8 @@ class RestartOrderObservation:
     broker_status: OrderLifecycle | None
     transition_applied: bool
     reason: str
+    # FLOORHOLD: set only where this observation IS a fill-floor refusal; never changes a decision
+    fill_floor_hold: FillFloorHold | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,11 +157,38 @@ class OrderRestartReconciliationReport:
         return not self.unresolved
 
     @property
+    def fill_floor_holds(self) -> tuple[RestartOrderObservation, ...]:
+        """The unresolved observations that are fill-floor holds (FLOORHOLD; observability only)."""
+
+        return tuple(item for item in self.unresolved if item.fill_floor_hold is not None)
+
+    @property
     def permits_new_opening_order(self) -> bool:
         # The full portfolio reconciler reads a separate legacy ownership
         # store. Until order_intents are integrated there, any remaining sent-
         # active intent conservatively blocks another opening action.
         return self.broker_evidence_complete and not self.remaining_active
+
+
+def _real_floor(floor: Decimal, quantity: Decimal) -> bool:
+    """FLOORHOLD P2-1: a floor is a recorded or witnessed REAL fill only if it is a finite figure
+    no larger than the order quantity. A placeholder (ibapi sizes from 1e20) or an overfill is a
+    bad figure, held for review by its own reason, never a fill-floor hold."""
+
+    return floor.is_finite() and floor <= quantity
+
+
+def _write_floor_hold(refused: Exception, quantity: Decimal) -> FillFloorHold | None:
+    """The atomic floor refusing the write itself (FLOORHOLD): typed only for that refusal, and
+    only when the floor it protects is a real fill."""
+
+    if not isinstance(refused, RecordedFillsAdvanced) or not _real_floor(
+        refused.recorded, quantity
+    ):
+        return None
+    return FillFloorHold(
+        FillFloorBasis.WRITE_FLOOR, floor=refused.recorded, venue=refused.attempted
+    )
 
 
 def _contract_matches_intent(intent: OrderIntentRecord, contract: object) -> bool:
@@ -564,7 +633,14 @@ def _unresolved_evidence_reason(
     persisted_broker_order_id: int | None,
     persisted_permanent_id: int | None = None,
     recorded_filled_quantity: Decimal | None = None,
+    hold_out: list[FillFloorHold] | None = None,
 ) -> str:
+    """Why the legacy resolver settled nothing.
+
+    ``hold_out`` (FLOORHOLD): when given, the two floor refusals below append their typed
+    :class:`FillFloorHold` before returning their reason; every other return leaves it empty.
+    """
+
     order_ref = intent.order_ref
     if not order_ref:
         return "local intent has no owned broker order reference"
@@ -642,6 +718,16 @@ def _unresolved_evidence_reason(
     if below is not None:
         row_fills = format(below.filled_quantity.normalize(), "f")
         recorded = format(Decimal(str(recorded_filled_quantity)).normalize(), "f")
+        if hold_out is not None and _real_floor(
+            Decimal(str(recorded_filled_quantity)), intent.quantity
+        ):
+            hold_out.append(
+                FillFloorHold(
+                    FillFloorBasis.RECORDED_FILLS,
+                    floor=Decimal(str(recorded_filled_quantity)),
+                    venue=below.filled_quantity,
+                )
+            )
         return (
             f"owned broker order is typed {below.lifecycle.value} at {row_fills} filled, "
             f"below the {recorded} filled already recorded: a terminal write "
@@ -653,6 +739,14 @@ def _unresolved_evidence_reason(
         )
         if _terminal_below_snapshot_fills(order, witnesses):
             witnessed = sum((execution.quantity for execution in witnesses), Decimal("0"))
+            if hold_out is not None and _real_floor(witnessed, intent.quantity):
+                hold_out.append(
+                    FillFloorHold(
+                        FillFloorBasis.SNAPSHOT_EXECUTIONS,
+                        floor=witnessed,
+                        venue=order.filled_quantity,
+                    )
+                )
             return (
                 "snapshot fill conflict: terminal venue figure is below the witnessed lower bound "
                 f"{witnessed} from row-bound snapshot executions, the intent stays locked"
@@ -783,6 +877,7 @@ class _SettlePlan:
     #: on a working-order observation is made only while both are still these (Daybreak P2-1)
     epochs: tuple[int, int | None] | None = None
     dwell: _Dwell | None = None  # U-B: this pass's observation of the recovery dwell
+    hold: FillFloorHold | None = None  # FLOORHOLD: a refusal that is a fill-floor hold, typed
 
 
 def _plain(value: Decimal) -> str:
@@ -974,6 +1069,7 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             legacy_refusal_reason: str | None = None
+            legacy_refusal_hold: FillFloorHold | None = None
             if planned:
                 assert identities is not None
                 # the same planner, bound to this intent's persisted facts, re-runs over the
@@ -1000,6 +1096,7 @@ class OrderRestartReconciler:
                 as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
                 if as_today and plan.kind == "refuse":
                     legacy_refusal_reason = plan.reason
+                    legacy_refusal_hold = plan.hold
                 if plan.kind != "legacy" and not as_today:
                     settle_plans.append((intent, plan, planner, identities))
                     continue
@@ -1020,6 +1117,7 @@ class OrderRestartReconciler:
                 now=now,
             )
             if update is None:
+                legacy_holds: list[FillFloorHold] = []
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
@@ -1037,7 +1135,10 @@ class OrderRestartReconciler:
                             persisted_broker_order_id=persisted_broker_order_id,
                             persisted_permanent_id=persisted_permanent_id,
                             recorded_filled_quantity=recorded_filled_quantity,
+                            hold_out=legacy_holds,
                         ),
+                        fill_floor_hold=legacy_refusal_hold
+                        or (legacy_holds[0] if legacy_holds else None),
                     )
                 )
                 continue
@@ -1074,6 +1175,7 @@ class OrderRestartReconciler:
                             if isinstance(refused, OrderLifecycleError)
                             else str(refused)
                         ),
+                        fill_floor_hold=_write_floor_hold(refused, intent.quantity),
                     )
                 )
                 continue
@@ -1347,19 +1449,19 @@ class OrderRestartReconciler:
             )
         )
         if not identity_ok:
-            return _SettlePlan(
-                "refuse",
-                _unresolved_evidence_reason(
-                    intent,
-                    open_orders=open_orders,
-                    executions=executions,
-                    current_account_id=current_account_id,
-                    expected_limit_price=expected_limit_price,
-                    expected_broker_client_id=self._expected_broker_client_id,
-                    persisted_broker_order_id=persisted_broker_order_id,
-                    persisted_permanent_id=persisted_permanent_id,
-                ),
+            # FLOORHOLD P3-2: no fill-floor tag on this path; the floor reasons follow the identity
+            # checks in the reason function, so it is never reached with one (shown at R1).
+            identity_reason = _unresolved_evidence_reason(
+                intent,
+                open_orders=open_orders,
+                executions=executions,
+                current_account_id=current_account_id,
+                expected_limit_price=expected_limit_price,
+                expected_broker_client_id=self._expected_broker_client_id,
+                persisted_broker_order_id=persisted_broker_order_id,
+                persisted_permanent_id=persisted_permanent_id,
             )
+            return _SettlePlan("refuse", identity_reason)
         figures = self._tracker.fill_figures(
             intent.intent_id, current_account_id=current_account_id
         )
@@ -1397,6 +1499,7 @@ class OrderRestartReconciler:
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
+                    hold=FillFloorHold(FillFloorBasis.WITNESSED_LOWER_BOUND, witnessed, figure),
                 )
             if record is not None:
                 row_bound = sum(
@@ -1421,6 +1524,8 @@ class OrderRestartReconciler:
                         "refuse",
                         f"snapshot fill conflict: row-bound snapshot executions {row_bound} exceed "
                         f"the order quantity {quantity}; held for review",
+                        # FLOORHOLD P2-1: untyped. An overfill or a placeholder is no recorded
+                        # floor the venue went below, so it is not a fill-floor hold.
                     )
                 if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
                     Decimal("0.00000001")
@@ -1429,6 +1534,7 @@ class OrderRestartReconciler:
                         "refuse",
                         f"snapshot fill conflict: venue fill figure {figure} is below the "
                         f"witnessed lower bound {row_bound} from row-bound snapshot executions",
+                        hold=FillFloorHold(FillFloorBasis.ROW_BOUND_EXECUTIONS, row_bound, figure),
                     )
             try:
                 OrderLifecycleMachine(intent.status).apply(target)
@@ -1540,6 +1646,7 @@ class OrderRestartReconciler:
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {lower}",
+                    hold=FillFloorHold(FillFloorBasis.WITNESSED_LOWER_BOUND, lower, figure),
                 )
             # U-B (§4.3): the dwell is observed only for an EXACTLY bound order, really working
             # (not PendingCancel), with complete evidence (the completed-orders read succeeded
@@ -1701,6 +1808,7 @@ class OrderRestartReconciler:
                 broker_status=None,
                 transition_applied=False,
                 reason=plan.reason,
+                fill_floor_hold=plan.hold if plan.kind == "refuse" else None,
             )
             if plan.kind == "refuse":
                 unresolved.append(observed)
@@ -1776,6 +1884,7 @@ class OrderRestartReconciler:
                         broker_status=plan.to_status,
                         transition_applied=False,
                         reason=f"fill_floor_conflict: RecordedFillsAdvanced: {refused}",
+                        fill_floor_hold=_write_floor_hold(refused, intent.quantity),
                     )
                 )
                 continue

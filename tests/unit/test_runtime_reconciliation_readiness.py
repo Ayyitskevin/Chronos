@@ -390,7 +390,7 @@ def test_symbol_blocker_codes_default_to_empty_on_clean_reconciliation() -> None
     assert report.readiness.blockers == frozenset()
 
 
-def test_blocker_metadata_does_not_change_persisted_or_served_key_sets() -> None:
+def test_blocker_metadata_adds_only_the_floor_hold_reply_field() -> None:
     runtime = _runtime_for(
         _restart_report(),
         _portfolio_result(status=ReconciliationStatus.MANUAL_REVIEW, snapshot=None),
@@ -439,7 +439,10 @@ def test_blocker_metadata_does_not_change_persisted_or_served_key_sets() -> None
         "proven_count",
         "unresolved_count",
         "remaining_active_count",
+        # FLOORHOLD: the one served addition; empty unless a fill-floor hold exists
+        "fill_floor_holds",
     }
+    assert api_payload["fill_floor_holds"] == []
     assert set(health_payload) == {
         "assessed_at",
         "liveness",

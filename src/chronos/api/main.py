@@ -80,7 +80,7 @@ from chronos.operations.clock import (
 from chronos.operations.health import BackgroundTaskName, StartupFaultCode
 from chronos.orders.recovery_hold import evaluate_startup_recovery_hold
 from chronos.orders.state_generation import StateGenerationMarker
-from chronos.runtime import build_runtime
+from chronos.runtime import build_runtime, log_fill_floor_holds
 from chronos.supervisor.proposers import UnsafeProposerRegistry
 from chronos.utils.locking import WriterLease
 from chronos.utils.time import utc_now
@@ -341,6 +341,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             else:
                 try:
                     report = runtime.reconcile_submission_readiness(trigger="startup")
+                    log_fill_floor_holds(report.restart, operation="startup_reconcile")
                     readiness = report.readiness
                     log = _logger.info if readiness.ready else _logger.warning
                     log(

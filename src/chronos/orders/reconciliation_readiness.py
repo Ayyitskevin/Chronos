@@ -35,6 +35,10 @@ class ReadinessBlocker(StrEnum):
     RESTART_BROKER_EVIDENCE_INCOMPLETE = "RESTART_BROKER_EVIDENCE_INCOMPLETE"
     RESTART_SENT_ACTIVE = "RESTART_SENT_ACTIVE"
     BLOCKERS_UNDETERMINED = "BLOCKERS_UNDETERMINED"
+    # FLOORHOLD: the venue's fill figure is below a recorded or witnessed one on some intent. It is
+    # published ALONGSIDE the restart blockers that already hold readiness; it never replaces them
+    # and nothing reads it to decide anything.
+    FILL_FLOOR_HOLD = "FILL_FLOOR_HOLD"
 
 
 @dataclass(frozen=True, slots=True)

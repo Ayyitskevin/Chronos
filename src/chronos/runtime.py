@@ -132,6 +132,34 @@ def _callback_execution_writer(
     return record
 
 
+def log_fill_floor_holds(restart: OrderRestartReconciliationReport, *, operation: str) -> None:
+    """FLOORHOLD: one WARNING per fill-floor hold with the intent id and both figures.
+
+    Observability only. No account, order reference or broker id is logged, and nothing here is
+    read back to decide anything.
+    """
+
+    # FLOORHOLD P3-1: observability must never cause a refusal. This runs after readiness is
+    # published, inside the startup ``try`` and the reconcile route; an error here is logged and
+    # swallowed so neither can turn it into a startup fault or a 500.
+    try:
+        for item in restart.fill_floor_holds:
+            hold = item.fill_floor_hold
+            if hold is None:  # fill_floor_holds already filtered; keeps the type checker honest
+                continue
+            figures = hold.as_dict()
+            _LOGGER.warning(
+                "Fill floor hold on intent %s: venue figure %s is below %s (%s); no operator exit",
+                item.intent_id,
+                figures["venue_figure"],
+                figures["floor_figure"],
+                figures["basis"],
+                extra={"event": "fill_floor_hold", "operation": operation},
+            )
+    except Exception:
+        _LOGGER.exception("Fill floor hold logging failed; the reconcile result is unchanged")
+
+
 @dataclass(frozen=True, slots=True)
 class SubmissionReconciliationReport:
     """Composite evidence used to publish order-submission readiness."""
@@ -165,6 +193,9 @@ def _readiness_blockers(
         blockers.add(ReadinessBlocker.RESTART_BROKER_EVIDENCE_INCOMPLETE)
     if restart.remaining_active:
         blockers.add(ReadinessBlocker.RESTART_SENT_ACTIVE)
+    if restart.fill_floor_holds:
+        # FLOORHOLD: observability only, added to (never replacing) the two restart blockers above
+        blockers.add(ReadinessBlocker.FILL_FLOOR_HOLD)
     for symbol in portfolio.symbols:
         blockers.update(ReadinessBlocker(code) for code in symbol.blocker_codes)
     return frozenset(blockers)
@@ -386,6 +417,12 @@ def _reconciliation_run_snapshot(
             "broker_status": item.broker_status.value if item.broker_status else None,
             "transition_applied": item.transition_applied,
             "reason": item.reason,
+            # FLOORHOLD: present only on a fill-floor hold; the other entries keep their keys
+            **(
+                {"fill_floor_hold": item.fill_floor_hold.as_dict()}
+                if item.fill_floor_hold is not None
+                else {}
+            ),
         }
         for item in (*report.restart.proven, *report.restart.unresolved)
     )
