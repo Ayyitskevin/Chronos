@@ -48,7 +48,7 @@ from chronos.autonomy import (
     TradableAssetClass,
     VersionPins,
 )
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import AccountSummaryProvenance, DataQuality
 from chronos.domain.models import UnderlyingContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.persistence import hash_chain
@@ -157,6 +157,7 @@ def _facts(**overrides: Any) -> CycleFacts:
         "evidence_bundle_digest": "b" * 64,
         "market_data": MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
         "account": AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
@@ -329,6 +330,7 @@ def test_an_unsizeable_proposal_stops_at_sizing(session: Session) -> None:
     _activate(session, mandate)
     facts = _facts(
         account=AccountEvidence(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             as_of=_NOW,
             clock=lambda: _NOW,
             net_liquidation_usd=Decimal(100_000),
@@ -474,6 +476,7 @@ def test_a_loss_limit_breach_stops_the_next_cycle_but_permits_closing(
         ),
         facts=_facts(
             account=AccountEvidence(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 as_of=_NOW,
                 clock=lambda: _NOW,
                 net_liquidation_usd=Decimal(100_000),
@@ -1098,6 +1101,7 @@ def test_d17_a_close_under_a_set_limit_compiles_when_position_evidence_is_suppli
         ),
         facts=_facts(
             account=AccountEvidence(
+                provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
                 as_of=_NOW,
                 clock=lambda: _NOW,
                 net_liquidation_usd=Decimal(100_000),

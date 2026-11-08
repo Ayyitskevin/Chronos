@@ -31,7 +31,7 @@ from worker import model_local, model_xai
 from worker.config import WorkerConfig
 
 from chronos.broker import demo as demo_module
-from chronos.domain.enums import BrokerMode
+from chronos.domain.enums import AccountSummaryProvenance, BrokerMode
 from chronos.domain.models import AccountSummary, BrokerPosition, UnderlyingContract
 from tests.safety.test_evidence_bundles_exercised import (
     PROPOSER_HEADER,
@@ -164,6 +164,7 @@ def test_served_document_rechecks_account_age_after_all_blocking_reads(
 
     now = demo_module.demo_now()
     summary = AccountSummary(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=RAW_ID,
         net_liquidation=Decimal("250000"),
         total_cash=Decimal("125000"),
@@ -255,3 +256,55 @@ def test_the_worker_restates_the_backends_allow_lists_exactly() -> None:
     assert worker_evidence.ACCOUNT_FACT_FIELDS == served.ACCOUNT_FACT_FIELDS
     assert worker_evidence.POSITION_FACT_FIELDS == served.POSITION_FACT_FIELDS
     assert "account_id" not in served.ACCOUNT_FACT_FIELDS + served.POSITION_FACT_FIELDS
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_account_provenance_gates_served_financial_document(
+    monkeypatch: pytest.MonkeyPatch,
+    verified: bool,
+) -> None:
+    from chronos.api.routes import autonomy as served
+
+    now = demo_module.demo_now()
+    summary = AccountSummary(
+        account_id=RAW_ID,
+        net_liquidation=Decimal("250000"),
+        total_cash=Decimal("125000"),
+        buying_power=Decimal("250000"),
+        as_of=now,
+        provenance=(
+            AccountSummaryProvenance.VERIFIED_RESPONSE
+            if verified
+            else AccountSummaryProvenance.UNKNOWN
+        ),
+    )
+
+    class Broker:
+        async def account_summary(self):
+            return summary
+
+        async def positions(self):
+            return ()
+
+        async def server_time(self):
+            return now
+
+    runtime = SimpleNamespace(
+        broker=Broker(),
+        connection=SimpleNamespace(run=asyncio.run),
+        settings=SimpleNamespace(broker_mode=BrokerMode.DEMO, account_summary_max_age_seconds=30),
+        order_management=SimpleNamespace(list_orders=lambda: []),
+    )
+    monkeypatch.setattr(served, "account_summary_check_time", lambda **_: now)
+    result = served.compose_served_document(
+        runtime,
+        object(),
+        symbols=(),
+        lookback_days=5,
+        now=now,
+    )
+    if verified:
+        assert result is not None
+        assert RAW_ID not in str(result)
+    else:
+        assert result is None

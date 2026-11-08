@@ -108,6 +108,14 @@ are a local history conflict, also refused by SUBMISSION_UNKNOWN operator resolu
 both IDs in TWS, preserve the event history, and keep the intent held for owner review; cancelling
 a venue row does not erase that persisted conflict.
 
+An `exceeds the order quantity ...; held for review` hold means a venue figure, a row-bound
+execution sum or the recorded lower bound is above the order's own size: a genuine overfill, or a
+placeholder figure (ibapi reports `UNSET_DECIMAL`, 2^127 - 1, for an unset size). Nothing is
+settled or recorded from it and the other intents in the pass are unaffected. Check the order's
+fills in TWS. If the venue figure was the placeholder, reconcile again once the venue reports a
+real figure. If the placeholder is a figure already recorded in the book, the hold has no operator
+route, as below.
+
 A `below the witnessed lower bound` hold means the venue's terminal figure is below the largest fill
 figure already recorded for the intent. It has no operator route: `POST /orders/{id}/resolve`
 applies only to `SUBMISSION_UNKNOWN`, a second cancel is refused, and reconciling again holds again,

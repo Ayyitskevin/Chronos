@@ -60,6 +60,7 @@ from chronos.config.limits import (
 )
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    AccountSummaryProvenance,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
@@ -533,6 +534,7 @@ class IBKRBroker:
             buying_power=buying_power_value,
             currency=next(iter(currencies)),
             as_of=observed_at,
+            provenance=AccountSummaryProvenance.UNKNOWN,
         )
 
     async def positions(self) -> tuple[BrokerPosition, ...]:

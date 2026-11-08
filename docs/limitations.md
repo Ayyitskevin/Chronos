@@ -41,6 +41,17 @@ runbooks.
   `order_events` figures are `Numeric(20, 8)`, which SQLite stores as REAL: above 2^53 precision
   is lost and a figure beyond float range reads back as `Infinity`. The reachable path is the
   executions leg (next bullet); open-orders figures are bounded by the order's own quantity.
+  Since DEFER356 R7 the `CANCEL_PENDING` settle planner bounds every figure it scales by the
+  order quantity before any eight-place quantize (`src/chronos/orders/reconciliation_recovery.py`,
+  `unbounded`): a venue figure, a working-row figure or the witnessed lower bound that is not
+  finite or exceeds the order quantity holds that one intent typed (`... exceeds the order
+  quantity Q; held for review`) instead of aborting the whole pass, as a row-bound execution sum
+  above the quantity already did (P3-1). The adapter boundaries are unchanged, and the
+  `orderStatus` callback can still record such a figure: the consumer's placeholder threshold is
+  1e100 (`src/chronos/orders/callback_consumer.py`, `_UNSET_THRESHOLD`, sized for `UNSET_DOUBLE`),
+  which ibapi's `UNSET_DECIMAL` (2^127 - 1) passes, and the tracker has no magnitude bound, so the
+  book can carry a placeholder fill figure; the planner then holds the intent on its witnessed
+  bound, and nothing in Chronos lowers a recorded figure (D-67).
 - **The positions and executions legs are outside D-43 (Q4).** A NaN position quantity, or an
   execution whose `shares` is NaN, zero or negative, still fails `BrokerPosition` /
   `BrokerExecution` validation and raises out of `positions()` / `executions()`; the
@@ -67,9 +78,15 @@ runbooks.
 - **Account-summary `as_of` is local-read time, not broker valuation time.** Every adapter stamps
   when its local read completes. In particular, the non-default `ib_async` adapter may return
   already-populated `accountSummaryAsync` cache rows and then apply a new local stamp without a
-  broker-side update. The age guard therefore bounds how long Chronos carries one local read
-  across blocking work; it does not prove venue freshness. Broker-side update timestamps or an
-  explicitly forced-refresh contract remain an open follow-up before this limitation can narrow.
+  broker-side update. Such summaries carry `UNKNOWN` provenance: display remains available,
+  while risk, cash/capital checks, autonomy sizing, drawdown and served financial evidence refuse
+  them. Refusal does not update or trip the drawdown breaker. Missing provenance also defaults
+  to `UNKNOWN`, including reconciliation projections and persisted account facts. The official
+  adapter labels its existing completed request response `VERIFIED_RESPONSE`; DEMO and sim label
+  their controlled responses explicitly. That label does not attest broker valuation time. The
+  unchanged age guard still bounds how long Chronos carries a local read across blocking work.
+  No forced refresh, extra request or callback collection is added; that separate option remains
+  owner-gated. Broker update-time evidence remains an open follow-up.
 
 - **A close-only underlying quote is now refused at the manager.** Since QEMPTY (D-78), a quote
   with no bid, ask or last is refused even when it carries a prior `close` (for example the
@@ -165,10 +182,23 @@ runbooks.
   backend restart. The restarted process remains unreconciled until a later startup, operator, or
   periodic pass proves parity. The refused read still counts as a failed broker call and freezes
   other intents' planned writes until that restart.
-- The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
-  basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
-  positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
-  exists. `MANUAL_REVIEW` is the safe outcome for any ambiguity.
+- The local reader marks a symbol unresolved only when a persisted cycle, strategy state,
+  draft, or basis entry names it (`src/chronos/persistence/repositories.py:324`, `:347`,
+  `:367`, `:461`). Fills are not collected as unresolved (BP-1b r1, `:416-417`). No code in
+  `src` writes cycles, strategy states, or drafts, and the basis repository's `append` is
+  called only from tests, so those rules are latent in production. In practice a nonzero
+  broker position holds its symbol at `MANUAL_REVIEW` (`HELD_POSITION_UNPROVEN`), and listed
+  broker executions do the same (`EXECUTIONS_UNALLOCATED`;
+  `src/chronos/services/reconciliation.py:586-592`). Open broker orders hold readiness at
+  `PENDING` only when every open order is one exact, zero-fill, owned short put and is the only
+  open order on its symbol (`src/chronos/services/reconciliation.py:594-599`, `:736-751`;
+  `src/chronos/runtime.py:299-300`). Any other open order makes its symbol `MANUAL_REVIEW`,
+  which makes the whole portfolio `MANUAL_REVIEW` (`src/chronos/services/reconciliation.py:440`),
+  and readiness reads that portfolio status (`src/chronos/runtime.py:293`), so the block is
+  account-wide. Positions stay `MANUAL_REVIEW` until complete allocation provenance exists.
+  `MANUAL_REVIEW` is the safe outcome for any ambiguity. After a fill, nothing goes through
+  Chronos account-wide, closes included, until the position is flat and its executions have
+  left the broker's snapshot.
 - A `SUBMISSION_UNKNOWN` order (an ambiguous failure after a send may have started) blocks
   further live submissions until reconciliation resolves it from positive broker truth. The
   audited operator endpoint (`POST /orders/{id}/resolve`) refreshes evidence but cannot turn

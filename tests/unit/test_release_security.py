@@ -203,18 +203,27 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 63 at H1B1-R1 (settings.py, api/autonomy_wiring.py and the ib_async adapter
     # disclosure each rotate their generated source-inventory fingerprint).
     # 64 at H1B1-R2: 1 superseded generated source fingerprints.
+    # ACCTFRESH-C branch-side history: 69 at ACCTFRESH-C-restacked (5 superseded generated
+    # source fingerprints).
     # 82 at the H1B1/main merge: main's 74 plus the branch's six history entries it did not share
     # and the two runtime.py fingerprints the merged file supersedes (main's and H1B1's).
     # 84 at TIDY-R4: main's 82 plus this branch's two (the superseded official_ibkr.py
     # inventory values at 72e404a and at 8cc781c, which exists only on this branch: land
     # by a real merge commit).
-    # 83 at DEFER356-R4 and 84 at DEFER356-R5 on the reconcile-defer-356 branch: runtime.py's two
-    # readiness reasons reworded twice, each rotating its generated source fingerprint.
-    # 86 at the DEFER356/main merge: main's 84 (TIDY-R4) plus the branch's runtime.py history
-    # entries main does not share, rotated from both committed parents.
-    # 87 at FLOORHOLD on the fill-floor-hold-blocker branch: the retired matrix fingerprint,
-    # observed at 92859789 (branch-only: land by a real merge commit).
-    assert len(historical_candidates) == 87
+    # ACCTFRESH-C branch-side history:
+    # 89 at the ACCTFRESH-C/H1B1 merge: H1B1's 82, two the C branch retired (ibkr.py and
+    # api/autonomy_wiring.py) and five the merged files supersede: both sides' demo.py and
+    # official_ibkr.py, and C's domain/enums.py.
+    # 92 at the ACCTFRESH-C/TIDY merge: main's 84, six this branch carried (C's enums.py, demo.py
+    # and official_ibkr.py, H1B1's ibkr.py and autonomy_wiring.py, #353's demo.py) and the two
+    # official_ibkr.py values the merged file supersedes (this branch's and main's).
+    # reconcile-defer-356 branch-side history: 83 at DEFER356-R4 and 84 at DEFER356-R5
+    # (runtime.py's two readiness reasons reworded twice), 86 at the DEFER356/#359 merge.
+    # 94 at the DEFER356/main (#354, #360) merge: main's 92 plus the branch's two runtime.py
+    # history entries main does not share, rotated from both committed parents; the merged
+    # matrix supersedes nothing new (runtime.py is the branch's, enums.py and
+    # autonomy_wiring.py are main's, each side's other value already in history).
+    assert len(historical_candidates) == 94
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

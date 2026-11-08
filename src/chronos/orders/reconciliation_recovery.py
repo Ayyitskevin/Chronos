@@ -1461,6 +1461,18 @@ class OrderRestartReconciler:
         lower = self._witnessed_lower_bound(figures, fills, now)
         quantity = intent.quantity
 
+        def unbounded(label: str, value: Decimal) -> str | None:
+            # DEFER356 R7 P2 (Kimi, #361): every figure the planner scales is bounded by the order
+            # quantity FIRST. ibapi placeholders (UNSET_DECIMAL is 2**127 - 1; sizes from 1e20 up)
+            # make the eight-place quantize raise, which aborted the whole pass; a genuine overfill
+            # reads the same. Either is this intent's typed hold, never the pass's failure.
+            # ``is_finite()`` never signals, so the comparison never meets a NaN.
+            if not value.is_finite():
+                return f"{label} {value} is not finite; held for review"
+            if value > quantity:
+                return f"{label} {value} exceeds the order quantity {quantity}; held for review"
+            return None
+
         def settle(
             record: BrokerOrder | None,
             figure: Decimal,
@@ -1468,6 +1480,11 @@ class OrderRestartReconciler:
             source: str,
             witnessed: Decimal = lower,
         ) -> _SettlePlan:
+            why = unbounded("venue fill figure", figure) or unbounded(
+                "witnessed lower bound", witnessed
+            )
+            if why is not None:
+                return _SettlePlan("refuse", why)
             # DEFER356 P3-4: both sides at the stored eight-place scale. The conductor's RECONFLOOR
             # R3 decision set this scale for the row-bound comparison below; this extends it to the
             # witnessed comparison. Not a Kevin ruling: Kevin is told in the DEFER356 PR body.
@@ -1609,7 +1626,18 @@ class OrderRestartReconciler:
                     return settle(order, order.filled_quantity, OrderLifecycle.FILLED, "open_order")
                 return from_terminal(order, "open_order")
             figure = order.filled_quantity
-            if figure < lower:
+            # R7 P2: C1's in-place path scales nothing today, but it WROTE a placeholder figure as
+            # fill progress (then the repository raised); the same bound holds it typed first.
+            why = unbounded("venue fill figure", figure) or unbounded(
+                "witnessed lower bound", lower
+            )
+            if why is not None:
+                return _SettlePlan("refuse", why)
+            # DEFER356 R7 P3 (Kimi, #361): the working row at the same stored eight-place scale as
+            # the terminal comparison in ``settle``: a figure under the bound by less than one
+            # representable tick is equal at the scale the book keeps. The conductor's RECONFLOOR
+            # R3 scale, extended once more; Kevin was told in the DEFER356 PR body.
+            if figure.quantize(Decimal("0.00000001")) < lower.quantize(Decimal("0.00000001")):
                 return _SettlePlan(
                     "refuse",
                     f"venue fill figure {figure} is below the witnessed lower bound {lower}",

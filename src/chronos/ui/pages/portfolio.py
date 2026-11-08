@@ -7,6 +7,7 @@ from typing import Any
 import streamlit as st
 
 from chronos.config.settings import get_settings
+from chronos.domain.enums import AccountSummaryProvenance
 from chronos.ui.api_client import ApiClient, ApiClientError
 from chronos.ui.pages import render_reasons, value_or_dash
 
@@ -61,17 +62,32 @@ def _render_account_summary(client: ApiClient) -> None:
     except ApiClientError as error:
         st.error(str(error))
         return
+    verified_response = (
+        summary.get("provenance") == AccountSummaryProvenance.VERIFIED_RESPONSE.value
+    )
+    if verified_response:
+        st.caption("Account provenance: VERIFIED_RESPONSE (direct response; read-only display).")
+    else:
+        st.warning(
+            "Account provenance UNKNOWN: balances may come from an unverified cache. "
+            "Read-only display only; unavailable for financial decisions."
+        )
+    suffix = "" if verified_response else " (unverified)"
     currency = value_or_dash(summary.get("currency"))
     columns = st.columns(4)
     columns[0].metric("Account", value_or_dash(summary.get("account_id")))
     columns[1].metric(
-        "Net liquidation", f"{value_or_dash(summary.get('net_liquidation'))} {currency}"
+        f"Net liquidation{suffix}", f"{value_or_dash(summary.get('net_liquidation'))} {currency}"
     )
-    columns[2].metric("Total cash", f"{value_or_dash(summary.get('total_cash'))} {currency}")
-    columns[3].metric("Buying power", f"{value_or_dash(summary.get('buying_power'))} {currency}")
+    columns[2].metric(
+        f"Total cash{suffix}", f"{value_or_dash(summary.get('total_cash'))} {currency}"
+    )
+    columns[3].metric(
+        f"Buying power{suffix}", f"{value_or_dash(summary.get('buying_power'))} {currency}"
+    )
     as_of = summary.get("as_of")
     if as_of is not None:
-        st.caption(f"As of {as_of}")
+        st.caption(f"Local read completion time: {as_of} (not broker valuation time).")
 
 
 def _render_positions(client: ApiClient) -> None:

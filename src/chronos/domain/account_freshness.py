@@ -1,11 +1,11 @@
-"""Fail closed on the age of a broker adapter's local account-summary read."""
+"""Require bounded local-read age and verified adapter response provenance for money use."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from chronos.domain.enums import BrokerMode
+from chronos.domain.enums import AccountSummaryProvenance, BrokerMode
 
 MAX_ACCOUNT_SUMMARY_AGE_SECONDS = 30
 
@@ -17,6 +17,7 @@ class AccountSummaryFreshnessReason(StrEnum):
     INVALID_MAX_AGE = "INVALID_MAX_AGE"
     FUTURE_DATED = "FUTURE_DATED"
     STALE = "STALE"
+    UNVERIFIED_PROVENANCE = "UNVERIFIED_PROVENANCE"
 
 
 class AccountSummaryFreshnessError(ValueError):
@@ -35,17 +36,33 @@ def account_summary_check_time(*, broker_mode: BrokerMode, demo_now: datetime) -
     return datetime.now(UTC)
 
 
+def account_summary_provenance(summary: object) -> AccountSummaryProvenance:
+    """Preserve only a typed verified label; missing/broken reads stay UNKNOWN."""
+
+    try:
+        value = getattr(summary, "provenance", AccountSummaryProvenance.UNKNOWN)
+    except Exception:
+        return AccountSummaryProvenance.UNKNOWN
+    if value is AccountSummaryProvenance.VERIFIED_RESPONSE:
+        return AccountSummaryProvenance.VERIFIED_RESPONSE
+    return AccountSummaryProvenance.UNKNOWN
+
+
 def require_account_summary_freshness(
     as_of: datetime | None,
     *,
     now: datetime,
     max_age_seconds: int,
+    provenance: AccountSummaryProvenance = AccountSummaryProvenance.UNKNOWN,
 ) -> None:
-    """Refuse missing, invalid, future-dated, or over-age local read stamps.
+    """Refuse unverified provenance and invalid or over-age local read stamps.
 
     The configured age is defense-in-depth bounded here as well as in Settings,
     so a non-Settings caller cannot widen the maximum observation window. The
     stamp does not prove when the broker valued or last updated cached balances.
+    Provenance is a trusted adapter assertion of a direct response, including
+    controlled local/simulated replies, not broker valuation-time attestation.
+    Missing or malformed proof never becomes trusted because a stamp is new.
     """
 
     if (
@@ -67,3 +84,5 @@ def require_account_summary_freshness(
         raise AccountSummaryFreshnessError(AccountSummaryFreshnessReason.FUTURE_DATED)
     if age > timedelta(seconds=max_age_seconds):
         raise AccountSummaryFreshnessError(AccountSummaryFreshnessReason.STALE)
+    if provenance is not AccountSummaryProvenance.VERIFIED_RESPONSE:
+        raise AccountSummaryFreshnessError(AccountSummaryFreshnessReason.UNVERIFIED_PROVENANCE)

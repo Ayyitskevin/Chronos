@@ -27,6 +27,7 @@ from chronos.config.limits import (
 from chronos.config.settings import Settings
 from chronos.domain.account_freshness import (
     AccountSummaryFreshnessError,
+    account_summary_provenance,
     require_account_summary_freshness,
 )
 from chronos.domain.enums import (
@@ -506,6 +507,7 @@ class ShortPutCandidateService:
         try:
             require_account_summary_freshness(
                 getattr(snapshot.account, "as_of", None),
+                provenance=account_summary_provenance(snapshot.account),
                 now=evaluated_at,
                 max_age_seconds=self._settings.account_summary_max_age_seconds,
             )
@@ -547,6 +549,7 @@ class ShortPutCandidateService:
             try:
                 require_account_summary_freshness(
                     getattr(account, "as_of", None),
+                    provenance=account_summary_provenance(account),
                     now=observation.evaluated_at,
                     max_age_seconds=self._settings.account_summary_max_age_seconds,
                 )

@@ -18,7 +18,7 @@ from chronos.domain.account_freshness import (
     account_summary_check_time,
     require_account_summary_freshness,
 )
-from chronos.domain.enums import BrokerMode, OrderIntent
+from chronos.domain.enums import AccountSummaryProvenance, BrokerMode, OrderIntent
 from chronos.domain.models import AccountSummary
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import build_option_intent
@@ -45,6 +45,7 @@ def _account_summary(as_of: datetime | None) -> AccountSummary:
         # Model adapters promise AwareDatetime. This constructs the malformed
         # state a broken/custom adapter could still return at runtime.
         return AccountSummary.model_construct(
+            provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
             account_id=PAPER_ACCOUNT,
             net_liquidation=Decimal("100000"),
             total_cash=Decimal("80000"),
@@ -52,6 +53,7 @@ def _account_summary(as_of: datetime | None) -> AccountSummary:
             as_of=None,
         )
     return AccountSummary(
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         account_id=PAPER_ACCOUNT,
         net_liquidation=Decimal("100000"),
         total_cash=Decimal("80000"),
@@ -265,7 +267,7 @@ def test_live_drawdown_refuses_stale_account_summary_without_breaker_side_effect
         _session_drawdown=breaker,
     )
 
-    nlv, _as_of, error = OrderSubmissionBoundary._read_net_liquidation(boundary)
+    nlv, _as_of, _provenance, error = OrderSubmissionBoundary._read_net_liquidation(boundary)
     refused, reason = OrderSubmissionBoundary._drawdown_evidence(
         boundary,
         nlv=nlv,
@@ -287,6 +289,7 @@ def test_live_drawdown_rechecks_account_age_at_the_post_io_clock() -> None:
         boundary,
         nlv=Decimal("100000"),
         as_of=DEMO_NOW,
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         nlv_error="",
         now=DEMO_NOW + timedelta(seconds=29),
     )
@@ -294,6 +297,7 @@ def test_live_drawdown_rechecks_account_age_at_the_post_io_clock() -> None:
         boundary,
         nlv=Decimal("100000"),
         as_of=DEMO_NOW,
+        provenance=AccountSummaryProvenance.VERIFIED_RESPONSE,
         nlv_error="",
         now=DEMO_NOW + timedelta(seconds=31),
     )
