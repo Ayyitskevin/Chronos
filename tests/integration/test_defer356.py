@@ -210,7 +210,8 @@ def _held_typed_and_the_other_settles(rig: Rig, report, before, *, label: str) -
     held = {item.intent_id: item.reason for item in report.unresolved}
     assert set(held) == {"intent-1"}
     assert held["intent-1"].startswith(label)
-    assert "exceeds the order quantity 10; held for review" in held["intent-1"]
+    assert "exceeds the order quantity 10" in held["intent-1"]  # the book's scale: 10.00000000
+    assert held["intent-1"].endswith("; held for review")
     assert rig.status("intent-2") is L.CANCELLED
     assert {item.intent_id for item in report.applied_updates} == {"intent-2"}
     return held["intent-1"]
