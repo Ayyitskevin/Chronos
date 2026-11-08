@@ -140,6 +140,9 @@ in the log, and in that pass's reconciliation run row. It only names the hold: t
 operator route, it adds no exit, and it refuses nothing the two restart blockers did not already
 refuse. When the venue row, its execution and any completed record have all left the snapshot, the
 intent stays held but `FILL_FLOOR_HOLD` is not shown, because no venue figure is below anything.
+A figure that is a placeholder or exceeds the order quantity ("held for review", DEFER356-R7) is a bad
+figure, not a recorded floor the venue went below: it keeps the restart blockers and carries no
+`FILL_FLOOR_HOLD`.
 
 1. Restore the gateway session (log in, 2FA).
 2. Check platform state:
