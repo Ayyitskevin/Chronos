@@ -139,19 +139,25 @@ def log_fill_floor_holds(restart: OrderRestartReconciliationReport, *, operation
     read back to decide anything.
     """
 
-    for item in restart.fill_floor_holds:
-        hold = item.fill_floor_hold
-        if hold is None:  # fill_floor_holds already filtered; keeps the type checker honest
-            continue
-        figures = hold.as_dict()
-        _LOGGER.warning(
-            "Fill floor hold on intent %s: venue figure %s is below %s (%s); no operator exit",
-            item.intent_id,
-            figures["venue_figure"],
-            figures["floor_figure"],
-            figures["basis"],
-            extra={"event": "fill_floor_hold", "operation": operation},
-        )
+    # FLOORHOLD P3-1: observability must never cause a refusal. This runs after readiness is
+    # published, inside the startup ``try`` and the reconcile route; an error here is logged and
+    # swallowed so neither can turn it into a startup fault or a 500.
+    try:
+        for item in restart.fill_floor_holds:
+            hold = item.fill_floor_hold
+            if hold is None:  # fill_floor_holds already filtered; keeps the type checker honest
+                continue
+            figures = hold.as_dict()
+            _LOGGER.warning(
+                "Fill floor hold on intent %s: venue figure %s is below %s (%s); no operator exit",
+                item.intent_id,
+                figures["venue_figure"],
+                figures["floor_figure"],
+                figures["basis"],
+                extra={"event": "fill_floor_hold", "operation": operation},
+            )
+    except Exception:
+        _LOGGER.exception("Fill floor hold logging failed; the reconcile result is unchanged")
 
 
 @dataclass(frozen=True, slots=True)

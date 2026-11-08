@@ -133,3 +133,34 @@ def test_the_run_row_names_the_hold_with_the_intent_and_both_figures_and_nothing
         account_fingerprint="fp",
     )
     assert all("fill_floor_hold" not in d for d in plain_snapshot.decisions)
+
+
+def test_a_placeholder_or_overfilled_floor_is_not_a_real_floor() -> None:
+    """FLOORHOLD-R2 P2-1: only a finite floor no larger than the order quantity is a recorded or
+    witnessed real fill; a placeholder (1e20, UNSET_DECIMAL, Infinity) or an overfill is not."""
+    from chronos.orders.reconciliation_recovery import _real_floor, _write_floor_hold
+    from chronos.persistence.order_repositories import RecordedFillsAdvanced
+
+    quantity = Decimal("10")
+    assert _real_floor(Decimal("10"), quantity) and _real_floor(Decimal("0"), quantity)
+    for bad in ("10.00000001", "1E+20", str(2**127 - 1), "Infinity", "NaN"):
+        assert not _real_floor(Decimal(bad), quantity), bad
+
+    real = RecordedFillsAdvanced("i", recorded=Decimal("7"), attempted=Decimal("0"))
+    placeholder = RecordedFillsAdvanced("i", recorded=Decimal("1E+20"), attempted=Decimal("0"))
+    hold = _write_floor_hold(real, quantity)
+    assert hold is not None and hold.floor == Decimal("7")
+    assert _write_floor_hold(placeholder, quantity) is None
+    assert _write_floor_hold(ValueError("other"), quantity) is None
+
+
+def test_logging_a_hold_can_never_raise() -> None:
+    """FLOORHOLD-R2 P3-1: observability cannot cause a refusal; a failure in it is swallowed."""
+    from chronos.runtime import log_fill_floor_holds
+
+    class Broken:
+        @property
+        def fill_floor_holds(self) -> tuple[RestartOrderObservation, ...]:
+            raise RuntimeError("boom")
+
+    log_fill_floor_holds(Broken(), operation="operator_reconcile")  # type: ignore[arg-type]

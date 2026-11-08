@@ -79,8 +79,25 @@ def planner_row_bound(rig: Any) -> None:
     rig.venue.execs = [venue_execution("blank", "4", PRIOR, ref=None, perm=None)]
 
 
+UNSET_DECIMAL = Decimal(2**127 - 1)  # ibapi.const.UNSET_DECIMAL
+
+
+def planner_row_bound_at_quantity(rig: Any) -> None:
+    """The edge of the #361 quantity bound: row-bound executions sum to exactly 10 of a 10 share
+    order, a real witnessed fill, and the terminal row says 0: a floor hold."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    rig.venue.execs = [
+        venue_execution("blank-1", "6", PRIOR, ref=None, perm=None),
+        venue_execution("blank-2", "4", PRIOR, ref=None, perm=None),
+    ]
+
+
 def planner_row_bound_over_quantity(rig: Any) -> None:
-    """The #361 quantity bound: row-bound executions sum to 10.00000001 of a 10 share order."""
+    """The #361 quantity bound: row-bound executions sum to 10.00000001 of a 10 share order. An
+    overfill is a bad figure, not a floor: untyped (FLOORHOLD-R2 P2-1)."""
 
     rig.seed()
     rig.pending()
@@ -89,6 +106,78 @@ def planner_row_bound_over_quantity(rig: Any) -> None:
         venue_execution("blank-1", "6", PRIOR, ref=None, perm=None),
         venue_execution("blank-2", "4.00000001", PRIOR, ref=None, perm=None),
     ]
+
+
+def planner_placeholder_execution(rig: Any) -> None:
+    """A placeholder-sized blank-reference execution (1e20) against a terminal row of 0."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    rig.venue.execs = [venue_execution("placeholder", Decimal("1E+20"), PRIOR, ref=None, perm=None)]
+
+
+def planner_placeholder_terminal_figure(rig: Any) -> None:
+    """DEFER356-R7: a terminal row whose figure is ibapi's UNSET_DECIMAL (built past validation,
+    as the R7 tests do)."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [
+        venue_order(L.CANCELLED, "0").model_copy(
+            update={"filled_quantity": UNSET_DECIMAL, "remaining_quantity": Decimal("0")}
+        )
+    ]
+
+
+def planner_placeholder_working_figure(rig: Any) -> None:
+    """DEFER356-R7: a working PendingCancel row at UNSET_DECIMAL (the in-place path)."""
+
+    rig.seed()
+    rig.pending()
+    rig.venue.open = [
+        venue_order(L.CANCEL_PENDING, "0").model_copy(
+            update={"filled_quantity": UNSET_DECIMAL, "remaining_quantity": Decimal("0")}
+        )
+    ]
+
+
+def planner_placeholder_recorded_figure(rig: Any) -> None:
+    """DEFER356-R7: the BOOK holds a placeholder fill (1E+20) and the terminal row says 0. The
+    recorded figure is not a real fill, so this is not a floor the venue went below."""
+
+    rig.seed()
+    rig.event(
+        L.PARTIALLY_FILLED,
+        at=PRIOR,
+        filled="1E+20",
+        quantity=Decimal("1E+20"),
+        source="FILL_PROGRESS",
+    )
+    rig.pending()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+
+
+def legacy_placeholder_recorded_figure(rig: Any) -> None:
+    """The legacy resolver with a placeholder recorded fill (1E+20) and a terminal row of 0."""
+
+    rig.seed()
+    rig.event(
+        L.SUBMITTED,
+        at=EARLIER_TODAY,
+        filled="1E+20",
+        quantity=Decimal("1E+20"),
+        source="FILL_PROGRESS",
+    )
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+
+
+def legacy_placeholder_execution(rig: Any) -> None:
+    """The legacy resolver with a placeholder-sized execution on a CANCELLED@0 row."""
+
+    rig.seed()
+    rig.venue.open = [venue_order(L.CANCELLED, "0")]
+    rig.venue.execs = [venue_execution("placeholder", UNSET_DECIMAL, PRIOR, ref=None, perm=None)]
 
 
 def recovered_submitted_row_bound(rig: Any) -> None:
@@ -229,12 +318,68 @@ SCENARIOS: tuple[FloorScenario, ...] = (
         "from row-bound snapshot executions",
     ),
     FloorScenario(
+        "planner-row-bound-at-quantity",
+        planner_row_bound_at_quantity,
+        "ROW_BOUND_EXECUTIONS",
+        "10",
+        "0",
+        "from row-bound snapshot executions",
+    ),
+    FloorScenario(
         "planner-row-bound-over-quantity",
         planner_row_bound_over_quantity,
-        "ROW_BOUND_EXECUTIONS",
-        "10.00000001",
-        "0",
+        None,
+        None,
+        None,
         "exceed the order quantity",
+    ),
+    FloorScenario(
+        "planner-placeholder-execution",
+        planner_placeholder_execution,
+        None,
+        None,
+        None,
+        "exceed the order quantity",
+    ),
+    FloorScenario(
+        "planner-placeholder-terminal-figure",
+        planner_placeholder_terminal_figure,
+        None,
+        None,
+        None,
+        "venue fill figure",
+    ),
+    FloorScenario(
+        "planner-placeholder-working-figure",
+        planner_placeholder_working_figure,
+        None,
+        None,
+        None,
+        "venue fill figure",
+    ),
+    FloorScenario(
+        "planner-placeholder-recorded-figure",
+        planner_placeholder_recorded_figure,
+        None,
+        None,
+        None,
+        "witnessed lower bound",
+    ),
+    FloorScenario(
+        "legacy-placeholder-recorded-figure",
+        legacy_placeholder_recorded_figure,
+        None,
+        None,
+        None,
+        "filled already recorded",
+    ),
+    FloorScenario(
+        "legacy-placeholder-execution",
+        legacy_placeholder_execution,
+        None,
+        None,
+        None,
+        "terminal venue figure is below",
     ),
     FloorScenario(
         "recovered-submitted-row-bound",

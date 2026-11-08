@@ -170,10 +170,21 @@ class OrderRestartReconciliationReport:
         return self.broker_evidence_complete and not self.remaining_active
 
 
-def _write_floor_hold(refused: Exception) -> FillFloorHold | None:
-    """The atomic floor refusing the write itself (FLOORHOLD): typed only for that refusal."""
+def _real_floor(floor: Decimal, quantity: Decimal) -> bool:
+    """FLOORHOLD P2-1: a floor is a recorded or witnessed REAL fill only if it is a finite figure
+    no larger than the order quantity. A placeholder (ibapi sizes from 1e20) or an overfill is a
+    bad figure, held for review by its own reason, never a fill-floor hold."""
 
-    if not isinstance(refused, RecordedFillsAdvanced):
+    return floor.is_finite() and floor <= quantity
+
+
+def _write_floor_hold(refused: Exception, quantity: Decimal) -> FillFloorHold | None:
+    """The atomic floor refusing the write itself (FLOORHOLD): typed only for that refusal, and
+    only when the floor it protects is a real fill."""
+
+    if not isinstance(refused, RecordedFillsAdvanced) or not _real_floor(
+        refused.recorded, quantity
+    ):
         return None
     return FillFloorHold(
         FillFloorBasis.WRITE_FLOOR, floor=refused.recorded, venue=refused.attempted
@@ -707,7 +718,9 @@ def _unresolved_evidence_reason(
     if below is not None:
         row_fills = format(below.filled_quantity.normalize(), "f")
         recorded = format(Decimal(str(recorded_filled_quantity)).normalize(), "f")
-        if hold_out is not None:
+        if hold_out is not None and _real_floor(
+            Decimal(str(recorded_filled_quantity)), intent.quantity
+        ):
             hold_out.append(
                 FillFloorHold(
                     FillFloorBasis.RECORDED_FILLS,
@@ -726,7 +739,7 @@ def _unresolved_evidence_reason(
         )
         if _terminal_below_snapshot_fills(order, witnesses):
             witnessed = sum((execution.quantity for execution in witnesses), Decimal("0"))
-            if hold_out is not None:
+            if hold_out is not None and _real_floor(witnessed, intent.quantity):
                 hold_out.append(
                     FillFloorHold(
                         FillFloorBasis.SNAPSHOT_EXECUTIONS,
@@ -1162,7 +1175,7 @@ class OrderRestartReconciler:
                             if isinstance(refused, OrderLifecycleError)
                             else str(refused)
                         ),
-                        fill_floor_hold=_write_floor_hold(refused),
+                        fill_floor_hold=_write_floor_hold(refused, intent.quantity),
                     )
                 )
                 continue
@@ -1436,11 +1449,8 @@ class OrderRestartReconciler:
             )
         )
         if not identity_ok:
-            # FLOORHOLD: the floor reasons follow the identity checks in the reason function, so
-            # an identity refusal reaches them only if the two identity tests ever disagree. The
-            # tag is kept so a hold found there would still be typed; no test reaches it (an
-            # assertion here ran over the unit, integration and safety suites and never fired).
-            identity_holds: list[FillFloorHold] = []
+            # FLOORHOLD P3-2: no fill-floor tag on this path; the floor reasons follow the identity
+            # checks in the reason function, so it is never reached with one (shown at R1).
             identity_reason = _unresolved_evidence_reason(
                 intent,
                 open_orders=open_orders,
@@ -1450,11 +1460,8 @@ class OrderRestartReconciler:
                 expected_broker_client_id=self._expected_broker_client_id,
                 persisted_broker_order_id=persisted_broker_order_id,
                 persisted_permanent_id=persisted_permanent_id,
-                hold_out=identity_holds,
             )
-            return _SettlePlan(
-                "refuse", identity_reason, hold=identity_holds[0] if identity_holds else None
-            )
+            return _SettlePlan("refuse", identity_reason)
         figures = self._tracker.fill_figures(
             intent.intent_id, current_account_id=current_account_id
         )
@@ -1517,10 +1524,8 @@ class OrderRestartReconciler:
                         "refuse",
                         f"snapshot fill conflict: row-bound snapshot executions {row_bound} exceed "
                         f"the order quantity {quantity}; held for review",
-                        # a hold of this kind only where the venue figure really is below them
-                        hold=FillFloorHold(FillFloorBasis.ROW_BOUND_EXECUTIONS, row_bound, figure)
-                        if figure < row_bound
-                        else None,
+                        # FLOORHOLD P2-1: untyped. An overfill or a placeholder is no recorded
+                        # floor the venue went below, so it is not a fill-floor hold.
                     )
                 if figure.quantize(Decimal("0.00000001")) < row_bound.quantize(
                     Decimal("0.00000001")
@@ -1879,7 +1884,7 @@ class OrderRestartReconciler:
                         broker_status=plan.to_status,
                         transition_applied=False,
                         reason=f"fill_floor_conflict: RecordedFillsAdvanced: {refused}",
-                        fill_floor_hold=_write_floor_hold(refused),
+                        fill_floor_hold=_write_floor_hold(refused, intent.quantity),
                     )
                 )
                 continue
